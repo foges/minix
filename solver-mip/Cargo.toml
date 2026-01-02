@@ -1,0 +1,14 @@
+[package]
+name = "solver-mip"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Mixed-integer programming layer for minix solver"
+
+[dependencies]
+solver-core = { path = "../solver-core" }
+thiserror.workspace = true
+log.workspace = true

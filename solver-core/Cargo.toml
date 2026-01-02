@@ -1,0 +1,44 @@
+[package]
+name = "solver-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "State-of-the-art convex optimization solver core library"
+
+[dependencies]
+# Linear algebra
+nalgebra.workspace = true
+sprs.workspace = true
+ldl.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+log.workspace = true
+
+# Optional parallelism
+rayon = { workspace = true, optional = true }
+
+# RNG for deterministic initialization
+rand.workspace = true
+rand_chacha.workspace = true
+
+[dev-dependencies]
+approx.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+env_logger.workspace = true
+
+[features]
+default = []
+parallel = ["rayon"]
+gpu = []  # Placeholder for future GPU support
+
+# Benchmarks will be added later
+# [[bench]]
+# name = "cone_bench"
+# harness = false

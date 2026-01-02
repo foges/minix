@@ -1,0 +1,15 @@
+[package]
+name = "solver-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "C ABI for minix solver"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+solver-core = { path = "../solver-core" }

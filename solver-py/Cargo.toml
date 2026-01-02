@@ -1,0 +1,17 @@
+[package]
+name = "solver-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Python bindings for minix solver"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+solver-core = { path = "../solver-core" }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
