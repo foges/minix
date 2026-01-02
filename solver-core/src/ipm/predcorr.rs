@@ -49,10 +49,14 @@ pub fn predictor_corrector_step(
     let m = prob.num_constraints();
 
     // ======================================================================
-    // Step 1: Compute NT scaling for all cones
+    // Step 1: Compute NT scaling for all cones with adaptive regularization
     // ======================================================================
     let mut scaling: Vec<ScalingBlock> = Vec::new();
     let mut offset = 0;
+
+    // Track minimum s and z values for adaptive regularization
+    let mut s_min = f64::INFINITY;
+    let mut z_min = f64::INFINITY;
 
     for cone in cones {
         let dim = cone.dim();
@@ -71,6 +75,14 @@ pub fn predictor_corrector_step(
         let s = &state.s[offset..offset + dim];
         let z = &state.z[offset..offset + dim];
 
+        // Track minimum values for adaptive regularization
+        for &si in s.iter() {
+            if si < s_min { s_min = si; }
+        }
+        for &zi in z.iter() {
+            if zi < z_min { z_min = zi; }
+        }
+
         // Compute NT scaling based on cone type
         let scale = nt::compute_nt_scaling(s, z, cone.as_ref())
             .unwrap_or_else(|_| {
@@ -83,6 +95,31 @@ pub fn predictor_corrector_step(
 
         scaling.push(scale);
         offset += dim;
+    }
+
+    // Adaptive regularization: increase when near boundaries
+    // When s_min or z_min < μ/100, the scaling becomes ill-conditioned
+    // Boost regularization to stabilize the solve
+    let conditioning_threshold = mu / 100.0;
+    let needs_extra_reg = s_min < conditioning_threshold || z_min < conditioning_threshold;
+    let extra_reg = if needs_extra_reg {
+        // Add regularization proportional to how close we are to boundary
+        let ratio = conditioning_threshold / s_min.min(z_min).max(1e-15);
+        (ratio.sqrt() * 1e-4).min(1e-2)  // Cap at 1e-2
+    } else {
+        0.0
+    };
+
+    // Apply extra regularization by modifying the scaling
+    if extra_reg > 0.0 {
+        for block in scaling.iter_mut() {
+            if let ScalingBlock::Diagonal { d } = block {
+                for di in d.iter_mut() {
+                    // Add regularization to the scaling (H_reg = H + extra_reg * I)
+                    *di = (*di * *di + extra_reg).sqrt();
+                }
+            }
+        }
     }
 
     // ======================================================================
@@ -227,27 +264,33 @@ pub fn predictor_corrector_step(
     let mut dz = vec![0.0; m];
     let dtau;
 
-    // Build corrected RHS with Mehrotra correction (design doc §7.3.1)
+    // Build corrected RHS with improved centering (numerically stable formulation)
     //
     // For the complementarity condition s ∘ z = μe, the Newton system gives:
     //   s ∘ dz + ds ∘ z = -s ∘ z + σμe - ds_aff ∘ dz_aff
     //
-    // The Mehrotra correction term η = ds_aff ∘ dz_aff accounts for second-order effects.
-    // For NonNeg cones, ∘ is elementwise multiplication.
-    // For SOC cones, ∘ is the Jordan product.
+    // The standard Mehrotra correction (σμ - ds_aff·dz_aff) / s blows up when s→0.
     //
-    // The RHS modification for the KKT system is:
-    //   rhs_z_corr[i] = rhs_z[i] + (σμ - ds_aff[i] * dz_aff[i]) / s[i]  (for NonNeg)
+    // IMPROVED APPROACH: Use a "scaled centering" formulation.
+    // Instead of modifying rhs_z, we solve two systems:
+    //   1. Pure Newton: K [dx0, dz0] = [-r_x, -r_z]
+    //   2. Centering:   K [dx_c, dz_c] = [0, centering_rhs]
+    // Then combine: dx = dx0 + σ·dx_c, dz = dz0 + σ·dz_c
     //
-    // IMPORTANT: To avoid numerical instability when s→0, we cap the correction term.
-    // The correction should never dominate the step direction.
+    // For the centering RHS, we use: centering_rhs = H·e - z
+    // where H is the NT scaling and e is the scaled identity.
+    // This formulation is stable because H and z are both well-conditioned.
+    //
+    // For simplicity, we use a hybrid approach:
+    // - When well-conditioned: use full Mehrotra correction
+    // - When ill-conditioned: use pure centering without second-order term
     //
     let target_mu = sigma * mu;
     let mut rhs_z_corr = rhs_z.to_vec();
 
-    // Apply Mehrotra correction per cone with safeguards
+    // Apply centering correction per cone with adaptive strategy
     let mut offset = 0;
-    for cone in cones {
+    for (cone_idx, cone) in cones.iter().enumerate() {
         let dim = cone.dim();
         if dim == 0 {
             continue;
@@ -259,36 +302,37 @@ pub fn predictor_corrector_step(
             continue;
         }
 
-        // For NonNeg cones: Mehrotra correction with safeguards
-        //
-        // The correction term is (σμ - ds_aff*dz_aff) / s_i.
-        // When s_i is small, this blows up. To prevent numerical issues:
-        // 1. Skip correction when s_i < threshold (use pure Newton)
-        // 2. Cap the correction magnitude
-        //
-        // A threshold proportional to μ works well: skip if s_i < μ/10.
-        // This ensures the correction term (σμ/s) < 10σ ≈ 10.
-        //
-        let threshold = mu / 10.0;
+        // Compute conditioning metric for this cone
+        let s_slice = &state.s[offset..offset + dim];
+        let z_slice = &state.z[offset..offset + dim];
+        let s_min_cone: f64 = s_slice.iter().cloned().fold(f64::INFINITY, f64::min);
+        let z_min_cone: f64 = z_slice.iter().cloned().fold(f64::INFINITY, f64::min);
+        let well_conditioned = s_min_cone > mu / 5.0 && z_min_cone > mu / 5.0;
+
         for i in offset..offset + dim {
             let s_i = state.s[i];
             let z_i = state.z[i];
 
-            // Only apply correction if s and z are well away from boundary
-            if s_i > threshold && z_i > threshold {
+            if well_conditioned {
+                // Full Mehrotra correction (safe when well-conditioned)
                 let mehrotra_term = ds_aff[i] * dz_aff[i];
                 let correction = (target_mu - mehrotra_term) / s_i;
-
-                // Cap the correction to a reasonable multiple of 1/s_i
-                let max_correction = 10.0;  // At most add 10 to rhs_z
-                let capped_correction = correction.max(-max_correction).min(max_correction);
-
-                rhs_z_corr[i] += capped_correction;
+                let max_correction = 20.0;
+                rhs_z_corr[i] += correction.max(-max_correction).min(max_correction);
+            } else {
+                // Simplified centering: push toward s*z = σμ
+                // Use correction = σμ/(s*z)^{1/2} - (s*z)^{1/2} which is bounded
+                let sz = (s_i * z_i).max(1e-16);
+                let sz_sqrt = sz.sqrt();
+                let target_sqrt = target_mu.sqrt();
+                // This correction is O(1) even when s→0
+                let correction = (target_sqrt - sz_sqrt) / sz_sqrt.max(1e-8);
+                rhs_z_corr[i] += correction.max(-5.0).min(5.0);
             }
-            // If s or z are too small, skip centering and let pure Newton take over
         }
 
         offset += dim;
+        let _ = cone_idx;  // Suppress unused warning
     }
 
     kkt.solve(&factor, &rhs_x, &rhs_z_corr, &mut dx, &mut dz);
@@ -509,9 +553,25 @@ fn compute_centering_parameter_with_cones(
 
     let mu_aff = dot_product / (barrier_degree as f64);
 
-    // σ = (μ_aff / μ)^3
+    // σ = (μ_aff / μ)^3 is the standard Mehrotra heuristic
     let ratio = mu_aff / mu.max(1e-10);
-    let sigma = ratio.powi(3);
+    let sigma_mehrotra = ratio.powi(3);
+
+    // Adaptive centering:
+    // - When affine step makes good progress (ratio < 0.5), use Mehrotra
+    // - When affine step is blocked (ratio ≈ 1), use smaller σ to still make some progress
+    //
+    // The key insight: if ratio ≈ 1, Mehrotra gives σ ≈ 1 (pure centering).
+    // But we want to make SOME progress, so cap σ at 0.9.
+    // This ensures target_mu = 0.9*mu, giving at least 10% reduction.
+    let sigma = if sigma_mehrotra < 0.5 {
+        // Good affine progress: use Mehrotra
+        sigma_mehrotra
+    } else {
+        // Poor affine progress: moderate centering
+        // σ = 0.9 gives good centering while still making progress
+        sigma_mehrotra.min(0.9)
+    };
 
     // Clamp to [0, 1]
     sigma.max(0.0).min(1.0)
@@ -540,7 +600,8 @@ mod tests {
         );
         assert!(sigma < 0.5, "σ should be small for good affine progress, got {}", sigma);
 
-        // Test that σ → 1 when affine step makes poor progress
+        // Test that σ is capped at 0.9 when affine step makes poor progress
+        // (This ensures we still make at least 10% progress toward optimality)
         let sigma = compute_centering_parameter_with_cones(
             0.01, // small alpha_aff (poor progress)
             1.0,
@@ -551,7 +612,7 @@ mod tests {
             &cones,
             3,
         );
-        assert!(sigma > 0.9, "σ should be large for poor affine progress, got {}", sigma);
+        assert!(sigma <= 0.9, "σ should be capped at 0.9 to ensure progress, got {}", sigma);
     }
 
     #[test]
