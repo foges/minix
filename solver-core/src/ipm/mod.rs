@@ -8,6 +8,7 @@ pub mod termination;
 
 use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone};
 use crate::linalg::kkt::KktSolver;
+use crate::presolve::ruiz::equilibrate;
 use crate::problem::{ProblemData, ConeSpec, SolverSettings, SolveResult, SolveStatus, SolveInfo};
 use hsde::{HsdeState, HsdeResiduals, compute_residuals, compute_mu};
 use predcorr::predictor_corrector_step;
@@ -36,15 +37,35 @@ pub fn solve_ipm(
     let n = prob.num_vars();
     let m = prob.num_constraints();
 
+    // Apply Ruiz equilibration for numerical stability
+    let (a_scaled, p_scaled, q_scaled, b_scaled, scaling) = equilibrate(
+        &prob.A,
+        prob.P.as_ref(),
+        &prob.q,
+        &prob.b,
+        settings.ruiz_iters,
+    );
+
+    // Create scaled problem
+    let scaled_prob = ProblemData {
+        P: p_scaled,
+        q: q_scaled,
+        A: a_scaled,
+        b: b_scaled,
+        cones: prob.cones.clone(),
+        var_bounds: prob.var_bounds.clone(),
+        integrality: prob.integrality.clone(),
+    };
+
     // Build cone kernels from cone specs
-    let cones = build_cones(&prob.cones)?;
+    let cones = build_cones(&scaled_prob.cones)?;
 
     // Compute total barrier degree
     let barrier_degree: usize = cones.iter().map(|c| c.barrier_degree()).sum();
 
     // Initialize HSDE state
     let mut state = HsdeState::new(n, m);
-    state.initialize_with_prob(&cones, prob);
+    state.initialize_with_prob(&cones, &scaled_prob);
 
     // Initialize residuals
     let mut residuals = HsdeResiduals::new(n, m);
@@ -56,7 +77,7 @@ pub fn solve_ipm(
     //   [A,  -(H)] [dz] = [rhs_z]
     // gives dx ≈ rhs_x/ε, which blows up for small ε.
     // Using ε=1e-4 provides stability while allowing good convergence.
-    let static_reg = if prob.P.is_none() {
+    let static_reg = if scaled_prob.P.is_none() {
         settings.static_reg.max(1e-4)  // LP: use at least 1e-4
     } else {
         settings.static_reg
@@ -87,7 +108,10 @@ pub fn solve_ipm(
     if settings.verbose {
         println!("Minix IPM Solver");
         println!("================");
-        println!("Problem: n = {}, m = {}, cones = {:?}", n, m, prob.cones.len());
+        println!("Problem: n = {}, m = {}, cones = {:?}", n, m, scaled_prob.cones.len());
+        if settings.ruiz_iters > 0 {
+            println!("Ruiz equilibration: {} iterations", settings.ruiz_iters);
+        }
         println!("Barrier degree: {}", barrier_degree);
         println!("Initial state: x={:?}, s={:?}, z={:?}, tau={}, kappa={}",
                  state.x, state.s, state.z, state.tau, state.kappa);
@@ -101,10 +125,10 @@ pub fn solve_ipm(
     // Main IPM loop
     while iter < settings.max_iter {
         // Compute residuals
-        compute_residuals(prob, &state, &mut residuals);
+        compute_residuals(&scaled_prob, &state, &mut residuals);
 
         // Check termination
-        if let Some(term_status) = check_termination(prob, &state, &residuals, mu, iter, &criteria) {
+        if let Some(term_status) = check_termination(&scaled_prob, &state, &residuals, mu, iter, &criteria) {
             status = term_status;
             break;
         }
@@ -112,7 +136,7 @@ pub fn solve_ipm(
         // Take predictor-corrector step
         let step_result = match predictor_corrector_step(
             &mut kkt,
-            prob,
+            &scaled_prob,
             &mut state,
             &residuals,
             &cones,
@@ -136,12 +160,12 @@ pub fn solve_ipm(
             let primal_res = rx_norm / state.tau.max(1.0);
             let dual_res = rz_norm / state.tau.max(1.0);
 
-            // Compute gap
+            // Compute gap (on scaled problem)
             let x_bar: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
             let z_bar: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
 
-            let qtx: f64 = prob.q.iter().zip(x_bar.iter()).map(|(qi, xi)| qi * xi).sum();
-            let btz: f64 = prob.b.iter().zip(z_bar.iter()).map(|(bi, zi)| bi * zi).sum();
+            let qtx: f64 = scaled_prob.q.iter().zip(x_bar.iter()).map(|(qi, xi)| qi * xi).sum();
+            let btz: f64 = scaled_prob.b.iter().zip(z_bar.iter()).map(|(bi, zi)| bi * zi).sum();
             let gap = (qtx + btz).abs();
 
             println!("{:4} {:12.4e} {:12.4e} {:12.4e} {:12.4e} {:8.4}",
@@ -162,26 +186,31 @@ pub fn solve_ipm(
         println!();
     }
 
-    // Extract solution
-    let x = if state.tau > 1e-8 {
+    // Extract solution in scaled space
+    let x_scaled: Vec<f64> = if state.tau > 1e-8 {
         state.x.iter().map(|xi| xi / state.tau).collect()
     } else {
         vec![0.0; n]
     };
 
-    let s = if state.tau > 1e-8 {
+    let s_scaled: Vec<f64> = if state.tau > 1e-8 {
         state.s.iter().map(|si| si / state.tau).collect()
     } else {
         vec![0.0; m]
     };
 
-    let z = if state.tau > 1e-8 {
+    let z_scaled: Vec<f64> = if state.tau > 1e-8 {
         state.z.iter().map(|zi| zi / state.tau).collect()
     } else {
         vec![0.0; m]
     };
 
-    // Compute objective value
+    // Unscale solution back to original coordinates
+    let x = scaling.unscale_x(&x_scaled);
+    let s = scaling.unscale_s(&s_scaled);
+    let z = scaling.unscale_z(&z_scaled);
+
+    // Compute objective value using ORIGINAL (unscaled) problem data
     let mut obj_val = 0.0;
     if let Some(ref p) = prob.P {
         let mut px = vec![0.0; n];
