@@ -197,6 +197,18 @@ pub fn predictor_corrector_step(
         ds_aff[row] -= (*val) * dx_aff[col];
     }
 
+    // For Zero cone components, force ds = 0 (s must remain 0)
+    let mut offset = 0;
+    for cone in cones {
+        let dim = cone.dim();
+        if cone.barrier_degree() == 0 {
+            for i in offset..offset + dim {
+                ds_aff[i] = 0.0;
+            }
+        }
+        offset += dim;
+    }
+
     // Compute affine step size (step-to-boundary)
     let alpha_aff = compute_step_size(&state.s, &ds_aff, &state.z, &dz_aff, cones, 1.0);
 
@@ -227,10 +239,13 @@ pub fn predictor_corrector_step(
     // The RHS modification for the KKT system is:
     //   rhs_z_corr[i] = rhs_z[i] + (σμ - ds_aff[i] * dz_aff[i]) / s[i]  (for NonNeg)
     //
+    // IMPORTANT: To avoid numerical instability when s→0, we cap the correction term.
+    // The correction should never dominate the step direction.
+    //
     let target_mu = sigma * mu;
     let mut rhs_z_corr = rhs_z.to_vec();
 
-    // Apply Mehrotra correction per cone
+    // Apply Mehrotra correction per cone with safeguards
     let mut offset = 0;
     for cone in cones {
         let dim = cone.dim();
@@ -244,16 +259,33 @@ pub fn predictor_corrector_step(
             continue;
         }
 
-        // For NonNeg cones: full Mehrotra correction
-        // The Mehrotra correction is: (σμ - ds_aff_i * dz_aff_i) / s_i
-        // This includes:
-        // 1. Centering term: σμ / s_i (pushes toward s*z = σμ)
-        // 2. Second-order correction: -ds_aff_i * dz_aff_i / s_i (accounts for curvature)
+        // For NonNeg cones: Mehrotra correction with safeguards
+        //
+        // The correction term is (σμ - ds_aff*dz_aff) / s_i.
+        // When s_i is small, this blows up. To prevent numerical issues:
+        // 1. Skip correction when s_i < threshold (use pure Newton)
+        // 2. Cap the correction magnitude
+        //
+        // A threshold proportional to μ works well: skip if s_i < μ/10.
+        // This ensures the correction term (σμ/s) < 10σ ≈ 10.
+        //
+        let threshold = mu / 10.0;
         for i in offset..offset + dim {
-            let s_i = state.s[i].max(1e-12);  // Avoid division by zero
-            // Full Mehrotra correction
-            let correction = (target_mu - ds_aff[i] * dz_aff[i]) / s_i;
-            rhs_z_corr[i] += correction;
+            let s_i = state.s[i];
+            let z_i = state.z[i];
+
+            // Only apply correction if s and z are well away from boundary
+            if s_i > threshold && z_i > threshold {
+                let mehrotra_term = ds_aff[i] * dz_aff[i];
+                let correction = (target_mu - mehrotra_term) / s_i;
+
+                // Cap the correction to a reasonable multiple of 1/s_i
+                let max_correction = 10.0;  // At most add 10 to rhs_z
+                let capped_correction = correction.max(-max_correction).min(max_correction);
+
+                rhs_z_corr[i] += capped_correction;
+            }
+            // If s or z are too small, skip centering and let pure Newton take over
         }
 
         offset += dim;
@@ -295,6 +327,18 @@ pub fn predictor_corrector_step(
     }
     for (val, (row, col)) in prob.A.iter() {
         ds[row] -= (*val) * dx[col];
+    }
+
+    // For Zero cone components, force ds = 0 (s must remain 0)
+    let mut offset = 0;
+    for cone in cones {
+        let dim = cone.dim();
+        if cone.barrier_degree() == 0 {
+            for i in offset..offset + dim {
+                ds[i] = 0.0;
+            }
+        }
+        offset += dim;
     }
 
     // ======================================================================

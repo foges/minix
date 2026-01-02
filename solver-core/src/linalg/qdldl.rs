@@ -189,17 +189,19 @@ impl QdldlSolver {
             }
         }
 
-        // Allocate workspace for factorization
-        let nnz_a = a_i.len();
-        let mut l_p = vec![0; self.n + 1];
-        let mut l_i = vec![0; nnz_a];
-        let mut l_x = vec![0.0; nnz_a];
-        let mut d = vec![0.0; self.n];
-        let mut d_inv = vec![0.0; self.n];
-
         // Get etree reference
         let etree = self.etree.as_ref().unwrap();
         let l_nz = self.l_nz.as_ref().unwrap();
+
+        // Compute total nonzeros in L from l_nz (fill-in can make L larger than A)
+        let nnz_l: usize = l_nz.iter().sum();
+
+        // Allocate workspace for factorization
+        let mut l_p = vec![0; self.n + 1];
+        let mut l_i = vec![0; nnz_l];
+        let mut l_x = vec![0.0; nnz_l];
+        let mut d = vec![0.0; self.n];
+        let mut d_inv = vec![0.0; self.n];
 
         // Workspace arrays
         let mut bwork = vec![ldl::Marker::Unused; self.n];

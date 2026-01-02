@@ -50,12 +50,14 @@ pub fn solve_ipm(
     let mut residuals = HsdeResiduals::new(n, m);
 
     // Initialize KKT solver
-    // For LPs (P=None), use higher regularization to stabilize the Schur complement
-    // computation in the two-solve strategy. The (1,1) block is only εI for LPs,
-    // and with ε=1e-9, the second solve K[Δx₂,Δz₂]=[-q,b] produces Δx₂≈1e9.
-    // Using ε=1e-6 stabilizes this without affecting solution accuracy much.
+    // For LPs (P=None), use higher regularization to stabilize the solve.
+    // The (1,1) block is only εI for LPs. With small ε, solving
+    //   [εI, A^T] [dx]   [rhs_x]
+    //   [A,  -(H)] [dz] = [rhs_z]
+    // gives dx ≈ rhs_x/ε, which blows up for small ε.
+    // Using ε=1e-4 provides stability while allowing good convergence.
     let static_reg = if prob.P.is_none() {
-        settings.static_reg.max(1e-6)  // LP: use at least 1e-6
+        settings.static_reg.max(1e-4)  // LP: use at least 1e-4
     } else {
         settings.static_reg
     };
