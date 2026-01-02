@@ -12,14 +12,30 @@ fn test_simple_lp() {
     // s.t. x1 + x2 = 1
     //      x1, x2 >= 0
     //
-    // Optimal: x = [0.5, 0.5], obj = 1.0
+    // Optimal: any point on the line x1 + x2 = 1 with x1, x2 >= 0
+    // e.g., x = [0, 1], [1, 0], or [0.5, 0.5], all give obj = 1.0
+    //
+    // Reformulated:
+    //   x1 + x2 + s_eq = 1, s_eq = 0  (equality)
+    //   -x1 + s_1 = 0, s_1 >= 0       (bound x1 >= 0)
+    //   -x2 + s_2 = 0, s_2 >= 0       (bound x2 >= 0)
+
+    // A is 3x2: [equality, bound x1, bound x2]
+    let a_triplets = vec![
+        (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 = 1
+        (1, 0, -1.0),              // -x1 + s_1 = 0
+        (2, 1, -1.0),              // -x2 + s_2 = 0
+    ];
 
     let prob = ProblemData {
         P: None,
         q: vec![1.0, 1.0],
-        A: sparse::from_triplets(1, 2, vec![(0, 0, 1.0), (0, 1, 1.0)]),
-        b: vec![1.0],
-        cones: vec![ConeSpec::Zero { dim: 1 }],
+        A: sparse::from_triplets(3, 2, a_triplets),
+        b: vec![1.0, 0.0, 0.0],
+        cones: vec![
+            ConeSpec::Zero { dim: 1 },    // equality constraint
+            ConeSpec::NonNeg { dim: 2 },  // bounds x >= 0
+        ],
         var_bounds: None,
         integrality: None,
     };
@@ -39,12 +55,19 @@ fn test_simple_lp() {
     println!("x = {:?}", result.x);
     println!("obj = {}", result.obj_val);
 
-    // The solver may not converge perfectly with simplified predictor-corrector
-    // but should make progress
     assert!(matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::MaxIters
     ));
+
+    // Check that solution is approximately optimal
+    if result.status == SolveStatus::Optimal {
+        let sum = result.x[0] + result.x[1];
+        assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: {}", sum);
+        assert!(result.x[0] >= -0.1);
+        assert!(result.x[1] >= -0.1);
+        assert!((result.obj_val - 1.0).abs() < 0.1);
+    }
 }
 
 #[test]
@@ -53,26 +76,37 @@ fn test_lp_with_inequality() {
     // s.t. x1 + x2 <= 1
     //      x1, x2 >= 0
     //
-    // Reformulated as:
-    // min -x1 - x2
-    // s.t. x1 + x2 + s = 1, s >= 0
-    //      x1, x2 >= 0
+    // Reformulated in standard form:
+    //   min -x1 - x2
+    //   s.t. x1 + x2 + s_ineq = 1   (inequality slack)
+    //       -x1 + s_x1 = 0          (bound on x1)
+    //       -x2 + s_x2 = 0          (bound on x2)
+    //        s_ineq, s_x1, s_x2 >= 0
     //
-    // Optimal: x = [1, 0] or [0, 1], obj = -1
+    // Optimal: x = [1, 0] or [0, 1] or [0.5, 0.5], obj = -1
+
+    // A is 3x2: rows are [inequality, bound x1, bound x2]
+    let a_triplets = vec![
+        (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 + s_ineq = 1
+        (1, 0, -1.0),              // -x1 + s_x1 = 0
+        (2, 1, -1.0),              // -x2 + s_x2 = 0
+    ];
 
     let prob = ProblemData {
         P: None,
         q: vec![-1.0, -1.0],
-        A: sparse::from_triplets(1, 2, vec![(0, 0, 1.0), (0, 1, 1.0)]),
-        b: vec![1.0],
-        cones: vec![ConeSpec::Zero { dim: 1 }],
+        A: sparse::from_triplets(3, 2, a_triplets),
+        b: vec![1.0, 0.0, 0.0],
+        cones: vec![ConeSpec::NonNeg { dim: 3 }],  // All slacks are nonnegative
         var_bounds: None,
         integrality: None,
     };
 
     let settings = SolverSettings {
         verbose: true,
-        max_iter: 50,
+        max_iter: 100,
+        tol_feas: 1e-6,
+        tol_gap: 1e-6,
         ..Default::default()
     };
 
@@ -87,27 +121,50 @@ fn test_lp_with_inequality() {
         result.status,
         SolveStatus::Optimal | SolveStatus::MaxIters
     ));
+
+    // Check that solution is approximately optimal (x1 + x2 = 1, x >= 0)
+    if result.status == SolveStatus::Optimal {
+        assert!((result.x[0] + result.x[1] - 1.0).abs() < 0.1);
+        assert!(result.x[0] >= -0.1);
+        assert!(result.x[1] >= -0.1);
+        assert!((result.obj_val - (-1.0)).abs() < 0.1);
+    }
 }
 
 #[test]
 fn test_simple_qp() {
     // min 0.5 * (x1^2 + x2^2) + x1 + x2
     // s.t. x1 + x2 = 1
+    //      x1, x2 >= 0  (need bounds for IPM to work)
     //
-    // Optimal: x = [0, 1] or [1, 0] (depends on initialization)
-    // At minimum, objective gradient should be balanced
+    // Optimal: x = [0.5, 0.5], obj = 1.25 (0.5*0.5 + 1)
+    //
+    // Reformulated:
+    //   x1 + x2 + s_eq = 1, s_eq = 0  (equality via Zero cone)
+    //   -x1 + s_1 = 0, s_1 >= 0       (bound x1 >= 0)
+    //   -x2 + s_2 = 0, s_2 >= 0       (bound x2 >= 0)
 
     let p_triplets = vec![
         (0, 0, 1.0),  // P[0,0] = 1
         (1, 1, 1.0),  // P[1,1] = 1
     ];
 
+    // A is 3x2: [equality, bound x1, bound x2]
+    let a_triplets = vec![
+        (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 = 1
+        (1, 0, -1.0),              // -x1 + s_1 = 0
+        (2, 1, -1.0),              // -x2 + s_2 = 0
+    ];
+
     let prob = ProblemData {
         P: Some(sparse::from_triplets(2, 2, p_triplets)),
         q: vec![1.0, 1.0],
-        A: sparse::from_triplets(1, 2, vec![(0, 0, 1.0), (0, 1, 1.0)]),
-        b: vec![1.0],
-        cones: vec![ConeSpec::Zero { dim: 1 }],
+        A: sparse::from_triplets(3, 2, a_triplets),
+        b: vec![1.0, 0.0, 0.0],
+        cones: vec![
+            ConeSpec::Zero { dim: 1 },    // equality constraint
+            ConeSpec::NonNeg { dim: 2 },  // bounds x >= 0
+        ],
         var_bounds: None,
         integrality: None,
     };
@@ -115,6 +172,8 @@ fn test_simple_qp() {
     let settings = SolverSettings {
         verbose: true,
         max_iter: 50,
+        tol_feas: 1e-6,
+        tol_gap: 1e-6,
         ..Default::default()
     };
 
@@ -134,6 +193,8 @@ fn test_simple_qp() {
     if result.status == SolveStatus::Optimal {
         let sum = result.x[0] + result.x[1];
         assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: x1 + x2 = {}", sum);
+        // Optimal is x = [0.5, 0.5], obj = 1.25
+        assert!((result.obj_val - 1.25).abs() < 0.1, "Objective value unexpected: {}", result.obj_val);
     }
 }
 

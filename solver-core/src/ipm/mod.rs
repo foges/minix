@@ -266,14 +266,29 @@ mod tests {
         // s.t. x1 + x2 = 1
         //      x1, x2 >= 0
         //
-        // Optimal: x = [0.5, 0.5], obj = 1.0
+        // Optimal: any point with x1 + x2 = 1, x >= 0, e.g., [0.5, 0.5], obj = 1.0
+        //
+        // Reformulated with bounds:
+        //   x1 + x2 + s_eq = 1, s_eq = 0  (equality)
+        //   -x1 + s_1 = 0, s_1 >= 0       (bound x1 >= 0)
+        //   -x2 + s_2 = 0, s_2 >= 0       (bound x2 >= 0)
+
+        // A is 3x2: [equality, bound x1, bound x2]
+        let a_triplets = vec![
+            (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 = 1
+            (1, 0, -1.0),              // -x1 + s_1 = 0
+            (2, 1, -1.0),              // -x2 + s_2 = 0
+        ];
 
         let prob = ProblemData {
             P: None,
             q: vec![1.0, 1.0],
-            A: sparse::from_triplets(1, 2, vec![(0, 0, 1.0), (0, 1, 1.0)]),
-            b: vec![1.0],
-            cones: vec![ConeSpec::Zero { dim: 1 }],
+            A: sparse::from_triplets(3, 2, a_triplets),
+            b: vec![1.0, 0.0, 0.0],
+            cones: vec![
+                ConeSpec::Zero { dim: 1 },    // equality constraint
+                ConeSpec::NonNeg { dim: 2 },  // bounds x >= 0
+            ],
             var_bounds: None,
             integrality: None,
         };
@@ -295,11 +310,12 @@ mod tests {
         // Check status
         assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::MaxIters));
 
-        // Check solution is approximately [0.5, 0.5]
-        // (may not be exact due to simplified predictor-corrector)
+        // Check solution satisfies constraints
         if result.status == SolveStatus::Optimal {
-            assert!((result.x[0] - 0.5).abs() < 0.1);
-            assert!((result.x[1] - 0.5).abs() < 0.1);
+            let sum = result.x[0] + result.x[1];
+            assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: {}", sum);
+            assert!(result.x[0] >= -0.1);
+            assert!(result.x[1] >= -0.1);
             assert!((result.obj_val - 1.0).abs() < 0.1);
         }
     }

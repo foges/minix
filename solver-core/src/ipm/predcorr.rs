@@ -131,15 +131,27 @@ pub fn predictor_corrector_step(
     // ======================================================================
     // Step 3: Affine step (σ = 0)
     // ======================================================================
+    // Newton step to drive residuals toward 0.
+    //
+    // The linearized equations give:
+    //   P Δx + A^T Δz + q Δτ = -r_x  (Newton step to reduce r_x to 0)
+    //   A Δx - H Δz = -r_z + s       (combining primal feasibility with complementarity)
+    //
+    // The complementarity equation H Δz + Δs = -d_s gives:
+    //   Δs = -d_s - H Δz = -s - H*dz  (for affine step where d_s = s)
     let mut dx_aff = vec![0.0; n];
     let mut dz_aff = vec![0.0; m];
     let dtau_aff;
 
-    // Affine RHS: negative residuals (Newton direction)
-    let rhs_x: Vec<f64> = residuals.r_x.iter().map(|&r| -r).collect();
-    let rhs_z: Vec<f64> = residuals.r_z.iter().map(|&r| -r).collect();
+    // Affine RHS:
+    //   rhs_x = -r_x (Newton step to reduce dual residual)
+    //   rhs_z = s - r_z (combining -r_z from primal + s from complementarity)
+    let rhs_x_aff: Vec<f64> = residuals.r_x.iter().map(|&r| -r).collect();
+    let rhs_z_aff: Vec<f64> = state.s.iter().zip(residuals.r_z.iter())
+        .map(|(si, ri)| si - ri)
+        .collect();
 
-    kkt.solve(&factor, &rhs_x, &rhs_z, &mut dx_aff, &mut dz_aff);
+    kkt.solve(&factor, &rhs_x_aff, &rhs_z_aff, &mut dx_aff, &mut dz_aff);
 
     // Compute dtau via two-solve Schur complement strategy (design doc §5.4.1)
     // This replaces the old heuristic dtau = -(q'dx + b'dz)
@@ -168,7 +180,8 @@ pub fn predictor_corrector_step(
         .map(|(pxi, qi)| 2.0 * pxi + qi)
         .collect();
 
-    // Second solve: K [Δx₂, Δz₂] = [-q, b]
+    // Second solve for Schur complement: K [Δx₂, Δz₂] = [-q, b]
+    // (design doc §5.4.1)
     let mut dx2 = vec![0.0; n];
     let mut dz2 = vec![0.0; m];
     let rhs_x2: Vec<f64> = prob.q.iter().map(|&qi| -qi).collect();
@@ -223,24 +236,49 @@ pub fn predictor_corrector_step(
     // #[cfg(debug_assertions)]
     // eprintln!("  [dtau_aff] = {:.6e}", dtau_aff);
 
-    // Compute ds_aff from primal constraint Newton step:
-    // A×dx + ds - b×dτ = -r_z
-    // With dτ = dtau_aff: ds = -r_z - A×dx + b×dtau_aff
+    // Compute ds_aff from complementarity equation (design doc §5.4):
+    //   Δs = -d_s - H Δz
+    // For affine step, d_s = s, so:
+    //   ds_aff = -s - H*dz_aff
     let mut ds_aff = vec![0.0; m];
-    for i in 0..m {
-        ds_aff[i] = -residuals.r_z[i] + prob.b[i] * dtau_aff;
-    }
-    for (val, (row, col)) in prob.A.iter() {
-        ds_aff[row] -= (*val) * dx_aff[col];
-    }
-
-    // For Zero cone components, force ds = 0 (s must remain 0)
     let mut offset = 0;
-    for cone in cones {
+    for (cone_idx, cone) in cones.iter().enumerate() {
         let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+
         if cone.barrier_degree() == 0 {
+            // Zero cone: ds = 0 always (s must remain 0)
             for i in offset..offset + dim {
                 ds_aff[i] = 0.0;
+            }
+        } else {
+            // Apply ds = -s - H*dz using the scaling block
+            match &scaling[cone_idx] {
+                ScalingBlock::Diagonal { d } => {
+                    for i in 0..dim {
+                        // H_ii = d[i], so ds = -s - H*dz = -s - d[i]*dz
+                        ds_aff[offset + i] = -state.s[offset + i] - d[i] * dz_aff[offset + i];
+                    }
+                }
+                ScalingBlock::SocStructured { w } => {
+                    // For SOC, H = P(w) (quadratic representation)
+                    // ds = -s - P(w)*dz
+                    let dz_slice = &dz_aff[offset..offset + dim];
+                    let mut h_dz = vec![0.0; dim];
+                    crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
+                    for i in 0..dim {
+                        ds_aff[offset + i] = -state.s[offset + i] - h_dz[i];
+                    }
+                }
+                _ => {
+                    // Fallback: assume diagonal with H = s/z
+                    for i in 0..dim {
+                        let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
+                        ds_aff[offset + i] = -state.s[offset + i] - h_ii * dz_aff[offset + i];
+                    }
+                }
             }
         }
         offset += dim;
@@ -260,35 +298,32 @@ pub fn predictor_corrector_step(
     // ======================================================================
     // Step 5: Combined corrector step
     // ======================================================================
+    // From design doc §7.3:
+    //   d_x = (1-σ) r_x
+    //   d_z = (1-σ) r_z
+    //   d_tau = (1-σ) r_tau
+    //   d_kappa = κτ + Δκ_aff Δτ_aff - σμ
+    //   d_s = Mehrotra correction (§7.3.1 for symmetric cones)
+    //
+    // KKT RHS:
+    //   rhs_x = d_x = (1-σ) r_x
+    //   rhs_z = d_s - d_z
+    //
+    // For NonNeg cone, Mehrotra correction (§7.3.1):
+    //   d_s_i = s_i - σμ/z_i + (ds_aff_i * dz_aff_i)/z_i
+    //
     let mut dx = vec![0.0; n];
     let mut dz = vec![0.0; m];
     let dtau;
 
-    // Build corrected RHS with improved centering (numerically stable formulation)
-    //
-    // For the complementarity condition s ∘ z = μe, the Newton system gives:
-    //   s ∘ dz + ds ∘ z = -s ∘ z + σμe - ds_aff ∘ dz_aff
-    //
-    // The standard Mehrotra correction (σμ - ds_aff·dz_aff) / s blows up when s→0.
-    //
-    // IMPROVED APPROACH: Use a "scaled centering" formulation.
-    // Instead of modifying rhs_z, we solve two systems:
-    //   1. Pure Newton: K [dx0, dz0] = [-r_x, -r_z]
-    //   2. Centering:   K [dx_c, dz_c] = [0, centering_rhs]
-    // Then combine: dx = dx0 + σ·dx_c, dz = dz0 + σ·dz_c
-    //
-    // For the centering RHS, we use: centering_rhs = H·e - z
-    // where H is the NT scaling and e is the scaled identity.
-    // This formulation is stable because H and z are both well-conditioned.
-    //
-    // For simplicity, we use a hybrid approach:
-    // - When well-conditioned: use full Mehrotra correction
-    // - When ill-conditioned: use pure centering without second-order term
-    //
     let target_mu = sigma * mu;
-    let mut rhs_z_corr = rhs_z.to_vec();
 
-    // Apply centering correction per cone with adaptive strategy
+    // Build RHS for combined step
+    // rhs_x = -(1-σ) r_x (Newton step scaled by (1-σ))
+    let rhs_x_comb: Vec<f64> = residuals.r_x.iter().map(|&r| -(1.0 - sigma) * r).collect();
+
+    // Compute d_s for each cone with Mehrotra correction
+    let mut d_s_comb = vec![0.0; m];
     let mut offset = 0;
     for (cone_idx, cone) in cones.iter().enumerate() {
         let dim = cone.dim();
@@ -297,50 +332,44 @@ pub fn predictor_corrector_step(
         }
 
         if cone.barrier_degree() == 0 {
-            // Zero cone: no correction needed
+            // Zero cone: d_s = 0
             offset += dim;
             continue;
         }
 
-        // Compute conditioning metric for this cone
-        let s_slice = &state.s[offset..offset + dim];
-        let z_slice = &state.z[offset..offset + dim];
-        let s_min_cone: f64 = s_slice.iter().cloned().fold(f64::INFINITY, f64::min);
-        let z_min_cone: f64 = z_slice.iter().cloned().fold(f64::INFINITY, f64::min);
-        let well_conditioned = s_min_cone > mu / 5.0 && z_min_cone > mu / 5.0;
-
+        // For NonNeg cone (symmetric), Mehrotra correction:
+        // d_s_i = s_i - σμ/z_i + (ds_aff_i * dz_aff_i)/z_i
+        //       = s_i + (ds_aff_i * dz_aff_i - σμ)/z_i
         for i in offset..offset + dim {
             let s_i = state.s[i];
-            let z_i = state.z[i];
-
-            if well_conditioned {
-                // Full Mehrotra correction (safe when well-conditioned)
-                let mehrotra_term = ds_aff[i] * dz_aff[i];
-                let correction = (target_mu - mehrotra_term) / s_i;
-                let max_correction = 20.0;
-                rhs_z_corr[i] += correction.max(-max_correction).min(max_correction);
-            } else {
-                // Simplified centering: push toward s*z = σμ
-                // Use correction = σμ/(s*z)^{1/2} - (s*z)^{1/2} which is bounded
-                let sz = (s_i * z_i).max(1e-16);
-                let sz_sqrt = sz.sqrt();
-                let target_sqrt = target_mu.sqrt();
-                // This correction is O(1) even when s→0
-                let correction = (target_sqrt - sz_sqrt) / sz_sqrt.max(1e-8);
-                rhs_z_corr[i] += correction.max(-5.0).min(5.0);
-            }
+            let z_i = state.z[i].max(1e-14);
+            let mehrotra_term = ds_aff[i] * dz_aff[i];
+            d_s_comb[i] = s_i + (mehrotra_term - target_mu) / z_i;
         }
 
         offset += dim;
-        let _ = cone_idx;  // Suppress unused warning
+        let _ = cone_idx;
     }
 
-    kkt.solve(&factor, &rhs_x, &rhs_z_corr, &mut dx, &mut dz);
+    // rhs_z = d_s - (1-σ) r_z
+    // The d_s from Mehrotra plus the scaled feasibility residual
+    let rhs_z_comb: Vec<f64> = d_s_comb.iter().zip(residuals.r_z.iter())
+        .map(|(ds_i, rz_i)| ds_i - (1.0 - sigma) * rz_i)
+        .collect();
 
-    // Compute dtau for corrector step using same Schur complement formula
-    // For corrector step, d_kappa incorporates centering: d_kappa = σμ/τ - κ
-    let d_tau_corr = -residuals.r_tau;
-    let d_kappa_corr = target_mu / state.tau - state.kappa;
+    kkt.solve(&factor, &rhs_x_comb, &rhs_z_comb, &mut dx, &mut dz);
+
+    // Compute dtau for corrector step using Schur complement formula
+    // From design doc §7.3:
+    //   d_tau = (1-σ) r_tau
+    //   d_kappa = κτ + Δκ_aff Δτ_aff - σμ
+    //
+    // Schur complement numerator: d_tau - d_kappa/τ + (2Pξ+q)ᵀΔx + bᵀΔz
+    let d_tau_corr = (1.0 - sigma) * residuals.r_tau;
+
+    // Compute Δκ_aff from affine step: Δκ = -(d_κ + κΔτ)/τ with d_κ = κτ
+    let dkappa_aff = -(state.kappa * state.tau + state.kappa * dtau_aff) / state.tau;
+    let d_kappa_corr = state.kappa * state.tau + dkappa_aff * dtau_aff - target_mu;
 
     let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
     let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
@@ -358,31 +387,51 @@ pub fn predictor_corrector_step(
         0.0
     };
 
-    // Debug output disabled by default
-    // #[cfg(debug_assertions)]
-    // eprintln!("  [dtau_corr] = {:.6e}", dtau);
-
-    // Compute ds from primal constraint Newton step:
-    // A×dx + ds - b×dτ = -r_z
-    // With dτ = dtau: ds = -r_z - A×dx + b×dtau
+    // Compute ds from complementarity equation (design doc §5.4):
+    //   Δs = -d_s - H Δz
     let mut ds = vec![0.0; m];
-    for i in 0..m {
-        ds[i] = -residuals.r_z[i] + prob.b[i] * dtau;
-    }
-    for (val, (row, col)) in prob.A.iter() {
-        ds[row] -= (*val) * dx[col];
-    }
-
-    // For Zero cone components, force ds = 0 (s must remain 0)
     let mut offset = 0;
-    for cone in cones {
+    for (cone_idx, cone) in cones.iter().enumerate() {
         let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+
         if cone.barrier_degree() == 0 {
+            // Zero cone: ds = 0 always (s must remain 0)
             for i in offset..offset + dim {
                 ds[i] = 0.0;
             }
+        } else {
+            // Apply ds = -d_s - H*dz using the scaling block
+            match &scaling[cone_idx] {
+                ScalingBlock::Diagonal { d } => {
+                    for i in 0..dim {
+                        // ds = -d_s - H*dz
+                        ds[offset + i] = -d_s_comb[offset + i] - d[i] * dz[offset + i];
+                    }
+                }
+                ScalingBlock::SocStructured { w } => {
+                    // For SOC, H = P(w) (quadratic representation)
+                    // ds = -d_s - P(w)*dz
+                    let dz_slice = &dz[offset..offset + dim];
+                    let mut h_dz = vec![0.0; dim];
+                    crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
+                    for i in 0..dim {
+                        ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
+                    }
+                }
+                _ => {
+                    // Fallback: assume diagonal with H = s/z
+                    for i in 0..dim {
+                        let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
+                        ds[offset + i] = -d_s_comb[offset + i] - h_ii * dz[offset + i];
+                    }
+                }
+            }
         }
         offset += dim;
+        let _ = cone_idx;
     }
 
     // ======================================================================
@@ -436,8 +485,16 @@ pub fn predictor_corrector_step(
 
     state.tau += alpha * dtau;
 
-    // Update κ to maintain complementarity τκ ≈ μ
-    state.kappa = mu / state.tau;
+    // Update κ via Newton step (design doc §5.4):
+    //   Δκ = -(d_κ + κΔτ)/τ
+    // For combined step, d_κ = κτ + Δκ_aff Δτ_aff - σμ
+    let dkappa = -(d_kappa_corr + state.kappa * dtau) / state.tau;
+    state.kappa += alpha * dkappa;
+
+    // Ensure kappa stays positive
+    if state.kappa < 1e-12 {
+        state.kappa = 1e-12;
+    }
 
     // Update ξ = x/τ for next iteration's Schur complement
     for i in 0..n {
@@ -503,22 +560,22 @@ fn compute_step_size(
     }
 }
 
-/// Compute centering parameter σ using Mehrotra's heuristic.
+/// Compute centering parameter σ.
 ///
-/// σ = (μ_aff / μ)^3 where μ_aff = <s + α_aff Δs, z + α_aff Δz> / ν
+/// Uses the robust formula from design doc §7.2:
+///   σ = (1 - α_aff)³
 ///
-/// For problems with only Zero cones (barrier_degree = 0), returns 0.
-///
-/// Note: Only barrier cone components contribute to μ_aff. Zero cone components
-/// (where s=0) are excluded since they don't have a barrier.
+/// This is simple, stable, and works well in practice.
+/// It gives σ ≈ 0 when affine step is large (aggressive progress)
+/// and σ ≈ 1 when affine step is small (conservative centering).
 fn compute_centering_parameter_with_cones(
     alpha_aff: f64,
-    mu: f64,
-    s: &[f64],
-    ds: &[f64],
-    z: &[f64],
-    dz: &[f64],
-    cones: &[Box<dyn ConeKernel>],
+    _mu: f64,
+    _s: &[f64],
+    _ds: &[f64],
+    _z: &[f64],
+    _dz: &[f64],
+    _cones: &[Box<dyn ConeKernel>],
     barrier_degree: usize,
 ) -> f64 {
     // Special case: no barrier (only Zero cones)
@@ -526,52 +583,11 @@ fn compute_centering_parameter_with_cones(
         return 0.0;
     }
 
-    // Compute μ after affine step, only for barrier cone components
-    let mut dot_product = 0.0;
-    let mut offset = 0;
-
-    for cone in cones {
-        let dim = cone.dim();
-        if dim == 0 {
-            continue;
-        }
-
-        // Skip Zero cones (they don't contribute to μ)
-        if cone.barrier_degree() == 0 {
-            offset += dim;
-            continue;
-        }
-
-        for i in offset..offset + dim {
-            let s_new = s[i] + alpha_aff * ds[i];
-            let z_new = z[i] + alpha_aff * dz[i];
-            dot_product += s_new * z_new;
-        }
-
-        offset += dim;
-    }
-
-    let mu_aff = dot_product / (barrier_degree as f64);
-
-    // σ = (μ_aff / μ)^3 is the standard Mehrotra heuristic
-    let ratio = mu_aff / mu.max(1e-10);
-    let sigma_mehrotra = ratio.powi(3);
-
-    // Adaptive centering:
-    // - When affine step makes good progress (ratio < 0.5), use Mehrotra
-    // - When affine step is blocked (ratio ≈ 1), use smaller σ to still make some progress
-    //
-    // The key insight: if ratio ≈ 1, Mehrotra gives σ ≈ 1 (pure centering).
-    // But we want to make SOME progress, so cap σ at 0.9.
-    // This ensures target_mu = 0.9*mu, giving at least 10% reduction.
-    let sigma = if sigma_mehrotra < 0.5 {
-        // Good affine progress: use Mehrotra
-        sigma_mehrotra
-    } else {
-        // Poor affine progress: moderate centering
-        // σ = 0.9 gives good centering while still making progress
-        sigma_mehrotra.min(0.9)
-    };
+    // σ = (1 - α_aff)³  (design doc §7.2)
+    // This formula is robust and simple:
+    // - α_aff ≈ 1 gives σ ≈ 0 (aggressive, mostly Newton)
+    // - α_aff ≈ 0 gives σ ≈ 1 (conservative, mostly centering)
+    let sigma = (1.0 - alpha_aff).powi(3);
 
     // Clamp to [0, 1]
     sigma.max(0.0).min(1.0)
@@ -588,20 +604,21 @@ mod tests {
         let cones: Vec<Box<dyn ConeKernel>> = vec![Box::new(NonNegCone::new(3))];
 
         // Test that σ → 0 when affine step makes good progress
+        // Using σ = (1 - α_aff)³, α_aff = 0.99 gives σ ≈ 0.01³ ≈ 0.000001
         let sigma = compute_centering_parameter_with_cones(
             0.99, // large alpha_aff (good progress)
             1.0,  // current mu
             &vec![1.0; 3],
-            &vec![-0.5; 3], // negative direction (approaching boundary)
+            &vec![-0.5; 3],
             &vec![1.0; 3],
             &vec![-0.5; 3],
             &cones,
             3,
         );
-        assert!(sigma < 0.5, "σ should be small for good affine progress, got {}", sigma);
+        assert!(sigma < 0.001, "σ should be very small for large affine step, got {}", sigma);
 
-        // Test that σ is capped at 0.9 when affine step makes poor progress
-        // (This ensures we still make at least 10% progress toward optimality)
+        // Test that σ → 1 when affine step makes poor progress
+        // α_aff = 0.01 gives σ ≈ 0.99³ ≈ 0.97
         let sigma = compute_centering_parameter_with_cones(
             0.01, // small alpha_aff (poor progress)
             1.0,
@@ -612,7 +629,7 @@ mod tests {
             &cones,
             3,
         );
-        assert!(sigma <= 0.9, "σ should be capped at 0.9 to ensure progress, got {}", sigma);
+        assert!(sigma > 0.9, "σ should be large for small affine step, got {}", sigma);
     }
 
     #[test]

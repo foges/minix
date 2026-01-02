@@ -1,10 +1,14 @@
 //! Nesterov-Todd scaling for symmetric cones.
 //!
 //! The NT scaling provides a symmetric scaling matrix H such that:
-//!   H s = z  and  H² s ∘ z = e
+//!   H z = s  and  H^{-1} s = z
+//!
+//! This is used in the KKT system:
+//!   [P   A^T] [Δx]   [d_x      ]
+//!   [A   -H ] [Δz] = [-(d_z-d_s)]
 //!
 //! For different cone types:
-//! - NonNeg: H = diag(sqrt(s ./ z))
+//! - NonNeg: H = diag(s ./ z) so that H*z = s
 //! - SOC: H(w) via quadratic representation in Jordan algebra
 //! - PSD: H = W with W V W where M = X^{1/2} Z X^{1/2}, W = X^{1/2} M^{-1/2} X^{1/2}
 
@@ -50,10 +54,11 @@ pub fn nt_scaling_nonneg(
         return Err(NtScalingError::NotInterior);
     }
 
-    // H = diag(1 ./ sqrt(s ∘ z))  (NT scaling for nonnegative orthant)
-    // Property: H² s ∘ z = e  =>  h_i² * s_i * z_i = 1  =>  h_i = 1 / sqrt(s_i * z_i)
+    // NT scaling for nonnegative orthant: H = diag(s/z)
+    // This satisfies: H*z = s and H^{-1}*s = z
+    // (The design doc requires H z ≈ s for the KKT formulation)
     let d: Vec<f64> = s.iter().zip(z.iter())
-        .map(|(si, zi)| 1.0 / (si * zi).sqrt())
+        .map(|(si, zi)| si / zi)
         .collect();
 
     Ok(ScalingBlock::Diagonal { d })
@@ -270,9 +275,9 @@ pub fn compute_nt_scaling(
     }
 
     // Fallback: simple diagonal scaling
-    // H = diag(sqrt(s ./ z))
+    // H = diag(s / z) so that H*z = s
     let d: Vec<f64> = s.iter().zip(z.iter())
-        .map(|(si, zi)| (si / zi).max(1e-8).sqrt())
+        .map(|(si, zi)| si / zi.max(1e-14))
         .collect();
 
     Ok(ScalingBlock::Diagonal { d })
@@ -291,11 +296,10 @@ mod tests {
         let scaling = nt_scaling_nonneg(&cone, &s, &z).unwrap();
 
         if let ScalingBlock::Diagonal { d } = scaling {
-            // H = diag(1 ./ sqrt(s ∘ z)) = diag(1/sqrt(4*1), 1/sqrt(9*4), 1/sqrt(16*4))
-            //   = diag(1/2, 1/6, 1/8) = diag(0.5, 0.1667, 0.125)
-            assert!((d[0] - 0.5).abs() < 1e-10);
-            assert!((d[1] - 1.0/6.0).abs() < 1e-10);
-            assert!((d[2] - 0.125).abs() < 1e-10);
+            // H = diag(s/z) = diag(4/1, 9/4, 16/4) = diag(4, 2.25, 4)
+            assert!((d[0] - 4.0).abs() < 1e-10);
+            assert!((d[1] - 2.25).abs() < 1e-10);
+            assert!((d[2] - 4.0).abs() < 1e-10);
         } else {
             panic!("Expected diagonal scaling");
         }
@@ -303,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_nt_scaling_nonneg_property() {
-        // Property: H² s ∘ z = e  (element-wise: h²_i s_i z_i = 1)
+        // Property: H*z = s (element-wise: h_i * z_i = s_i)
         let cone = NonNegCone::new(5);
         let s = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let z = vec![5.0, 4.0, 3.0, 2.0, 1.0];
@@ -312,8 +316,8 @@ mod tests {
 
         if let ScalingBlock::Diagonal { d } = scaling {
             for i in 0..5 {
-                let h_squared_times_sz = d[i] * d[i] * s[i] * z[i];
-                assert!((h_squared_times_sz - 1.0).abs() < 1e-10);
+                let h_times_z = d[i] * z[i];
+                assert!((h_times_z - s[i]).abs() < 1e-10, "H*z != s at index {}", i);
             }
         }
     }
