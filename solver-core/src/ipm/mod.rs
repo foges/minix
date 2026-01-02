@@ -71,16 +71,19 @@ pub fn solve_ipm(
     let mut residuals = HsdeResiduals::new(n, m);
 
     // Initialize KKT solver
-    // For LPs (P=None), use higher regularization to stabilize the solve.
+    // For LPs (P=None) or very sparse QPs, use higher regularization to stabilize.
     // The (1,1) block is only εI for LPs. With small ε, solving
     //   [εI, A^T] [dx]   [rhs_x]
     //   [A,  -(H)] [dz] = [rhs_z]
     // gives dx ≈ rhs_x/ε, which blows up for small ε.
     // Using ε=1e-4 provides stability while allowing good convergence.
-    let static_reg = if scaled_prob.P.is_none() {
-        settings.static_reg.max(1e-4)  // LP: use at least 1e-4
+    let p_is_sparse = scaled_prob.P.as_ref().map_or(true, |p| {
+        p.nnz() < n / 2  // Less than 50% diagonal fill
+    });
+    let static_reg = if p_is_sparse {
+        settings.static_reg.max(1e-4)  // LP or sparse QP: use at least 1e-4
     } else {
-        settings.static_reg
+        settings.static_reg.max(1e-6)  // Dense QP: use at least 1e-6
     };
 
     let mut kkt = KktSolver::new(
@@ -104,6 +107,8 @@ pub fn solve_ipm(
 
     let mut status = SolveStatus::NumericalError;  // Will be overwritten
     let mut iter = 0;
+    let mut consecutive_failures = 0;
+    const MAX_CONSECUTIVE_FAILURES: usize = 3;
 
     if settings.verbose {
         println!("Minix IPM Solver");
@@ -143,16 +148,60 @@ pub fn solve_ipm(
             mu,
             barrier_degree,
         ) {
-            Ok(result) => result,
+            Ok(result) => {
+                consecutive_failures = 0;  // Reset on success
+                result
+            }
             Err(e) => {
-                eprintln!("IPM step failed: {}", e);
-                status = SolveStatus::NumericalError;
-                break;
+                consecutive_failures += 1;
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    if settings.verbose {
+                        eprintln!("IPM step failed {} times: {}", consecutive_failures, e);
+                    }
+                    status = SolveStatus::NumericalError;
+                    break;
+                }
+
+                // Infeasible-start recovery: push state back to cone interior
+                if settings.verbose {
+                    eprintln!("IPM step failed (attempt {}), recovering: {}", consecutive_failures, e);
+                }
+
+                // Push s and z back to interior with larger margin
+                let recovery_margin = (mu * 0.1).max(1e-4);
+                state.push_to_interior(&cones, recovery_margin);
+
+                // Recompute mu after recovery
+                mu = compute_mu(&state, barrier_degree);
+
+                // Skip to next iteration (will recompute residuals and retry)
+                iter += 1;
+                continue;
             }
         };
 
         // Update mu
         mu = step_result.mu_new;
+
+        // Check for divergence or numerical issues
+        if !mu.is_finite() || mu > 1e15 {
+            consecutive_failures += 1;
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                if settings.verbose {
+                    eprintln!("Divergence detected: μ = {}", mu);
+                }
+                status = SolveStatus::NumericalError;
+                break;
+            }
+
+            // Recovery: push back to interior
+            if settings.verbose {
+                eprintln!("Numerical issue detected (μ = {}), recovering", mu);
+            }
+            state.push_to_interior(&cones, 1e-2);
+            mu = compute_mu(&state, barrier_degree);
+        }
 
         // Verbose output
         if settings.verbose {

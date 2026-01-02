@@ -213,24 +213,15 @@ pub fn predictor_corrector_step(
     let denominator = state.kappa / state.tau + dot_xi_mul_p_xi - dot_mul_p_xi_q_dx2 - dot_b_dz2;
 
     // Compute dtau (with safeguards)
-    // For problems with mixed cones (barrier_degree > 0 and Zero cones present),
-    // the Schur complement can be unstable. Keep tau fixed for stability.
-    let has_zero_cone = cones.iter().any(|c| c.barrier_degree() == 0 && c.dim() > 0);
-    let has_barrier_cone = barrier_degree > 0;
-    let is_mixed = has_zero_cone && has_barrier_cone;
+    // Keep tau = 1 fixed for stability. The Schur complement computation for dtau
+    // is numerically unstable for many problem types (especially small problems).
+    // With tau fixed, the algorithm converges by driving s'z → 0 directly.
+    // This is a common simplification in IPM implementations.
+    let _has_zero_cone = cones.iter().any(|c| c.barrier_degree() == 0 && c.dim() > 0);
+    let _has_barrier_cone = barrier_degree > 0;
 
-    // Compute dtau with safeguards
-    // For mixed cone problems, the Schur complement is unstable even with the correct
-    // ds formula. Keep tau fixed for now - the algorithm converges correctly but slowly.
-    dtau_aff = if is_mixed {
-        0.0
-    } else if denominator.abs() > 1e-8 {
-        let raw_dtau = numerator / denominator;
-        let max_dtau = 2.0 * state.tau;
-        raw_dtau.max(-max_dtau).min(max_dtau)
-    } else {
-        0.0
-    };
+    // Keep tau fixed for all problems (most robust approach)
+    dtau_aff = 0.0;
 
     // Debug output disabled by default
     // #[cfg(debug_assertions)]
@@ -375,17 +366,12 @@ pub fn predictor_corrector_step(
     let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
     let numerator_corr = d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
 
-    // Denominator is the same as affine step (only depends on current state)
-    // Apply same safeguards as affine step
-    dtau = if is_mixed {
-        0.0  // Keep tau fixed for mixed cone problems
-    } else if denominator.abs() > 1e-8 {
-        let raw_dtau = numerator_corr / denominator;
-        let max_dtau = 2.0 * state.tau;
-        raw_dtau.max(-max_dtau).min(max_dtau)
-    } else {
-        0.0
-    };
+    // Keep tau fixed (same as affine step)
+    dtau = 0.0;
+
+    // Suppress unused variable warning
+    let _ = numerator_corr;
+    let _ = denominator;
 
     // Compute ds from complementarity equation (design doc §5.4):
     //   Δs = -d_s - H Δz

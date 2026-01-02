@@ -107,16 +107,12 @@ impl KktSolver {
             }
         }
 
-        // For LPs (P=None) or sparse P matrices, ensure diagonal entries exist
-        // so QDLDL can add regularization to them. We add 0.0 placeholders.
+        // Ensure all diagonal entries exist so QDLDL can add regularization.
+        // For LPs (P=None) or sparse QPs with missing diagonals, we add 0.0 placeholders.
         // QDLDL will then add static_reg to these diagonal entries.
+        // Using add_triplet with 0.0 is safe - it sums with existing values if present.
         for i in 0..self.n {
-            if p.is_none() {
-                // For LP (P=None), add zero diagonal entries
-                tri.add_triplet(i, i, 0.0);
-            }
-            // Note: If P exists but has missing diagonal entries, add_triplet
-            // will sum with existing values, so adding 0.0 is safe
+            tri.add_triplet(i, i, 0.0);
         }
 
         // ===================================================================

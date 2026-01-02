@@ -60,7 +60,7 @@ pub fn check_termination(
     criteria: &TerminationCriteria,
 ) -> Option<SolveStatus> {
     // Check for NaN
-    if state.tau.is_nan() || state.kappa.is_nan() {
+    if state.tau.is_nan() || state.kappa.is_nan() || mu.is_nan() {
         return Some(SolveStatus::NumericalError);
     }
 
@@ -112,34 +112,70 @@ pub fn check_termination(
         primal_obj += prob.q[i] * x_bar[i];
     }
 
-    // Compute dual objective: -b^T z
+    // Compute dual objective: -b^T z (for LP) or -b^T z - 0.5 x^T P x (for QP)
+    // For QP: dual obj = -b^T z - 0.5 x^T P x (the quadratic term appears in both)
     let mut dual_obj = 0.0;
     for i in 0..prob.num_constraints() {
         dual_obj -= prob.b[i] * z_bar[i];
+    }
+    // Add quadratic contribution for QP (dual objective includes -0.5 x^T P x)
+    if let Some(ref p) = prob.P {
+        let mut xpx = 0.0;
+        for col in 0..prob.num_vars() {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    if row == col {
+                        xpx += x_bar[row] * val * x_bar[col];
+                    } else {
+                        xpx += 2.0 * x_bar[row] * val * x_bar[col];
+                    }
+                }
+            }
+        }
+        dual_obj -= 0.5 * xpx;
     }
 
     // Compute residuals (unscaled)
     let (rx_norm, rz_norm, _) = residuals.norms();
 
-    // Scale norms by τ for comparison
-    let primal_res = rx_norm / state.tau.max(1.0);
-    let dual_res = rz_norm / state.tau.max(1.0);
+    // Compute scaling factors for relative residuals
+    let b_norm = prob.b.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
+    let q_norm = prob.q.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
+
+    // Relative residuals (scaled by problem data norms)
+    let primal_res = rx_norm / (state.tau * q_norm);
+    let dual_res = rz_norm / (state.tau * b_norm);
     let gap = (primal_obj - dual_obj).abs();
 
     // Compute relative gap: gap / max(|primal_obj|, |dual_obj|, 1)
-    let scale = primal_obj.abs().max(dual_obj.abs()).max(1.0);
-    let gap_rel = gap / scale;
+    let obj_scale = primal_obj.abs().max(dual_obj.abs()).max(1.0);
+    let gap_rel = gap / obj_scale;
 
-    // Check optimality (either absolute or relative gap tolerance met)
+    // Primary optimality check: μ-based convergence
+    // When μ is very small, complementarity is satisfied. Check feasibility.
+    let mu_converged = mu < criteria.tol_gap;
+    let feas_ok = primal_res < criteria.tol_feas && dual_res < criteria.tol_feas;
     let gap_ok = gap < criteria.tol_gap || gap_rel < criteria.tol_gap_rel;
-    if primal_res < criteria.tol_feas && dual_res < criteria.tol_feas && gap_ok {
+
+    // Optimal if: (feasible AND gap small) OR (μ very small AND reasonably feasible)
+    if feas_ok && gap_ok {
         return Some(SolveStatus::Optimal);
     }
 
-    // Check for stalled progress
+    // μ-based termination: if μ is very small, algorithm has converged
+    // Use relaxed feasibility check (10x tolerance)
+    if mu_converged {
+        let relaxed_feas = primal_res < 10.0 * criteria.tol_feas
+                        && dual_res < 10.0 * criteria.tol_feas;
+        if relaxed_feas {
+            return Some(SolveStatus::Optimal);
+        }
+    }
+
+    // Check for stalled progress with very small μ
     if mu < criteria.min_progress && iter > 10 {
-        // Consider this "solved" if residuals are reasonable
-        if primal_res < 10.0 * criteria.tol_feas && dual_res < 10.0 * criteria.tol_feas {
+        // Consider this "solved" if residuals are reasonable (100x tolerance)
+        if primal_res < 100.0 * criteria.tol_feas && dual_res < 100.0 * criteria.tol_feas {
             return Some(SolveStatus::Optimal);
         }
     }

@@ -1,0 +1,360 @@
+//! Maros-Meszaros QP benchmark suite runner.
+//!
+//! Downloads and runs the standard Maros-Meszaros test set of 138 QP problems.
+
+use std::fs::{self, File};
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use solver_core::{solve, SolveStatus, SolverSettings};
+
+use crate::qps::{parse_qps, QpsProblem};
+
+/// URL for Maros-Meszaros QPS files (from GitHub mirror)
+const MM_BASE_URL: &str = "https://raw.githubusercontent.com/YimingYAN/QP-Test-Problems/master/QPS_Files";
+
+/// Known Maros-Meszaros problem names (138 problems)
+const MM_PROBLEMS: &[&str] = &[
+    "AUG2D", "AUG2DC", "AUG2DCQP", "AUG2DQP", "AUG3D", "AUG3DC", "AUG3DCQP", "AUG3DQP",
+    "BOYD1", "BOYD2", "CONT-050", "CONT-100", "CONT-101", "CONT-200", "CONT-201", "CONT-300",
+    "CVXQP1_L", "CVXQP1_M", "CVXQP1_S", "CVXQP2_L", "CVXQP2_M", "CVXQP2_S", "CVXQP3_L",
+    "CVXQP3_M", "CVXQP3_S", "DPKLO1", "DTOC3", "DUAL1", "DUAL2", "DUAL3", "DUAL4", "DUALC1",
+    "DUALC2", "DUALC5", "DUALC8", "EXDATA", "GOULDQP2", "GOULDQP3", "HS118", "HS21", "HS268",
+    "HS35", "HS35MOD", "HS51", "HS52", "HS53", "HS76", "HUES-MOD", "HUESTIS", "KSIP",
+    "LASER", "LISWET1", "LISWET10", "LISWET11", "LISWET12", "LISWET2", "LISWET3", "LISWET4",
+    "LISWET5", "LISWET6", "LISWET7", "LISWET8", "LISWET9", "LOTSCHD", "MOSARQP1", "MOSARQP2",
+    "POWELL20", "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4", "PRIMALC1", "PRIMALC2", "PRIMALC5",
+    "PRIMALC8", "Q25FV47", "QADLITTL", "QAFIRO", "QBANDM", "QBEACONF", "QBORE3D", "QBRANDY",
+    "QCAPRI", "QE226", "QETAMACR", "QFFFFF80", "QFORPLAN", "QGFRDXPN", "QGROW15", "QGROW22",
+    "QGROW7", "QISRAEL", "QPCBLEND", "QPCBOEI1", "QPCBOEI2", "QPCSTAIR", "QPILOTNO", "QRECIPE",
+    "QSC205", "QSCAGR25", "QSCAGR7", "QSCFXM1", "QSCFXM2", "QSCFXM3", "QSCORPIO", "QSCRS8",
+    "QSCSD1", "QSCSD6", "QSCSD8", "QSCTAP1", "QSCTAP2", "QSCTAP3", "QSEBA", "QSHARE1B",
+    "QSHARE2B", "QSHELL", "QSHIP04L", "QSHIP04S", "QSHIP08L", "QSHIP08S", "QSHIP12L", "QSHIP12S",
+    "QSIERRA", "QSTAIR", "QSTANDAT", "S268", "STADAT1", "STADAT2", "STADAT3", "STCQP1",
+    "STCQP2", "TAME", "UBH1", "VALUES", "YAO", "ZECEVIC2",
+];
+
+/// Result of running a single benchmark problem
+#[derive(Debug, Clone)]
+pub struct BenchmarkResult {
+    /// Problem name
+    pub name: String,
+    /// Number of variables
+    pub n: usize,
+    /// Number of constraints
+    pub m: usize,
+    /// Solve status
+    pub status: SolveStatus,
+    /// Number of iterations
+    pub iterations: usize,
+    /// Objective value
+    pub obj_val: f64,
+    /// Final mu
+    pub mu: f64,
+    /// Solve time in milliseconds
+    pub solve_time_ms: f64,
+    /// Error message if any
+    pub error: Option<String>,
+}
+
+/// Summary statistics for benchmark run
+#[derive(Debug, Clone)]
+pub struct BenchmarkSummary {
+    /// Total problems attempted
+    pub total: usize,
+    /// Problems solved to optimality
+    pub optimal: usize,
+    /// Problems hitting max iterations
+    pub max_iters: usize,
+    /// Problems with numerical errors
+    pub numerical_errors: usize,
+    /// Problems that failed to parse
+    pub parse_errors: usize,
+    /// Total solve time in seconds
+    pub total_time_s: f64,
+    /// Geometric mean of iterations (for solved problems)
+    pub geom_mean_iters: f64,
+}
+
+/// Get the cache directory for benchmark problems
+fn get_cache_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cache").join("minix-bench").join("maros-meszaros")
+}
+
+/// Download a QPS file if not cached
+fn download_qps(name: &str) -> Result<PathBuf> {
+    let cache_dir = get_cache_dir();
+    fs::create_dir_all(&cache_dir)?;
+
+    let filename = format!("{}.QPS", name);
+    let cached_path = cache_dir.join(&filename);
+
+    if cached_path.exists() {
+        return Ok(cached_path);
+    }
+
+    // Try downloading from GitHub mirror (no .gz)
+    let url = format!("{}/{}.QPS", MM_BASE_URL, name);
+
+    eprintln!("Downloading {}...", name);
+
+    let output = std::process::Command::new("curl")
+        .args(["-sL", "--max-time", "30", &url])
+        .output()
+        .context("Failed to run curl")?;
+
+    if output.status.success() && !output.stdout.is_empty() {
+        // Check if it's valid QPS content (starts with NAME or has ROWS section)
+        let content = String::from_utf8_lossy(&output.stdout);
+        if content.contains("ROWS") || content.starts_with("NAME") {
+            fs::write(&cached_path, &output.stdout)?;
+            return Ok(cached_path);
+        }
+    }
+
+    // Try lowercase
+    let url = format!("{}/{}.qps", MM_BASE_URL, name);
+    let output = std::process::Command::new("curl")
+        .args(["-sL", "--max-time", "30", &url])
+        .output()
+        .context("Failed to run curl")?;
+
+    if output.status.success() && !output.stdout.is_empty() {
+        let content = String::from_utf8_lossy(&output.stdout);
+        if content.contains("ROWS") || content.starts_with("NAME") {
+            fs::write(&cached_path, &output.stdout)?;
+            return Ok(cached_path);
+        }
+    }
+
+    Err(anyhow::anyhow!("Failed to download {} - file not found or invalid", name))
+}
+
+/// Decompress gzip data
+fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Cursor;
+    let cursor = Cursor::new(data);
+    let mut decoder = flate2::read::GzDecoder::new(cursor);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)?;
+    Ok(decompressed)
+}
+
+/// Load a QPS problem from file or URL
+pub fn load_problem(name: &str) -> Result<QpsProblem> {
+    // Check for local file first
+    let local_paths = [
+        PathBuf::from(format!("{}.QPS", name)),
+        PathBuf::from(format!("{}.qps", name)),
+        PathBuf::from(format!("data/{}.QPS", name)),
+        PathBuf::from(format!("data/{}.qps", name)),
+    ];
+
+    for path in &local_paths {
+        if path.exists() {
+            return parse_qps(path);
+        }
+    }
+
+    // Try cache or download
+    let path = download_qps(name)?;
+    parse_qps(&path)
+}
+
+/// Run a single benchmark problem
+pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
+    // Load and parse problem
+    let qps = match load_problem(name) {
+        Ok(q) => q,
+        Err(e) => {
+            return BenchmarkResult {
+                name: name.to_string(),
+                n: 0,
+                m: 0,
+                status: SolveStatus::NumericalError,
+                iterations: 0,
+                obj_val: f64::NAN,
+                mu: f64::NAN,
+                solve_time_ms: 0.0,
+                error: Some(format!("Parse error: {}", e)),
+            };
+        }
+    };
+
+    // Convert to conic form
+    let prob = match qps.to_problem_data() {
+        Ok(p) => p,
+        Err(e) => {
+            return BenchmarkResult {
+                name: name.to_string(),
+                n: qps.n,
+                m: qps.m,
+                status: SolveStatus::NumericalError,
+                iterations: 0,
+                obj_val: f64::NAN,
+                mu: f64::NAN,
+                solve_time_ms: 0.0,
+                error: Some(format!("Conversion error: {}", e)),
+            };
+        }
+    };
+
+    // Solve
+    let start = Instant::now();
+    let result = solve(&prob, settings);
+    let elapsed = start.elapsed();
+
+    match result {
+        Ok(res) => BenchmarkResult {
+            name: name.to_string(),
+            n: prob.num_vars(),
+            m: prob.num_constraints(),
+            status: res.status,
+            iterations: res.info.iters,
+            obj_val: res.obj_val,
+            mu: res.info.mu,
+            solve_time_ms: elapsed.as_secs_f64() * 1000.0,
+            error: None,
+        },
+        Err(e) => BenchmarkResult {
+            name: name.to_string(),
+            n: prob.num_vars(),
+            m: prob.num_constraints(),
+            status: SolveStatus::NumericalError,
+            iterations: 0,
+            obj_val: f64::NAN,
+            mu: f64::NAN,
+            solve_time_ms: elapsed.as_secs_f64() * 1000.0,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// Run full Maros-Meszaros benchmark suite
+pub fn run_full_suite(settings: &SolverSettings, max_problems: Option<usize>) -> Vec<BenchmarkResult> {
+    let problems: Vec<&str> = MM_PROBLEMS
+        .iter()
+        .take(max_problems.unwrap_or(MM_PROBLEMS.len()))
+        .copied()
+        .collect();
+
+    let mut results = Vec::with_capacity(problems.len());
+
+    for (i, name) in problems.iter().enumerate() {
+        eprint!("[{}/{}] {} ... ", i + 1, problems.len(), name);
+        let result = run_single(name, settings);
+
+        let status_str = match result.status {
+            SolveStatus::Optimal => "✓",
+            SolveStatus::MaxIters => "M",
+            SolveStatus::NumericalError => "N",
+            _ => "?",
+        };
+
+        if result.error.is_some() {
+            eprintln!("ERROR");
+        } else {
+            eprintln!("{} ({} iters, {:.1}ms)", status_str, result.iterations, result.solve_time_ms);
+        }
+
+        results.push(result);
+    }
+
+    results
+}
+
+/// Compute summary statistics
+pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
+    let total = results.len();
+    let mut optimal = 0;
+    let mut max_iters = 0;
+    let mut numerical_errors = 0;
+    let mut parse_errors = 0;
+    let mut total_time_s = 0.0;
+    let mut iter_log_sum = 0.0;
+    let mut iter_count = 0;
+
+    for r in results {
+        total_time_s += r.solve_time_ms / 1000.0;
+
+        if r.error.is_some() && r.error.as_ref().unwrap().contains("Parse") {
+            parse_errors += 1;
+            continue;
+        }
+
+        match r.status {
+            SolveStatus::Optimal => {
+                optimal += 1;
+                if r.iterations > 0 {
+                    iter_log_sum += (r.iterations as f64).ln();
+                    iter_count += 1;
+                }
+            }
+            SolveStatus::MaxIters => max_iters += 1,
+            SolveStatus::NumericalError => numerical_errors += 1,
+            _ => {}
+        }
+    }
+
+    let geom_mean_iters = if iter_count > 0 {
+        (iter_log_sum / iter_count as f64).exp()
+    } else {
+        0.0
+    };
+
+    BenchmarkSummary {
+        total,
+        optimal,
+        max_iters,
+        numerical_errors,
+        parse_errors,
+        total_time_s,
+        geom_mean_iters,
+    }
+}
+
+/// Print results summary
+pub fn print_summary(summary: &BenchmarkSummary) {
+    println!("\n{}", "=".repeat(60));
+    println!("Maros-Meszaros Benchmark Summary");
+    println!("{}", "=".repeat(60));
+    println!("Total problems:      {}", summary.total);
+    println!("Optimal:             {} ({:.1}%)",
+             summary.optimal,
+             100.0 * summary.optimal as f64 / summary.total as f64);
+    println!("Max iterations:      {}", summary.max_iters);
+    println!("Numerical errors:    {}", summary.numerical_errors);
+    println!("Parse errors:        {}", summary.parse_errors);
+    println!("Total time:          {:.2}s", summary.total_time_s);
+    println!("Geom mean iters:     {:.1}", summary.geom_mean_iters);
+    println!("{}", "=".repeat(60));
+}
+
+/// Print detailed results table
+pub fn print_results_table(results: &[BenchmarkResult]) {
+    println!("\n{:<15} {:>6} {:>8} {:>8} {:>10} {:>12} {:>10}",
+             "Problem", "n", "m", "Status", "Iters", "Obj", "Time(ms)");
+    println!("{}", "-".repeat(75));
+
+    for r in results {
+        let status_str = match r.status {
+            SolveStatus::Optimal => "Optimal",
+            SolveStatus::MaxIters => "MaxIter",
+            SolveStatus::NumericalError => "NumErr",
+            SolveStatus::PrimalInfeasible => "PrimInf",
+            SolveStatus::DualInfeasible => "DualInf",
+            _ => "Other",
+        };
+
+        if r.error.is_some() {
+            println!("{:<15} {:>6} {:>8} {:>8} {:>10} {:>12} {:>10}",
+                     r.name, "-", "-", "Error", "-", "-", "-");
+        } else {
+            println!("{:<15} {:>6} {:>8} {:>8} {:>10} {:>12.4e} {:>10.1}",
+                     r.name, r.n, r.m, status_str, r.iterations, r.obj_val, r.solve_time_ms);
+        }
+    }
+}

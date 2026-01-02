@@ -59,15 +59,35 @@ impl HsdeState {
         }
     }
 
-    /// Initialize state using cone unit initializations.
+    /// Initialize state using cone unit initializations with problem-aware scaling.
     ///
     /// This sets:
     /// - x = 0 (or small perturbation)
-    /// - s: for Zero cones s=0, for other cones s = b_i * tau
-    /// - z from cone unit_initialization
+    /// - s, z: initialized in cone interior with appropriate scaling
     /// - τ = κ = 1
     /// - ξ = x/τ = 0
-    pub fn initialize_with_prob(&mut self, cones: &[Box<dyn ConeKernel>], _prob: &ProblemData) {
+    ///
+    /// The scaling is chosen to reduce initial residuals and improve convergence.
+    pub fn initialize_with_prob(&mut self, cones: &[Box<dyn ConeKernel>], prob: &ProblemData) {
+        let n = prob.num_vars();
+        let m = prob.num_constraints();
+
+        // Compute scaling factors based on problem data
+        let b_norm = prob.b.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
+        let q_norm = prob.q.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
+
+        // Compute A norm (max absolute entry)
+        let a_norm = {
+            let mut max_val = 1.0_f64;
+            for (&val, _) in prob.A.iter() {
+                max_val = max_val.max(val.abs());
+            }
+            max_val
+        };
+
+        // Overall scale factor
+        let scale = (1.0 + b_norm + q_norm + a_norm).sqrt();
+
         // x = 0
         self.x.fill(0.0);
 
@@ -78,7 +98,7 @@ impl HsdeState {
         self.tau = 1.0;
         self.kappa = 1.0;
 
-        // Initialize (s, z) using cone unit initialization
+        // Initialize (s, z) using cone unit initialization with scaling
         let mut offset = 0;
         for cone in cones {
             let dim = cone.dim();
@@ -89,10 +109,67 @@ impl HsdeState {
                 &mut self.z[offset..offset + dim],
             );
 
-            // For Zero cones, override to keep s = 0
+            // Scale s and z to match problem magnitude
+            for i in offset..offset + dim {
+                self.s[i] *= scale;
+                self.z[i] *= scale;
+            }
+
+            // For Zero cones, override to keep s = 0, but z can be non-zero
+            // z for zero cone represents the dual variable for equality constraints
             if cone.barrier_degree() == 0 {
                 for i in offset..offset + dim {
                     self.s[i] = 0.0;
+                    // Initialize z for equality constraints based on b
+                    if i - offset < prob.b.len() {
+                        self.z[i] = 0.0; // Start at 0, let algorithm find dual
+                    }
+                }
+            }
+
+            offset += dim;
+        }
+    }
+
+    /// Push s and z back to cone interior if they've drifted outside.
+    ///
+    /// This is used for infeasible-start handling - if s or z become
+    /// non-interior due to numerical issues, we push them back in.
+    pub fn push_to_interior(&mut self, cones: &[Box<dyn ConeKernel>], min_value: f64) {
+        let mut offset = 0;
+        for cone in cones {
+            let dim = cone.dim();
+
+            // Skip zero cones
+            if cone.barrier_degree() == 0 {
+                offset += dim;
+                continue;
+            }
+
+            // Check and fix s
+            if !cone.is_interior_primal(&self.s[offset..offset + dim]) {
+                // Push to interior using unit initialization scaled by min_value
+                let mut s_unit = vec![0.0; dim];
+                let mut z_unit = vec![0.0; dim];
+                cone.unit_initialization(&mut s_unit, &mut z_unit);
+
+                for i in 0..dim {
+                    if !self.s[offset + i].is_finite() || self.s[offset + i] <= 0.0 {
+                        self.s[offset + i] = s_unit[i] * min_value;
+                    }
+                }
+            }
+
+            // Check and fix z
+            if !cone.is_interior_dual(&self.z[offset..offset + dim]) {
+                let mut s_unit = vec![0.0; dim];
+                let mut z_unit = vec![0.0; dim];
+                cone.unit_initialization(&mut s_unit, &mut z_unit);
+
+                for i in 0..dim {
+                    if !self.z[offset + i].is_finite() || self.z[offset + i] <= 0.0 {
+                        self.z[offset + i] = z_unit[i] * min_value;
+                    }
                 }
             }
 
