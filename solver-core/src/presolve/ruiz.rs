@@ -14,6 +14,7 @@
 //! 3. After solving, unscale x, s, z
 
 use crate::linalg::sparse::{SparseCsc, SparseSymmetricCsc};
+use crate::problem::ConeSpec;
 use sprs::TriMat;
 
 /// Result of Ruiz equilibration containing scaled problem data and scaling factors.
@@ -82,6 +83,7 @@ impl RuizScaling {
 /// * `q` - Linear cost vector (length n)
 /// * `b` - Constraint RHS (length m)
 /// * `iters` - Number of Ruiz iterations
+/// * `cones` - Cone partition (used for block-aware row scaling)
 ///
 /// # Returns
 ///
@@ -93,6 +95,7 @@ pub fn equilibrate(
     q: &[f64],
     b: &[f64],
     iters: usize,
+    cones: &[ConeSpec],
 ) -> (SparseCsc, Option<SparseSymmetricCsc>, Vec<f64>, Vec<f64>, RuizScaling) {
     let m = A.rows();
     let n = A.cols();
@@ -138,12 +141,54 @@ pub fn equilibrate(
         }
 
         // Compute scaling factors: d = 1/sqrt(norm), avoiding division by zero
-        let d_row: Vec<f64> = row_norms.iter()
+        let mut d_row: Vec<f64> = row_norms.iter()
             .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
             .collect();
         let d_col: Vec<f64> = col_norms.iter()
             .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
             .collect();
+
+        // For non-separable cones (SOC/PSD/EXP/POW), enforce uniform row scaling
+        // within each cone block to preserve cone geometry.
+        if !cones.is_empty() {
+            let mut offset = 0;
+            for cone in cones {
+                let dim = match cone {
+                    ConeSpec::Zero { dim } => *dim,
+                    ConeSpec::NonNeg { dim } => *dim,
+                    ConeSpec::Soc { dim } => *dim,
+                    ConeSpec::Psd { n } => n * (n + 1) / 2,
+                    ConeSpec::Exp { count } => 3 * count,
+                    ConeSpec::Pow { cones } => 3 * cones.len(),
+                };
+
+                if dim == 0 {
+                    continue;
+                }
+
+                if offset + dim > m {
+                    break;
+                }
+
+                let uniform_block = matches!(
+                    cone,
+                    ConeSpec::Soc { .. } | ConeSpec::Psd { .. } | ConeSpec::Exp { .. } | ConeSpec::Pow { .. }
+                );
+
+                if uniform_block {
+                    let mut block_norm = 0.0_f64;
+                    for i in offset..offset + dim {
+                        block_norm = block_norm.max(row_norms[i]);
+                    }
+                    let block_scale = if block_norm > 1e-12 { 1.0 / block_norm.sqrt() } else { 1.0 };
+                    for i in offset..offset + dim {
+                        d_row[i] = block_scale;
+                    }
+                }
+
+                offset += dim;
+            }
+        }
 
         // Apply scaling to A: A = diag(d_row) * A * diag(d_col)
         A_scaled = scale_matrix(&A_scaled, &d_row, &d_col);
@@ -241,6 +286,7 @@ fn scale_matrix_scalar(A: &SparseCsc, scalar: f64) -> SparseCsc {
 mod tests {
     use super::*;
     use crate::linalg::sparse;
+    use crate::problem::ConeSpec;
 
     #[test]
     fn test_identity_scaling() {
@@ -268,7 +314,8 @@ mod tests {
         let q = vec![1.0, 2.0, 3.0];
         let b = vec![5.0, 6.0];
 
-        let (A_scaled, _, q_scaled, b_scaled, scaling) = equilibrate(&A, None, &q, &b, 0);
+        let (A_scaled, _, q_scaled, b_scaled, scaling) =
+            equilibrate(&A, None, &q, &b, 0, &[ConeSpec::NonNeg { dim: 2 }]);
 
         // With 0 iterations, should be identity
         assert_eq!(A_scaled.nnz(), A.nnz());
@@ -288,7 +335,7 @@ mod tests {
         let q = vec![1.0, 1.0];
         let b = vec![1.0, 1.0];
 
-        let (A_scaled, _, _, _, _) = equilibrate(&A, None, &q, &b, 10);
+        let (A_scaled, _, _, _, _) = equilibrate(&A, None, &q, &b, 10, &[ConeSpec::NonNeg { dim: 2 }]);
 
         // After equilibration, row and column norms should be more balanced
         let mut row_norms = vec![0.0_f64; 2];
@@ -315,7 +362,7 @@ mod tests {
         let q = vec![1.0, 2.0, 3.0];
         let b = vec![5.0, 6.0];
 
-        let (_, _, _, _, scaling) = equilibrate(&A, None, &q, &b, 5);
+        let (_, _, _, _, scaling) = equilibrate(&A, None, &q, &b, 5, &[ConeSpec::NonNeg { dim: 2 }]);
 
         // Test x roundtrip: x_scaled = x / C, unscale gives x = C * x_scaled
         let x_orig = vec![1.0, 2.0, 3.0];
@@ -369,7 +416,7 @@ mod tests {
         let b = vec![5.0, 6.0];
 
         let (A_scaled, P_scaled, q_scaled, b_scaled, scaling) =
-            equilibrate(&A, Some(&P), &q, &b, 5);
+            equilibrate(&A, Some(&P), &q, &b, 5, &[ConeSpec::NonNeg { dim: 2 }]);
 
         // Verify dimensions are preserved
         assert_eq!(A_scaled.rows(), 2);

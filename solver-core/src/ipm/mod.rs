@@ -45,6 +45,7 @@ pub fn solve_ipm(
         &prob.q,
         &prob.b,
         settings.ruiz_iters,
+        &prob.cones,
     );
 
     // Create scaled problem
@@ -419,4 +420,3 @@ mod tests {
         }
     }
 }
-

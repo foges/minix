@@ -31,7 +31,7 @@ pub enum NtScalingError {
 
 /// Compute NT scaling for NonNeg cone.
 ///
-/// Returns H = diag(sqrt(s ./ z))
+/// Returns H = diag(s ./ z)
 ///
 /// # Arguments
 ///
@@ -55,8 +55,7 @@ pub fn nt_scaling_nonneg(
     }
 
     // NT scaling for nonnegative orthant: H = diag(s/z)
-    // This satisfies: H*z = s and H^{-1}*s = z
-    // (The design doc requires H z ≈ s for the KKT formulation)
+    // This satisfies: H*z = s and H^{-1}*s = z.
     let d: Vec<f64> = s.iter().zip(z.iter())
         .map(|(si, zi)| si / zi)
         .collect();
@@ -73,7 +72,7 @@ pub fn nt_scaling_nonneg(
 ///   3. u_inv_sqrt = jordan_sqrt(jordan_inv(u))
 ///   4. w = P(s_sqrt) u_inv_sqrt
 ///
-/// The resulting w satisfies: P(w) s = z
+/// The resulting w satisfies: P(w) z = s
 ///
 /// # Arguments
 ///
@@ -99,11 +98,25 @@ pub fn nt_scaling_soc(
     let n = cone.dim();
     let mut w = vec![0.0; n];
 
-    // For SOC, the NT point is simply: w = jordan_sqrt(s ∘ z)
-    // This gives w ∘ w = s ∘ z (geometric mean property)
-    let mut s_circ_z = vec![0.0; n];
-    jordan_product(s, z, &mut s_circ_z);
-    jordan_sqrt(&s_circ_z, &mut w);
+    // Full NT scaling for SOC (design doc §6.1):
+    //   s_sqrt = sqrt(s)
+    //   u = P(s_sqrt) z
+    //   u_inv_sqrt = sqrt(inv(u))
+    //   w = P(s_sqrt) u_inv_sqrt
+    // This yields P(w) z = s.
+    let mut s_sqrt = vec![0.0; n];
+    jordan_sqrt(s, &mut s_sqrt);
+
+    let mut u = vec![0.0; n];
+    quad_rep_apply(&s_sqrt, z, &mut u);
+
+    let mut u_inv = vec![0.0; n];
+    jordan_inv(&u, &mut u_inv);
+
+    let mut u_inv_sqrt = vec![0.0; n];
+    jordan_sqrt(&u_inv, &mut u_inv_sqrt);
+
+    quad_rep_apply(&s_sqrt, &u_inv_sqrt, &mut w);
 
     Ok(ScalingBlock::SocStructured { w })
 }
@@ -246,6 +259,44 @@ pub fn jordan_inv_apply(v: &[f64], out: &mut [f64]) {
     jordan_inv(v, out);
 }
 
+/// Public convenience function for computing Jordan square root (SOC only).
+/// Same as `jordan_sqrt` but with clearer naming for external use.
+#[inline]
+pub fn jordan_sqrt_apply(v: &[f64], out: &mut [f64]) {
+    jordan_sqrt(v, out);
+}
+
+/// Public convenience function for Jordan product (SOC only).
+#[inline]
+pub fn jordan_product_apply(a: &[f64], b: &[f64], out: &mut [f64]) {
+    jordan_product(a, b, out);
+}
+
+/// Solve the Jordan equation λ ∘ u = v for u (SOC only).
+///
+/// Uses the spectral decomposition of λ. Requires λ in the interior.
+pub fn jordan_solve_apply(lambda: &[f64], v: &[f64], out: &mut [f64]) {
+    let n = lambda.len();
+    let mut eigen = [0.0; 2];
+    let mut e1 = vec![0.0; n];
+    let mut e2 = vec![0.0; n];
+
+    spectral_decomposition(lambda, &mut eigen, &mut e1, &mut e2);
+
+    let e1_dot: f64 = e1.iter().zip(e1.iter()).map(|(a, b)| a * b).sum();
+    let e2_dot: f64 = e2.iter().zip(e2.iter()).map(|(a, b)| a * b).sum();
+
+    let v1: f64 = v.iter().zip(e1.iter()).map(|(vi, ei)| vi * ei).sum::<f64>() / e1_dot;
+    let v2: f64 = v.iter().zip(e2.iter()).map(|(vi, ei)| vi * ei).sum::<f64>() / e2_dot;
+
+    let inv_l1 = 1.0 / eigen[0].max(1e-14);
+    let inv_l2 = 1.0 / eigen[1].max(1e-14);
+
+    for i in 0..n {
+        out[i] = (v1 * inv_l1) * e1[i] + (v2 * inv_l2) * e2[i];
+    }
+}
+
 /// Compute NT scaling for any cone type.
 ///
 /// This is a convenience function that dispatches to the appropriate
@@ -259,7 +310,7 @@ pub fn jordan_inv_apply(v: &[f64], out: &mut [f64]) {
 ///
 /// # Returns
 ///
-/// The NT scaling block H such that H s ≈ z
+/// The NT scaling block H such that H z ≈ s
 pub fn compute_nt_scaling(
     s: &[f64],
     z: &[f64],
@@ -391,17 +442,18 @@ mod tests {
         let cone = SocCone::new(3);
 
         // Simple test: s = z = (2, [0, 0])
-        // Then w should be (2, [0, 0]) as well
         let s = vec![2.0, 0.0, 0.0];
         let z = vec![2.0, 0.0, 0.0];
 
         let scaling = nt_scaling_soc(&cone, &s, &z).unwrap();
 
         if let ScalingBlock::SocStructured { w } = scaling {
-            // When s = z, the NT point w = jordan_sqrt(s ∘ z) = jordan_sqrt(s ∘ s) = s
-            assert!((w[0] - 2.0).abs() < 1e-6);
-            assert!(w[1].abs() < 1e-6);
-            assert!(w[2].abs() < 1e-6);
+            // Verify H*z = s where H = P(w)
+            let mut hz = vec![0.0; 3];
+            quad_rep_apply(&w, &z, &mut hz);
+            for i in 0..3 {
+                assert!((hz[i] - s[i]).abs() < 1e-8, "H*z != s at index {}", i);
+            }
         } else {
             panic!("Expected SOC structured scaling");
         }
@@ -409,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_nt_scaling_soc_property() {
-        // Property: w ∘ w should equal s ∘ z (NT point definition)
+        // Property: H*z = s for NT scaling
         let cone = SocCone::new(5);
         let s = vec![5.0, 1.0, 2.0, 1.0, 1.0];
         let z = vec![10.0, 2.0, 4.0, 2.0, 2.0];
@@ -417,22 +469,12 @@ mod tests {
         let scaling = nt_scaling_soc(&cone, &s, &z).unwrap();
 
         if let ScalingBlock::SocStructured { w } = scaling {
-            // Verify w ∘ w ≈ s ∘ z
-            let mut w_squared = vec![0.0; 5];
-            jordan_product(&w, &w, &mut w_squared);
-
-            let mut s_circ_z = vec![0.0; 5];
-            jordan_product(&s, &z, &mut s_circ_z);
+            let mut hz = vec![0.0; 5];
+            quad_rep_apply(&w, &z, &mut hz);
 
             for i in 0..5 {
-                let rel_err = (w_squared[i] - s_circ_z[i]).abs() / s_circ_z[i].abs().max(1.0);
-                assert!(
-                    rel_err < 1e-6,
-                    "w∘w ≠ s∘z at index {}: {} vs {}",
-                    i,
-                    w_squared[i],
-                    s_circ_z[i]
-                );
+                let rel_err = (hz[i] - s[i]).abs() / s[i].abs().max(1.0);
+                assert!(rel_err < 1e-6, "H*z != s at index {}", i);
             }
         }
     }

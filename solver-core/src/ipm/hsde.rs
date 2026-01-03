@@ -69,9 +69,6 @@ impl HsdeState {
     ///
     /// The scaling is chosen to reduce initial residuals and improve convergence.
     pub fn initialize_with_prob(&mut self, cones: &[Box<dyn ConeKernel>], prob: &ProblemData) {
-        let n = prob.num_vars();
-        let m = prob.num_constraints();
-
         // Compute scaling factors based on problem data
         let b_norm = prob.b.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
         let q_norm = prob.q.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
@@ -148,15 +145,13 @@ impl HsdeState {
 
             // Check and fix s
             if !cone.is_interior_primal(&self.s[offset..offset + dim]) {
-                // Push to interior using unit initialization scaled by min_value
+                // Push the entire block to a safe interior point.
                 let mut s_unit = vec![0.0; dim];
                 let mut z_unit = vec![0.0; dim];
                 cone.unit_initialization(&mut s_unit, &mut z_unit);
 
                 for i in 0..dim {
-                    if !self.s[offset + i].is_finite() || self.s[offset + i] <= 0.0 {
-                        self.s[offset + i] = s_unit[i] * min_value;
-                    }
+                    self.s[offset + i] = s_unit[i] * min_value;
                 }
             }
 
@@ -167,9 +162,7 @@ impl HsdeState {
                 cone.unit_initialization(&mut s_unit, &mut z_unit);
 
                 for i in 0..dim {
-                    if !self.z[offset + i].is_finite() || self.z[offset + i] <= 0.0 {
-                        self.z[offset + i] = z_unit[i] * min_value;
-                    }
+                    self.z[offset + i] = z_unit[i] * min_value;
                 }
             }
 
