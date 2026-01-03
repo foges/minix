@@ -160,7 +160,7 @@ pub fn solve_ipm(
         compute_residuals(&scaled_prob, &state, &mut residuals);
 
         // Check termination
-        if let Some(term_status) = check_termination(&scaled_prob, &state, &residuals, mu, iter, &criteria) {
+        if let Some(term_status) = check_termination(&prob, &scaling, &state, &residuals, mu, iter, &criteria) {
             status = term_status;
             break;
         }

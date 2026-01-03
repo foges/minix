@@ -398,6 +398,11 @@ impl KktSolver {
 
                 for _ in 0..refine_iters {
                     symm_matvec_upper(kkt, &sol_perm, &mut kx);
+                    if self.static_reg != 0.0 {
+                        for i in 0..kkt_dim {
+                            kx[i] += self.static_reg * sol_perm[i];
+                        }
+                    }
                     for i in 0..kkt_dim {
                         res[i] = rhs_perm[i] - kx[i];
                     }

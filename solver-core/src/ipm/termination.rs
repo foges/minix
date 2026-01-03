@@ -7,6 +7,7 @@
 //! - Numerical errors: NaN, factorization failure, stalled progress
 
 use super::hsde::{HsdeState, HsdeResiduals};
+use crate::presolve::ruiz::RuizScaling;
 use crate::problem::{ProblemData, SolveStatus};
 
 /// Termination criteria.
@@ -53,8 +54,9 @@ impl Default for TerminationCriteria {
 /// Returns `Some(status)` if solver should terminate, `None` otherwise.
 pub fn check_termination(
     prob: &ProblemData,
+    scaling: &RuizScaling,
     state: &HsdeState,
-    residuals: &HsdeResiduals,
+    _residuals: &HsdeResiduals,
     mu: f64,
     iter: usize,
     criteria: &TerminationCriteria,
@@ -78,20 +80,25 @@ pub fn check_termination(
     // Unscale solution by τ
     if state.tau < criteria.tau_min {
         // τ ≈ 0: Check for infeasibility certificates
-        return check_infeasibility(prob, state, criteria);
+        return check_infeasibility(prob, scaling, state, criteria);
     }
 
     // Compute unscaled quantities
-    let x_bar: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
-    let _s_bar: Vec<f64> = state.s.iter().map(|si| si / state.tau).collect();
-    let z_bar: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
+    let inv_tau = 1.0 / state.tau;
+    let x_bar_scaled: Vec<f64> = state.x.iter().map(|xi| xi * inv_tau).collect();
+    let s_bar_scaled: Vec<f64> = state.s.iter().map(|si| si * inv_tau).collect();
+    let z_bar_scaled: Vec<f64> = state.z.iter().map(|zi| zi * inv_tau).collect();
+
+    let x_bar = scaling.unscale_x(&x_bar_scaled);
+    let s_bar = scaling.unscale_s(&s_bar_scaled);
+    let z_bar = scaling.unscale_z(&z_bar_scaled);
 
     // Compute primal objective: 0.5 * x^T P x + q^T x
     let mut primal_obj = 0.0;
-
+    let mut px = vec![0.0; prob.num_vars()];
+    let mut xpx = 0.0;
     if let Some(ref p) = prob.P {
         // x^T P x
-        let mut px = vec![0.0; prob.num_vars()];
         for col in 0..prob.num_vars() {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
@@ -103,8 +110,9 @@ pub fn check_termination(
             }
         }
         for i in 0..prob.num_vars() {
-            primal_obj += 0.5 * x_bar[i] * px[i];
+            xpx += x_bar[i] * px[i];
         }
+        primal_obj += 0.5 * xpx;
     }
 
     // q^T x
@@ -120,23 +128,38 @@ pub fn check_termination(
     }
     // Add quadratic contribution for QP (dual objective includes -0.5 x^T P x)
     if let Some(ref p) = prob.P {
-        let mut xpx = 0.0;
-        for col in 0..prob.num_vars() {
-            if let Some(col_view) = p.outer_view(col) {
-                for (row, &val) in col_view.iter() {
-                    if row == col {
-                        xpx += x_bar[row] * val * x_bar[col];
-                    } else {
-                        xpx += 2.0 * x_bar[row] * val * x_bar[col];
-                    }
-                }
-            }
-        }
         dual_obj -= 0.5 * xpx;
     }
 
     // Compute residuals (unscaled)
-    let (rx_norm, rz_norm, _) = residuals.norms();
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    let mut r_dual = px;
+    for col in 0..n {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            for (row, &a_ij) in col_view.iter() {
+                r_dual[col] += a_ij * z_bar[row];
+            }
+        }
+    }
+    for i in 0..n {
+        r_dual[i] += prob.q[i];
+    }
+    let rx_norm = r_dual.iter().map(|&x| x * x).sum::<f64>().sqrt();
+
+    let mut r_primal = vec![0.0; m];
+    for col in 0..n {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            for (row, &a_ij) in col_view.iter() {
+                r_primal[row] += a_ij * x_bar[col];
+            }
+        }
+    }
+    for i in 0..m {
+        r_primal[i] += s_bar[i] - prob.b[i];
+    }
+    let rz_norm = r_primal.iter().map(|&x| x * x).sum::<f64>().sqrt();
 
     // Compute scaling factors for relative residuals
     let b_norm = prob.b.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
@@ -186,6 +209,7 @@ pub fn check_termination(
 /// Check for infeasibility certificates when τ ≈ 0.
 fn check_infeasibility(
     prob: &ProblemData,
+    scaling: &RuizScaling,
     state: &HsdeState,
     criteria: &TerminationCriteria,
 ) -> Option<SolveStatus> {
@@ -193,17 +217,20 @@ fn check_infeasibility(
         return None;
     }
 
-    // Check primal infeasibility: b^T z < 0
-    let btz: f64 = prob.b.iter().zip(state.z.iter()).map(|(bi, zi)| bi * zi).sum();
+    let x_unscaled = scaling.unscale_x(&state.x);
+    let z_unscaled = scaling.unscale_z(&state.z);
 
-    if btz < -1e-8 {
+    // Check primal infeasibility: b^T z < 0
+    let btz: f64 = prob.b.iter().zip(z_unscaled.iter()).map(|(bi, zi)| bi * zi).sum();
+
+    if btz < -criteria.tol_infeas {
         return Some(SolveStatus::PrimalInfeasible);
     }
 
     // Check dual infeasibility: q^T x < 0
-    let qtx: f64 = prob.q.iter().zip(state.x.iter()).map(|(qi, xi)| qi * xi).sum();
+    let qtx: f64 = prob.q.iter().zip(x_unscaled.iter()).map(|(qi, xi)| qi * xi).sum();
 
-    if qtx < -1e-8 {
+    if qtx < -criteria.tol_infeas {
         return Some(SolveStatus::DualInfeasible);
     }
 
@@ -215,6 +242,7 @@ fn check_infeasibility(
 mod tests {
     use super::*;
     use crate::linalg::sparse;
+    use crate::presolve::ruiz::RuizScaling;
 
     #[test]
     fn test_termination_optimal() {
@@ -248,7 +276,8 @@ mod tests {
 
         let criteria = TerminationCriteria::default();
 
-        let status = check_termination(&prob, &state, &residuals, 1e-9, 10, &criteria);
+        let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
+        let status = check_termination(&prob, &scaling, &state, &residuals, 1e-9, 10, &criteria);
 
         // Should detect optimality
         assert!(matches!(status, Some(SolveStatus::Optimal)));
@@ -273,7 +302,8 @@ mod tests {
             ..Default::default()
         };
 
-        let status = check_termination(&prob, &state, &residuals, 1.0, 51, &criteria);
+        let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
+        let status = check_termination(&prob, &scaling, &state, &residuals, 1.0, 51, &criteria);
 
         assert!(matches!(status, Some(SolveStatus::MaxIters)));
     }
@@ -303,7 +333,8 @@ mod tests {
         let residuals = HsdeResiduals::new(1, 1);
         let criteria = TerminationCriteria::default();
 
-        let status = check_termination(&prob, &state, &residuals, 1.0, 10, &criteria);
+        let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
+        let status = check_termination(&prob, &scaling, &state, &residuals, 1.0, 10, &criteria);
 
         // Should detect primal infeasibility (b^T z = -1 * 1 = -1 < 0)
         assert!(matches!(status, Some(SolveStatus::PrimalInfeasible)));
