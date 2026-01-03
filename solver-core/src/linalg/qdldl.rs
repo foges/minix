@@ -106,6 +106,23 @@ impl QdldlSolver {
         }
     }
 
+    /// Return the current static regularization value.
+    pub fn static_reg(&self) -> f64 {
+        self.static_reg
+    }
+
+    /// Update the static regularization value.
+    pub fn set_static_reg(&mut self, static_reg: f64) -> Result<(), QdldlError> {
+        if static_reg < 0.0 {
+            return Err(QdldlError::InvalidRegularization(format!(
+                "static_reg must be non-negative, got {}",
+                static_reg
+            )));
+        }
+        self.static_reg = static_reg;
+        Ok(())
+    }
+
     /// Perform symbolic factorization on the sparsity pattern.
     ///
     /// Computes the elimination tree, which can be reused across numeric factorizations

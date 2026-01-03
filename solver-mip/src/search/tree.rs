@@ -75,6 +75,11 @@ impl BranchAndBound {
         self.nodes_explored += 1;
     }
 
+    /// Get the count of nodes explored.
+    pub fn nodes_explored_count(&self) -> u64 {
+        self.nodes_explored
+    }
+
     /// Record that a node was pruned.
     pub fn node_pruned(&mut self) {
         self.nodes_pruned += 1;
@@ -102,6 +107,11 @@ impl BranchAndBound {
     /// Add a node to the queue.
     pub fn enqueue(&mut self, node: SearchNode) {
         self.queue.push(node);
+    }
+
+    /// Get the queue length (for debugging).
+    pub fn queue_len(&self) -> usize {
+        self.queue.len()
     }
 
     /// Select a branching variable.
@@ -203,12 +213,30 @@ impl BranchAndBound {
 
     /// Finalize the solve and return the solution.
     pub fn finalize(&self, status: MipStatus) -> MipSolution {
+        // Determine the best bound for the solution
+        let bound = if status == MipStatus::Optimal || status == MipStatus::GapLimit {
+            // When optimal or gap closed, bound equals objective
+            self.incumbent.obj_val
+        } else if self.queue.is_empty() && self.incumbent.has_incumbent() {
+            // Queue exhausted with incumbent means optimal
+            self.incumbent.obj_val
+        } else {
+            // Otherwise use queue best bound
+            self.queue.best_bound()
+        };
+
+        let gap = if self.incumbent.has_incumbent() && bound.is_finite() {
+            MipSolution::compute_gap(self.incumbent.obj_val, bound)
+        } else {
+            f64::INFINITY
+        };
+
         MipSolution {
             status,
             x: self.incumbent.solution.clone().unwrap_or_default(),
             obj_val: self.incumbent.obj_val,
-            bound: self.queue.best_bound(),
-            gap: self.gap(),
+            bound,
+            gap,
             nodes_explored: self.nodes_explored,
             cuts_added: self.cuts_added,
             solve_time_ms: self.elapsed_ms(),

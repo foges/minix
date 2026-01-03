@@ -80,7 +80,7 @@ fn clamp_complementarity_nonneg(
 
     let mut has_nonneg = false;
     let mut changed = false;
-    let mut override_w = vec![0.0; state.s.len()];
+    let mut delta_w = vec![0.0; state.s.len()];
     let mut offset = 0;
 
     for cone in cones {
@@ -100,10 +100,11 @@ fn clamp_complementarity_nonneg(
             let idx = offset + i;
             let w = (state.s[idx] + ds[idx]) * (state.z[idx] + dz[idx]);
             let w_clamped = w.max(beta * mu).min(gamma * mu);
-            if (w_clamped - w).abs() > 0.0 {
+            let delta = w_clamped - w;
+            if delta.abs() > 0.0 {
                 changed = true;
             }
-            override_w[idx] = w_clamped;
+            delta_w[idx] = delta;
         }
 
         offset += dim;
@@ -113,7 +114,7 @@ fn clamp_complementarity_nonneg(
         return None;
     }
 
-    Some(override_w)
+    Some(delta_w)
 }
 
 fn centrality_ok_nonneg_trial(
@@ -236,7 +237,7 @@ pub fn predictor_corrector_step(
         let s = &state.s[offset..offset + dim];
         let z = &state.z[offset..offset + dim];
 
-        // Track minimum values for adaptive regularization
+        // Track minimum values for adaptive regularization (exclude zero cones)
         for &si in s.iter() {
             if si < s_min { s_min = si; }
         }
@@ -248,8 +249,13 @@ pub fn predictor_corrector_step(
         let scale = nt::compute_nt_scaling(s, z, cone.as_ref())
             .unwrap_or_else(|_| {
                 // Fallback to simple diagonal scaling if NT fails
+                let eps = 1e-18;
                 let d: Vec<f64> = s.iter().zip(z.iter())
-                    .map(|(si, zi)| (si / zi).max(1e-8).sqrt())
+                    .map(|(si, zi)| {
+                        let num = si.max(eps);
+                        let den = zi.max(eps);
+                        (num / den).max(eps)
+                    })
                     .collect();
                 ScalingBlock::Diagonal { d }
             });
@@ -258,18 +264,27 @@ pub fn predictor_corrector_step(
         offset += dim;
     }
 
-    // Adaptive regularization: increase when near boundaries
-    // When s_min or z_min < μ/100, the scaling becomes ill-conditioned
-    // Boost regularization to stabilize the solve
+    // Adaptive regularization: gently increase when near boundaries
+    // When min(s, z) < μ/100, the scaling can become ill-conditioned.
     let conditioning_threshold = mu / 100.0;
-    let needs_extra_reg = s_min < conditioning_threshold || z_min < conditioning_threshold;
+    let min_sz = s_min.min(z_min);
+    let needs_extra_reg = min_sz.is_finite() && min_sz < conditioning_threshold;
+    let base_reg = settings.static_reg.max(settings.dynamic_reg_min_pivot);
     let extra_reg = if needs_extra_reg {
-        // Add regularization proportional to how close we are to boundary
-        let ratio = conditioning_threshold / s_min.min(z_min).max(1e-15);
-        (ratio.sqrt() * 1e-4).min(1e-2)  // Cap at 1e-2
+        let denom = min_sz.max(1e-300);
+        let ratio = conditioning_threshold / denom;
+        let scale = ratio.sqrt().min(100.0);
+        (base_reg * scale).min(1e-4)
     } else {
         0.0
     };
+
+    if settings.verbose && extra_reg > 0.0 {
+        eprintln!(
+            "extra_reg={:.2e} (s_min={:.2e}, z_min={:.2e}, mu={:.2e})",
+            extra_reg, s_min, z_min, mu
+        );
+    }
 
     // Apply extra regularization by modifying the scaling
     if extra_reg > 0.0 {
@@ -458,13 +473,20 @@ pub fn predictor_corrector_step(
     // ======================================================================
     // Step 4: Compute centering parameter σ
     // ======================================================================
-    let sigma = compute_centering_parameter_with_cones(
-        alpha_aff, mu, &state.s, &ds_aff, &state.z, &dz_aff, cones, barrier_degree
+    let mu_aff = compute_mu_aff(
+        state,
+        &ds_aff,
+        &dz_aff,
+        dtau_aff,
+        dkappa_aff,
+        alpha_aff,
+        barrier_degree,
     );
+    let sigma = compute_centering_parameter(alpha_aff, mu, mu_aff, barrier_degree);
 
 
     // ======================================================================
-    // Step 5: Combined corrector step
+    // Step 5: Combined corrector step (+ step size, with stall recovery)
     // ======================================================================
     // From design doc §7.3:
     //   d_x = (1-σ) r_x
@@ -474,250 +496,324 @@ pub fn predictor_corrector_step(
     //   d_s = Mehrotra correction (§7.3.1 for symmetric cones)
     //
     // KKT RHS:
-    //   rhs_x = d_x = (1-σ) r_x
+    //   rhs_x = d_x
     //   rhs_z = d_s - d_z
-    //
-    // For NonNeg cone, Mehrotra correction (§7.3.1):
-    //   d_s_i = s_i - σμ/z_i + (ds_aff_i * dz_aff_i)/z_i
     //
     let mut dx = vec![0.0; n];
     let mut dz = vec![0.0; m];
     let mut ds = vec![0.0; m];
     let mut d_s_comb = vec![0.0; m];
     let mut dtau = 0.0;
-    let target_mu = sigma * mu;
+    let mut dkappa = 0.0;
 
-    // Build RHS for combined step
-    // rhs_x = -(1-σ) r_x (Newton step scaled by (1-σ))
-    let rhs_x_comb: Vec<f64> = residuals.r_x.iter().map(|&r| -(1.0 - sigma) * r).collect();
+    let mut alpha = 0.0;
+    let mut alpha_sz = f64::INFINITY;
+    let mut alpha_tau = f64::INFINITY;
+    let mut alpha_kappa = f64::INFINITY;
+    let mut alpha_pre_ls = 0.0;
 
-    let d_kappa_corr = state.kappa * state.tau + dkappa_aff * dtau_aff - target_mu;
+    let mut sigma_used = sigma;
+    let mut sigma_eff = sigma;
+    let mut feas_weight_floor = 0.05;
+    let mut refine_iters = settings.kkt_refine_iters;
+    let mut final_feas_weight = 0.0;
 
-    let mut mcc_override: Option<Vec<f64>> = None;
-    for corr_iter in 0..=settings.mcc_iters {
-        d_s_comb.fill(0.0);
-        let mut offset = 0;
-        for (cone_idx, cone) in cones.iter().enumerate() {
-            let dim = cone.dim();
-            if dim == 0 {
-                continue;
-            }
+    let max_retries = 2usize;
+    for attempt in 0..=max_retries {
+        sigma_used = sigma_eff;
+        let feas_weight = (1.0 - sigma_eff).max(feas_weight_floor);
+        final_feas_weight = feas_weight;
+        let target_mu = sigma_eff * mu;
 
-            if cone.barrier_degree() == 0 {
-                // Zero cone: d_s = 0
-                offset += dim;
-                continue;
-            }
+        let d_kappa_corr = state.kappa * state.tau + dkappa_aff * dtau_aff - target_mu;
 
-            let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
-            let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+        // Build RHS for combined step
+        let rhs_x_comb: Vec<f64> = residuals.r_x.iter().map(|&r| -feas_weight * r).collect();
 
-            if is_soc {
-                if let ScalingBlock::SocStructured { w } = &scaling[cone_idx] {
-                    let z_slice = &state.z[offset..offset + dim];
-                    let ds_aff_slice = &ds_aff[offset..offset + dim];
-                    let dz_aff_slice = &dz_aff[offset..offset + dim];
+        let mut mcc_delta: Option<Vec<f64>> = None;
+        for corr_iter in 0..=settings.mcc_iters {
+            d_s_comb.fill(0.0);
+            let mut offset = 0;
+            for (cone_idx, cone) in cones.iter().enumerate() {
+                let dim = cone.dim();
+                if dim == 0 {
+                    continue;
+                }
 
-                    // Build W = P(w^{1/2}) and W^{-1} = P(w^{-1/2})
-                    let mut w_half = vec![0.0; dim];
-                    nt::jordan_sqrt_apply(w, &mut w_half);
+                if cone.barrier_degree() == 0 {
+                    // Zero cone: d_s = 0
+                    offset += dim;
+                    continue;
+                }
 
-                    let mut w_half_inv = vec![0.0; dim];
-                    nt::jordan_inv_apply(&w_half, &mut w_half_inv);
+                let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+                let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
 
-                    // λ = W z
-                    let mut lambda = vec![0.0; dim];
-                    nt::quad_rep_apply(&w_half, z_slice, &mut lambda);
+                if is_soc {
+                    if let ScalingBlock::SocStructured { w } = &scaling[cone_idx] {
+                        let z_slice = &state.z[offset..offset + dim];
+                        let ds_aff_slice = &ds_aff[offset..offset + dim];
+                        let dz_aff_slice = &dz_aff[offset..offset + dim];
 
-                    // η = (W^{-1} ds_aff) ∘ (W dz_aff)
-                    let mut w_inv_ds = vec![0.0; dim];
-                    nt::quad_rep_apply(&w_half_inv, ds_aff_slice, &mut w_inv_ds);
+                        // Build W = P(w^{1/2}) and W^{-1} = P(w^{-1/2})
+                        let mut w_half = vec![0.0; dim];
+                        nt::jordan_sqrt_apply(w, &mut w_half);
 
-                    let mut w_dz = vec![0.0; dim];
-                    nt::quad_rep_apply(&w_half, dz_aff_slice, &mut w_dz);
+                        let mut w_half_inv = vec![0.0; dim];
+                        nt::jordan_inv_apply(&w_half, &mut w_half_inv);
 
-                    let mut eta = vec![0.0; dim];
-                    nt::jordan_product_apply(&w_inv_ds, &w_dz, &mut eta);
+                        // λ = W z
+                        let mut lambda = vec![0.0; dim];
+                        nt::quad_rep_apply(&w_half, z_slice, &mut lambda);
 
-                    // v = λ∘λ + η - σμ e, with e = (1, 0, ..., 0)
-                    let mut lambda_sq = vec![0.0; dim];
-                    nt::jordan_product_apply(&lambda, &lambda, &mut lambda_sq);
+                        // η = (W^{-1} ds_aff) ∘ (W dz_aff)
+                        let mut w_inv_ds = vec![0.0; dim];
+                        nt::quad_rep_apply(&w_half_inv, ds_aff_slice, &mut w_inv_ds);
 
-                    let mut v = vec![0.0; dim];
-                    v[0] = lambda_sq[0] + eta[0] - target_mu;
-                    for i in 1..dim {
-                        v[i] = lambda_sq[i] + eta[i];
+                        let mut w_dz = vec![0.0; dim];
+                        nt::quad_rep_apply(&w_half, dz_aff_slice, &mut w_dz);
+
+                        let mut eta = vec![0.0; dim];
+                        nt::jordan_product_apply(&w_inv_ds, &w_dz, &mut eta);
+
+                        // v = λ∘λ + η - σμ e, with e = (1, 0, ..., 0)
+                        let mut lambda_sq = vec![0.0; dim];
+                        nt::jordan_product_apply(&lambda, &lambda, &mut lambda_sq);
+
+                        let mut v = vec![0.0; dim];
+                        v[0] = lambda_sq[0] + eta[0] - target_mu;
+                        for i in 1..dim {
+                            v[i] = lambda_sq[i] + eta[i];
+                        }
+
+                        // u solves λ ∘ u = v
+                        let mut u = vec![0.0; dim];
+                        nt::jordan_solve_apply(&lambda, &v, &mut u);
+
+                        // d_s = W^T u (W is self-adjoint for SOC)
+                        let mut d_s_block = vec![0.0; dim];
+                        nt::quad_rep_apply(&w_half, &u, &mut d_s_block);
+
+                        d_s_comb[offset..offset + dim].copy_from_slice(&d_s_block);
+                    } else {
+                        // Fallback: use diagonal correction if scaling block isn't SOC
+                        for i in offset..offset + dim {
+                            let z_i = state.z[i].max(1e-14);
+                            let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
+                            d_s_comb[i] = (w_base - target_mu) / z_i;
+                        }
                     }
-
-                    // u solves λ ∘ u = v
-                    let mut u = vec![0.0; dim];
-                    nt::jordan_solve_apply(&lambda, &v, &mut u);
-
-                    // d_s = W^T u (W is self-adjoint for SOC)
-                    let mut d_s_block = vec![0.0; dim];
-                    nt::quad_rep_apply(&w_half, &u, &mut d_s_block);
-
-                    d_s_comb[offset..offset + dim].copy_from_slice(&d_s_block);
                 } else {
-                    // Fallback: use diagonal correction if scaling block isn't SOC
                     for i in offset..offset + dim {
                         let z_i = state.z[i].max(1e-14);
                         let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
-                        d_s_comb[i] = (w_base - target_mu) / z_i;
+                        let delta = if is_nonneg {
+                            mcc_delta.as_ref().map_or(0.0, |d| d[i])
+                        } else {
+                            0.0
+                        };
+                        d_s_comb[i] = (w_base - target_mu - delta) / z_i;
                     }
                 }
-            } else {
-                for i in offset..offset + dim {
-                    let z_i = state.z[i].max(1e-14);
-                    let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
-                    let w_i = if is_nonneg {
-                        mcc_override.as_ref().map_or(w_base, |w| w[i])
-                    } else {
-                        w_base
-                    };
-                    d_s_comb[i] = (w_i - target_mu) / z_i;
-                }
+
+                offset += dim;
+                let _ = cone_idx;
             }
 
-            offset += dim;
-            let _ = cone_idx;
-        }
+            // rhs_z = d_s - d_z (weighted feasibility residual)
+            let rhs_z_comb: Vec<f64> = d_s_comb.iter().zip(residuals.r_z.iter())
+                .map(|(ds_i, rz_i)| ds_i - feas_weight * rz_i)
+                .collect();
 
-        // rhs_z = d_s - (1-σ) r_z
-        // The d_s from Mehrotra plus the scaled feasibility residual
-        let rhs_z_comb: Vec<f64> = d_s_comb.iter().zip(residuals.r_z.iter())
-            .map(|(ds_i, rz_i)| ds_i - (1.0 - sigma) * rz_i)
-            .collect();
+            kkt.solve_refined(
+                &factor,
+                &rhs_x_comb,
+                &rhs_z_comb,
+                &mut dx,
+                &mut dz,
+                refine_iters,
+            );
 
-        kkt.solve_refined(
-            &factor,
-            &rhs_x_comb,
-            &rhs_z_comb,
-            &mut dx,
-            &mut dz,
-            settings.kkt_refine_iters,
-        );
+            // Compute dtau for corrector step using Schur complement formula
+            // From design doc §7.3:
+            //   d_tau = r_tau
+            //   d_kappa = κτ + Δκ_aff Δτ_aff - σμ
+            //
+            // Schur complement numerator: d_tau - d_kappa/τ + (2Pξ+q)ᵀΔx + bᵀΔz
+            let d_tau_corr = feas_weight * residuals.r_tau;
 
-        // Compute dtau for corrector step using Schur complement formula
-        // From design doc §7.3:
-        //   d_tau = (1-σ) r_tau
-        //   d_kappa = κτ + Δκ_aff Δτ_aff - σμ
-        //
-        // Schur complement numerator: d_tau - d_kappa/τ + (2Pξ+q)ᵀΔx + bᵀΔz
-        let d_tau_corr = (1.0 - sigma) * residuals.r_tau;
+            let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
+            let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
+            let numerator_corr = d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
 
-        let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
-        let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
-        let numerator_corr = d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
+            dtau = compute_dtau(numerator_corr, denominator, state.tau, denom_scale)
+                .map_err(|e| format!("corrector dtau failed: {}", e))?;
 
-        dtau = compute_dtau(numerator_corr, denominator, state.tau, denom_scale)
-            .map_err(|e| format!("corrector dtau failed: {}", e))?;
+            apply_tau_direction(&mut dx, &mut dz, dtau, &dx2, &dz2);
 
-        apply_tau_direction(&mut dx, &mut dz, dtau, &dx2, &dz2);
-
-        // Compute ds from complementarity equation (design doc §5.4):
-        //   Δs = -d_s - H Δz
-        let mut offset = 0;
-        for (cone_idx, cone) in cones.iter().enumerate() {
-            let dim = cone.dim();
-            if dim == 0 {
-                continue;
-            }
-
-            if cone.barrier_degree() == 0 {
-                // Zero cone: ds = 0 always (s must remain 0)
-                for i in offset..offset + dim {
-                    ds[i] = 0.0;
+            // Compute ds from complementarity equation (design doc §5.4):
+            //   Δs = -d_s - H Δz
+            let mut offset = 0;
+            for (cone_idx, cone) in cones.iter().enumerate() {
+                let dim = cone.dim();
+                if dim == 0 {
+                    continue;
                 }
-            } else {
-                // Apply ds = -d_s - H*dz using the scaling block
-                match &scaling[cone_idx] {
-                    ScalingBlock::Diagonal { d } => {
-                        for i in 0..dim {
-                            // ds = -d_s - H*dz
-                            ds[offset + i] = -d_s_comb[offset + i] - d[i] * dz[offset + i];
-                        }
+
+                if cone.barrier_degree() == 0 {
+                    // Zero cone: ds = 0 always (s must remain 0)
+                    for i in offset..offset + dim {
+                        ds[i] = 0.0;
                     }
-                    ScalingBlock::SocStructured { w } => {
-                        // For SOC, H = P(w) (quadratic representation)
-                        // ds = -d_s - P(w)*dz
-                        let dz_slice = &dz[offset..offset + dim];
-                        let mut h_dz = vec![0.0; dim];
-                        crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
-                        for i in 0..dim {
-                            ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
+                } else {
+                    // Apply ds = -d_s - H*dz using the scaling block
+                    match &scaling[cone_idx] {
+                        ScalingBlock::Diagonal { d } => {
+                            for i in 0..dim {
+                                // ds = -d_s - H*dz
+                                ds[offset + i] = -d_s_comb[offset + i] - d[i] * dz[offset + i];
+                            }
                         }
-                    }
-                    _ => {
-                        // Fallback: assume diagonal with H = s/z
-                        for i in 0..dim {
-                            let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
-                            ds[offset + i] = -d_s_comb[offset + i] - h_ii * dz[offset + i];
+                        ScalingBlock::SocStructured { w } => {
+                            // For SOC, H = P(w) (quadratic representation)
+                            // ds = -d_s - P(w)*dz
+                            let dz_slice = &dz[offset..offset + dim];
+                            let mut h_dz = vec![0.0; dim];
+                            crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
+                            for i in 0..dim {
+                                ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
+                            }
+                        }
+                        _ => {
+                            // Fallback: assume diagonal with H = s/z
+                            for i in 0..dim {
+                                let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
+                                ds[offset + i] = -d_s_comb[offset + i] - h_ii * dz[offset + i];
+                            }
                         }
                     }
                 }
+                offset += dim;
+                let _ = cone_idx;
             }
-            offset += dim;
-            let _ = cone_idx;
-        }
 
-        if corr_iter == settings.mcc_iters {
-            break;
-        }
+            if corr_iter == settings.mcc_iters {
+                break;
+            }
 
-        let next_override = clamp_complementarity_nonneg(
-            state,
-            &ds,
-            &dz,
-            cones,
-            settings.centrality_beta,
-            settings.centrality_gamma,
-            mu,
-        );
-        if next_override.is_none() {
-            break;
-        }
-        mcc_override = next_override;
-    }
-
-    // ======================================================================
-    // Step 6: Compute step size with fraction-to-boundary
-    // ======================================================================
-    let tau_old = state.tau;
-    let dkappa = -(d_kappa_corr + state.kappa * dtau) / tau_old;
-
-    let mut alpha = compute_step_size(&state.s, &ds, &state.z, &dz, cones, 1.0);
-    if dtau < 0.0 {
-        alpha = alpha.min(-state.tau / dtau);
-    }
-    if dkappa < 0.0 {
-        alpha = alpha.min(-state.kappa / dkappa);
-    }
-
-    // Apply fraction-to-boundary and cap at 1.0 (never take more than a full Newton step)
-    alpha = (0.99 * alpha).min(1.0);
-
-    if settings.line_search_max_iters > 0
-        && settings.centrality_gamma > settings.centrality_beta
-        && settings.centrality_beta > 0.0
-    {
-        for _ in 0..settings.line_search_max_iters {
-            if centrality_ok_nonneg_trial(
+            let next_delta = clamp_complementarity_nonneg(
                 state,
                 &ds,
                 &dz,
-                dtau,
-                dkappa,
                 cones,
                 settings.centrality_beta,
                 settings.centrality_gamma,
-                barrier_degree,
-                alpha,
-            ) {
+                mu,
+            );
+            if next_delta.is_none() {
                 break;
             }
-            alpha *= 0.5;
+            mcc_delta = next_delta;
         }
+
+        // Compute step size with fraction-to-boundary
+        let tau_old = state.tau;
+        dkappa = -(d_kappa_corr + state.kappa * dtau) / tau_old;
+
+        alpha_sz = compute_step_size(&state.s, &ds, &state.z, &dz, cones, 1.0);
+        alpha = alpha_sz;
+        alpha_tau = f64::INFINITY;
+        alpha_kappa = f64::INFINITY;
+        if dtau < 0.0 {
+            alpha_tau = -state.tau / dtau;
+            alpha = alpha.min(alpha_tau);
+        }
+        if dkappa < 0.0 {
+            alpha_kappa = -state.kappa / dkappa;
+            alpha = alpha.min(alpha_kappa);
+        }
+
+        // Apply fraction-to-boundary and cap at 1.0 (never take more than a full Newton step)
+        alpha = (0.99 * alpha).min(1.0);
+        alpha_pre_ls = alpha;
+
+        if settings.line_search_max_iters > 0
+            && settings.centrality_gamma > settings.centrality_beta
+            && settings.centrality_beta > 0.0
+        {
+            for _ in 0..settings.line_search_max_iters {
+                if centrality_ok_nonneg_trial(
+                    state,
+                    &ds,
+                    &dz,
+                    dtau,
+                    dkappa,
+                    cones,
+                    settings.centrality_beta,
+                    settings.centrality_gamma,
+                    barrier_degree,
+                    alpha,
+                ) {
+                    break;
+                }
+                alpha *= 0.5;
+            }
+        }
+
+        let alpha_limiter_sz = alpha_sz <= alpha_tau.min(alpha_kappa);
+        let alpha_stall = alpha < 1e-3 && mu < 1e-6 && alpha_limiter_sz;
+        if !alpha_stall || attempt == max_retries {
+            break;
+        }
+
+        if settings.verbose {
+            eprintln!(
+                "alpha stall detected: alpha={:.3e} (pre_ls={:.3e}), alpha_sz={:.3e}, alpha_tau={:.3e}, alpha_kappa={:.3e}, sigma={:.3e}, attempt={}",
+                alpha,
+                alpha_pre_ls,
+                alpha_sz,
+                alpha_tau,
+                alpha_kappa,
+                sigma_eff,
+                attempt + 1,
+            );
+        }
+
+        if attempt == 0 {
+            let base_reg = settings.static_reg.max(settings.dynamic_reg_min_pivot);
+            let bump_reg = (base_reg * 10.0).min(1e-4);
+            if bump_reg > 0.0 {
+                let changed = kkt
+                    .bump_static_reg(bump_reg)
+                    .map_err(|e| format!("KKT reg bump failed: {}", e))?;
+                if changed && settings.verbose {
+                    eprintln!("bumped KKT static_reg to {:.2e} after alpha stall", bump_reg);
+                }
+            }
+            sigma_eff = (sigma_eff + 0.2).min(0.999);
+            refine_iters = refine_iters.saturating_add(2);
+        } else {
+            sigma_eff = 0.999;
+            feas_weight_floor = 0.0;
+            refine_iters = refine_iters.saturating_add(2);
+        }
+    }
+
+    if settings.verbose && alpha < 1e-8 {
+        eprintln!(
+            "alpha stall: alpha={:.3e} (pre_ls={:.3e}), alpha_sz={:.3e}, alpha_tau={:.3e}, alpha_kappa={:.3e}, sigma={:.3e}, feas_weight={:.3e}, tau={:.3e}, kappa={:.3e}, dtau={:.3e}, dkappa={:.3e}",
+            alpha,
+            alpha_pre_ls,
+            alpha_sz,
+            alpha_tau,
+            alpha_kappa,
+            sigma_used,
+            final_feas_weight,
+            state.tau,
+            state.kappa,
+            dtau,
+            dkappa,
+        );
     }
 
     // ======================================================================
@@ -772,7 +868,7 @@ pub fn predictor_corrector_step(
 
     Ok(StepResult {
         alpha,
-        sigma,
+        sigma: sigma_used,
         mu_new,
     })
 }
@@ -834,14 +930,40 @@ fn compute_step_size(
 /// This is simple, stable, and works well in practice.
 /// It gives σ ≈ 0 when affine step is large (aggressive progress)
 /// and σ ≈ 1 when affine step is small (conservative centering).
-fn compute_centering_parameter_with_cones(
+fn compute_mu_aff(
+    state: &HsdeState,
+    ds_aff: &[f64],
+    dz_aff: &[f64],
+    dtau_aff: f64,
+    dkappa_aff: f64,
     alpha_aff: f64,
-    _mu: f64,
-    _s: &[f64],
-    _ds: &[f64],
-    _z: &[f64],
-    _dz: &[f64],
-    _cones: &[Box<dyn ConeKernel>],
+    barrier_degree: usize,
+) -> f64 {
+    if barrier_degree == 0 {
+        return 0.0;
+    }
+
+    let tau_aff = state.tau + alpha_aff * dtau_aff;
+    let kappa_aff = state.kappa + alpha_aff * dkappa_aff;
+    if !tau_aff.is_finite() || !kappa_aff.is_finite() || tau_aff <= 0.0 || kappa_aff <= 0.0 {
+        return f64::NAN;
+    }
+
+    let mut s_dot_z = 0.0;
+    for i in 0..state.s.len() {
+        let s_i = state.s[i] + alpha_aff * ds_aff[i];
+        let z_i = state.z[i] + alpha_aff * dz_aff[i];
+        s_dot_z += s_i * z_i;
+    }
+
+    (s_dot_z + tau_aff * kappa_aff) / (barrier_degree as f64 + 1.0)
+}
+
+/// Compute centering parameter σ using μ_aff when reliable.
+fn compute_centering_parameter(
+    alpha_aff: f64,
+    mu: f64,
+    mu_aff: f64,
     barrier_degree: usize,
 ) -> f64 {
     // Special case: no barrier (only Zero cones)
@@ -849,50 +971,42 @@ fn compute_centering_parameter_with_cones(
         return 0.0;
     }
 
-    // σ = (1 - α_aff)³  (design doc §7.2)
-    // This formula is robust and simple:
-    // - α_aff ≈ 1 gives σ ≈ 0 (aggressive, mostly Newton)
-    // - α_aff ≈ 0 gives σ ≈ 1 (conservative, mostly centering)
-    let sigma = (1.0 - alpha_aff).powi(3);
+    let sigma_min = 1e-3;
+    let sigma_max = 0.999;
+    let sigma = if mu_aff.is_finite() && mu_aff > 0.0 && mu.is_finite() && mu > 0.0 {
+        let ratio = (mu_aff / mu).max(0.0);
+        ratio.powi(3)
+    } else {
+        (1.0 - alpha_aff).powi(3)
+    };
 
-    // Clamp to [0, 1]
-    sigma.max(0.0).min(1.0)
+    sigma.max(sigma_min).min(sigma_max)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cones::NonNegCone;
 
     #[test]
     fn test_compute_centering_parameter() {
-        // Create NonNeg cones for testing (3-dimensional)
-        let cones: Vec<Box<dyn ConeKernel>> = vec![Box::new(NonNegCone::new(3))];
-
-        // Test that σ → 0 when affine step makes good progress
-        // Using σ = (1 - α_aff)³, α_aff = 0.99 gives σ ≈ 0.01³ ≈ 0.000001
-        let sigma = compute_centering_parameter_with_cones(
+        // If μ_aff << μ, σ should clip to the lower bound.
+        let sigma = compute_centering_parameter(
             0.99, // large alpha_aff (good progress)
             1.0,  // current mu
-            &vec![1.0; 3],
-            &vec![-0.5; 3],
-            &vec![1.0; 3],
-            &vec![-0.5; 3],
-            &cones,
+            1e-6, // very small mu_aff
             3,
         );
-        assert!(sigma < 0.001, "σ should be very small for large affine step, got {}", sigma);
+        assert!(
+            sigma >= 1e-3 && sigma <= 1.1e-3,
+            "σ should clip near 1e-3 for tiny mu_aff, got {}",
+            sigma
+        );
 
         // Test that σ → 1 when affine step makes poor progress
-        // α_aff = 0.01 gives σ ≈ 0.99³ ≈ 0.97
-        let sigma = compute_centering_parameter_with_cones(
+        let sigma = compute_centering_parameter(
             0.01, // small alpha_aff (poor progress)
-            1.0,
-            &vec![1.0; 3],
-            &vec![-0.5; 3],
-            &vec![1.0; 3],
-            &vec![-0.5; 3],
-            &cones,
+            1.0,  // current mu
+            1.0,  // mu_aff ~ mu
             3,
         );
         assert!(sigma > 0.9, "σ should be large for small affine step, got {}", sigma);

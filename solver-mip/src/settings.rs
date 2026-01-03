@@ -17,6 +17,28 @@ pub enum BranchingRule {
         /// Number of candidate variables to evaluate.
         candidates: usize,
     },
+
+    /// Reliability branching: use strong branching until pseudocosts are reliable.
+    ///
+    /// This combines the accuracy of strong branching with the speed of pseudocost
+    /// branching. Variables are evaluated with strong branching until they have
+    /// been branched on `reliability_count` times, then pseudocosts are used.
+    Reliability {
+        /// Number of strong branching candidates per round.
+        candidates: usize,
+
+        /// Minimum branch count before trusting pseudocosts.
+        reliability_count: u64,
+
+        /// Maximum strong branching iterations per candidate.
+        max_sb_iters: usize,
+    },
+
+    /// Hybrid branching: mix most-fractional for early nodes, pseudocost later.
+    Hybrid {
+        /// Switch to pseudocost after this many nodes.
+        switch_after_nodes: u64,
+    },
 }
 
 /// Node selection strategy for the B&B tree.
@@ -36,6 +58,24 @@ pub enum NodeSelection {
     Hybrid {
         /// How often to dive (every N nodes).
         dive_freq: usize,
+    },
+
+    /// Two-phase: depth-first until first incumbent, then best-bound.
+    TwoPhase,
+
+    /// Plunging: dive deeply, backtrack on infeasibility.
+    ///
+    /// Selects a child of the current node if available, otherwise
+    /// picks the best-bound node from the queue.
+    Plunging {
+        /// Maximum depth to plunge before switching to best-bound.
+        max_plunge_depth: usize,
+    },
+
+    /// Restarts: periodically restart from best-bound.
+    Restarts {
+        /// Restart every N nodes.
+        restart_freq: u64,
     },
 }
 
@@ -101,11 +141,13 @@ impl Default for MipSettings {
         // Master is LP/QP, can use tighter tolerances
         master_settings.tol_feas = 1e-8;
         master_settings.tol_gap = 1e-8;
+        master_settings.max_iter = 200; // More iterations for harder problems
 
         let mut oracle_settings = SolverSettings::default();
         // Oracle validates conic feasibility
         oracle_settings.tol_feas = 1e-7;
         oracle_settings.tol_gap = 1e-7;
+        oracle_settings.max_iter = 200; // More iterations for harder problems
 
         Self {
             // Termination

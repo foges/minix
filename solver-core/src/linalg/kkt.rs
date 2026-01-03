@@ -82,6 +82,27 @@ impl KktSolver {
         }
     }
 
+    /// Return the current static regularization value.
+    pub fn static_reg(&self) -> f64 {
+        self.static_reg
+    }
+
+    /// Update the static regularization value (used in KKT assembly + LDL).
+    pub fn set_static_reg(&mut self, static_reg: f64) -> Result<(), QdldlError> {
+        self.static_reg = static_reg;
+        self.qdldl.set_static_reg(static_reg)?;
+        Ok(())
+    }
+
+    /// Increase static regularization to at least `min_static_reg`.
+    pub fn bump_static_reg(&mut self, min_static_reg: f64) -> Result<bool, QdldlError> {
+        if min_static_reg > self.static_reg {
+            self.set_static_reg(min_static_reg)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn compute_camd_perm(&self, kkt: &SparseCsc) -> Result<(Vec<usize>, Vec<usize>), QdldlError> {
         let perm = try_camd(kkt.structure_view())
             .map_err(|e| QdldlError::OrderingFailed(e.to_string()))?;

@@ -50,7 +50,7 @@ pub fn nt_scaling_nonneg(
         });
     }
 
-    if !cone.is_interior_primal(s) || !cone.is_interior_dual(z) {
+    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
         return Err(NtScalingError::NotInterior);
     }
 
@@ -91,7 +91,7 @@ pub fn nt_scaling_soc(
         });
     }
 
-    if !cone.is_interior_primal(s) || !cone.is_interior_dual(z) {
+    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
         return Err(NtScalingError::NotInterior);
     }
 

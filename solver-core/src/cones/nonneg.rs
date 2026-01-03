@@ -36,6 +36,18 @@ impl NonNegCone {
 
     /// Interior tolerance: s_i > tol * max(1, ||s||_∞)
     const INTERIOR_TOL: f64 = 1e-12;
+
+    /// Scaling interior tolerance: accept very small positive values.
+    const SCALING_INTERIOR_TOL: f64 = 1e-300;
+
+    /// Relaxed interior check for scaling computations.
+    pub(crate) fn is_interior_scaling(&self, s: &[f64]) -> bool {
+        assert_eq!(s.len(), self.dim);
+        if s.iter().any(|&x| !x.is_finite()) {
+            return false;
+        }
+        s.iter().all(|&x| x > Self::SCALING_INTERIOR_TOL)
+    }
 }
 
 impl ConeKernel for NonNegCone {

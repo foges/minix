@@ -35,6 +35,9 @@ pub fn solve_ipm(
     // Validate problem
     prob.validate()?;
 
+    // Convert var_bounds to explicit constraints if present
+    let prob = prob.with_bounds_as_constraints();
+
     let n = prob.num_vars();
     let m = prob.num_constraints();
 

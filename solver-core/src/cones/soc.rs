@@ -45,6 +45,26 @@ impl SocCone {
     /// Interior tolerance
     const INTERIOR_TOL: f64 = 1e-12;
 
+    /// Scaling interior tolerance: accept very small positive values.
+    const SCALING_INTERIOR_TOL: f64 = 1e-30;
+
+    /// Relaxed interior check for scaling computations.
+    pub(crate) fn is_interior_scaling(&self, s: &[f64]) -> bool {
+        assert_eq!(s.len(), self.dim);
+        if s.iter().any(|&x| !x.is_finite()) {
+            return false;
+        }
+
+        let t = s[0];
+        if t <= 0.0 {
+            return false;
+        }
+
+        let x_norm = Self::x_norm(s);
+        let tol = Self::SCALING_INTERIOR_TOL * t.abs().max(1.0);
+        t - x_norm > tol
+    }
+
     /// Compute t² - ||x||² (the discriminant used throughout)
     #[inline]
     fn discriminant(s: &[f64]) -> f64 {
@@ -473,4 +493,3 @@ mod tests {
         assert!(cone.is_interior_dual(&z));
     }
 }
-

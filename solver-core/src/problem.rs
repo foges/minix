@@ -189,10 +189,10 @@ impl Default for SolverSettings {
             dynamic_reg_min_pivot: 1e-7,
             threads: 0,  // Auto-detect
             kkt_refine_iters: 1,
-            mcc_iters: 2,
+            mcc_iters: 0,
             centrality_beta: 0.1,
             centrality_gamma: 10.0,
-            line_search_max_iters: 8,
+            line_search_max_iters: 0,
             seed: 0,
             enable_gpu: false,
         }
@@ -392,6 +392,103 @@ impl ProblemData {
         }
 
         Ok(())
+    }
+
+    /// Convert variable bounds to explicit cone constraints.
+    ///
+    /// This creates a new problem with var_bounds = None, where bounds are
+    /// represented as NonNeg cone constraints:
+    /// - x >= lb becomes -x + s = -lb with s >= 0
+    /// - x <= ub becomes  x + s = ub with s >= 0
+    pub fn with_bounds_as_constraints(&self) -> Self {
+        let Some(ref bounds) = self.var_bounds else {
+            // No bounds, return clone
+            return self.clone();
+        };
+
+        // Count lower and upper bounds
+        let mut num_lb = 0;
+        let mut num_ub = 0;
+        for b in bounds {
+            if b.lower.is_some() {
+                num_lb += 1;
+            }
+            if b.upper.is_some() {
+                num_ub += 1;
+            }
+        }
+
+        if num_lb + num_ub == 0 {
+            return self.clone();
+        }
+
+        let n = self.num_vars();
+        let m = self.num_constraints();
+        let m_new = m + num_lb + num_ub;
+
+        // Build new A matrix with bound constraints appended
+        use sprs::TriMat;
+        let mut tri = TriMat::new((m_new, n));
+
+        // Copy existing A
+        for (col_idx, col) in self.A.outer_iterator().enumerate() {
+            for (row_idx, &val) in col.iter() {
+                tri.add_triplet(row_idx, col_idx, val);
+            }
+        }
+
+        // Add lower bound rows: -x + s = -lb with s >= 0 means x >= lb
+        let mut row = m;
+        for b in bounds {
+            if b.lower.is_some() {
+                tri.add_triplet(row, b.var, -1.0);
+                row += 1;
+            }
+        }
+
+        // Add upper bound rows: x + s = ub with s >= 0 means x <= ub
+        for b in bounds {
+            if b.upper.is_some() {
+                tri.add_triplet(row, b.var, 1.0);
+                row += 1;
+            }
+        }
+
+        let a_new = tri.to_csc();
+
+        // Build new b vector
+        let mut b_new = Vec::with_capacity(m_new);
+        b_new.extend_from_slice(&self.b);
+
+        // Lower bound RHS: -lb
+        for b in bounds {
+            if let Some(lb) = b.lower {
+                b_new.push(-lb);
+            }
+        }
+
+        // Upper bound RHS: ub
+        for b in bounds {
+            if let Some(ub) = b.upper {
+                b_new.push(ub);
+            }
+        }
+
+        // Add NonNeg cone for bounds
+        let mut cones_new = self.cones.clone();
+        if num_lb + num_ub > 0 {
+            cones_new.push(ConeSpec::NonNeg { dim: num_lb + num_ub });
+        }
+
+        ProblemData {
+            P: self.P.clone(),
+            q: self.q.clone(),
+            A: a_new,
+            b: b_new,
+            cones: cones_new,
+            var_bounds: None,
+            integrality: self.integrality.clone(),
+        }
     }
 }
 

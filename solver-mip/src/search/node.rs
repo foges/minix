@@ -111,12 +111,19 @@ impl SearchNode {
     }
 
     /// Create a child node from a bound change.
+    ///
+    /// Accumulates all ancestor bound changes so that when this node is
+    /// processed, all bounds are correctly applied.
     pub fn child(&self, id: u64, bound_change: BoundChange) -> Self {
+        // Copy parent's bound changes and add the new one
+        let mut bound_changes = self.bound_changes.clone();
+        bound_changes.push(bound_change);
+
         Self {
             id,
             parent_id: Some(self.id),
             depth: self.depth + 1,
-            bound_changes: vec![bound_change],
+            bound_changes,
             dual_bound: self.dual_bound, // Inherit parent's bound initially
             estimate: self.estimate,
             status: NodeStatus::Pending,
@@ -155,6 +162,12 @@ mod tests {
         assert_eq!(child.parent_id, Some(0));
         assert_eq!(child.depth, 1);
         assert_eq!(child.bound_changes.len(), 1);
+
+        // Grandchild should accumulate bound changes
+        let bc2 = BoundChange::up_branch(1, 0.0, 1.0, 0.5);
+        let grandchild = child.child(2, bc2);
+        assert_eq!(grandchild.depth, 2);
+        assert_eq!(grandchild.bound_changes.len(), 2);
     }
 
     #[test]

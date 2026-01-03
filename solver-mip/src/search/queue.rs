@@ -51,6 +51,15 @@ pub struct NodeQueue {
 
     /// Best (lowest) dual bound in queue.
     best_bound: f64,
+
+    /// ID of last processed node (for plunging).
+    last_node_id: Option<u64>,
+
+    /// Whether we have found an incumbent (for two-phase).
+    has_incumbent: bool,
+
+    /// Current plunge depth.
+    plunge_depth: usize,
 }
 
 impl NodeQueue {
@@ -62,7 +71,20 @@ impl NodeQueue {
             nodes_added: 0,
             nodes_popped: 0,
             best_bound: f64::NEG_INFINITY,
+            last_node_id: None,
+            has_incumbent: false,
+            plunge_depth: 0,
         }
+    }
+
+    /// Notify that an incumbent has been found.
+    pub fn set_has_incumbent(&mut self, has: bool) {
+        self.has_incumbent = has;
+    }
+
+    /// Reset plunge depth (called when backtracking).
+    pub fn reset_plunge(&mut self) {
+        self.plunge_depth = 0;
     }
 
     /// Add a node to the queue.
@@ -80,13 +102,117 @@ impl NodeQueue {
 
     /// Get the next node to process.
     pub fn pop(&mut self) -> Option<SearchNode> {
-        let queued = self.heap.pop()?;
+        let queued = self.pop_with_strategy()?;
         self.nodes_popped += 1;
+        self.last_node_id = Some(queued.node.id);
+
+        // Update plunge depth
+        if let Some(last_id) = self.last_node_id {
+            if queued.node.parent_id == Some(last_id) {
+                self.plunge_depth += 1;
+            } else {
+                self.plunge_depth = 0;
+            }
+        }
 
         // Recompute best bound
         self.recompute_best_bound();
 
         Some(queued.node)
+    }
+
+    /// Pop with strategy-specific logic.
+    fn pop_with_strategy(&mut self) -> Option<QueuedNode> {
+        match self.strategy {
+            NodeSelection::TwoPhase => {
+                if !self.has_incumbent {
+                    // Depth-first until incumbent found
+                    self.pop_by_depth()
+                } else {
+                    // Best-bound after incumbent
+                    self.heap.pop()
+                }
+            }
+            NodeSelection::Plunging { max_plunge_depth } => {
+                // Try to continue plunging if possible
+                if self.plunge_depth < max_plunge_depth {
+                    if let Some(child) = self.pop_child_of_last() {
+                        return Some(child);
+                    }
+                }
+                // Fall back to best-bound
+                self.heap.pop()
+            }
+            NodeSelection::Restarts { restart_freq } => {
+                if self.nodes_popped > 0 && self.nodes_popped % restart_freq == 0 {
+                    // Restart: pick best-bound
+                    self.heap.pop()
+                } else {
+                    // Normal: depth-first
+                    self.pop_by_depth()
+                }
+            }
+            _ => {
+                // Other strategies use priority-based selection
+                self.heap.pop()
+            }
+        }
+    }
+
+    /// Pop the deepest node (for depth-first variants).
+    fn pop_by_depth(&mut self) -> Option<QueuedNode> {
+        if self.heap.is_empty() {
+            return None;
+        }
+
+        // Find deepest node
+        let mut deepest_idx = 0;
+        let mut max_depth = 0;
+        for (i, q) in self.heap.iter().enumerate() {
+            if q.node.depth > max_depth {
+                max_depth = q.node.depth;
+                deepest_idx = i;
+            }
+        }
+
+        // Remove and return (inefficient, but simple)
+        let nodes: Vec<_> = self.heap.drain().collect();
+        let mut result = None;
+        for (i, node) in nodes.into_iter().enumerate() {
+            if i == deepest_idx {
+                result = Some(node);
+            } else {
+                self.heap.push(node);
+            }
+        }
+        result
+    }
+
+    /// Pop a child of the last processed node (for plunging).
+    fn pop_child_of_last(&mut self) -> Option<QueuedNode> {
+        let last_id = self.last_node_id?;
+
+        // Find a child of the last node
+        let child_idx = self
+            .heap
+            .iter()
+            .position(|q| q.node.parent_id == Some(last_id));
+
+        if let Some(idx) = child_idx {
+            // Remove and return the child
+            let nodes: Vec<_> = self.heap.drain().collect();
+            let mut result = None;
+            for (i, node) in nodes.into_iter().enumerate() {
+                if i == idx {
+                    result = Some(node);
+                } else {
+                    self.heap.push(node);
+                }
+            }
+            result
+        } else {
+            None
+        }
     }
 
     /// Peek at the next node without removing it.
@@ -160,6 +286,23 @@ impl NodeQueue {
                 } else {
                     -node.dual_bound
                 }
+            }
+            NodeSelection::TwoPhase => {
+                // Priority based on phase (handled in pop_with_strategy)
+                if self.has_incumbent {
+                    -node.dual_bound
+                } else {
+                    node.depth as f64
+                }
+            }
+            NodeSelection::Plunging { .. } => {
+                // Prefer children of current node, then best-bound
+                // Priority is mainly for fallback
+                -node.dual_bound
+            }
+            NodeSelection::Restarts { .. } => {
+                // Use depth for normal selection
+                node.depth as f64
             }
         }
     }
