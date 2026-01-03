@@ -153,6 +153,21 @@ pub struct SolverSettings {
     /// Number of threads for parallel operations (0 = auto)
     pub threads: usize,
 
+    /// Iterative refinement steps for KKT solves
+    pub kkt_refine_iters: usize,
+
+    /// Multiple centrality correction iterations
+    pub mcc_iters: usize,
+
+    /// Centrality lower bound (sᵢ zᵢ >= β μ)
+    pub centrality_beta: f64,
+
+    /// Centrality upper bound (sᵢ zᵢ <= γ μ)
+    pub centrality_gamma: f64,
+
+    /// Max backtracking steps for centrality line search
+    pub line_search_max_iters: usize,
+
     /// Random seed for deterministic heuristics
     pub seed: u64,
 
@@ -173,6 +188,11 @@ impl Default for SolverSettings {
             static_reg: 1e-9,
             dynamic_reg_min_pivot: 1e-7,
             threads: 0,  // Auto-detect
+            kkt_refine_iters: 1,
+            mcc_iters: 2,
+            centrality_beta: 0.1,
+            centrality_gamma: 10.0,
+            line_search_max_iters: 8,
             seed: 0,
             enable_gpu: false,
         }

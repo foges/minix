@@ -188,6 +188,11 @@ impl From<SolveResult> for MinixResult {
     verbose = None,
     tol_feas = None,
     tol_gap = None,
+    kkt_refine_iters = None,
+    mcc_iters = None,
+    centrality_beta = None,
+    centrality_gamma = None,
+    line_search_max_iters = None,
     time_limit_ms = None
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -212,6 +217,11 @@ fn solve_conic(
     verbose: Option<bool>,
     tol_feas: Option<f64>,
     tol_gap: Option<f64>,
+    kkt_refine_iters: Option<usize>,
+    mcc_iters: Option<usize>,
+    centrality_beta: Option<f64>,
+    centrality_gamma: Option<f64>,
+    line_search_max_iters: Option<usize>,
     time_limit_ms: Option<u64>,
 ) -> PyResult<MinixResult> {
     // Extract all data from Python arrays first (while we hold the GIL)
@@ -285,6 +295,21 @@ fn solve_conic(
     if let Some(v) = tol_gap {
         settings.tol_gap = v;
     }
+    if let Some(v) = kkt_refine_iters {
+        settings.kkt_refine_iters = v;
+    }
+    if let Some(v) = mcc_iters {
+        settings.mcc_iters = v;
+    }
+    if let Some(v) = centrality_beta {
+        settings.centrality_beta = v;
+    }
+    if let Some(v) = centrality_gamma {
+        settings.centrality_gamma = v;
+    }
+    if let Some(v) = line_search_max_iters {
+        settings.line_search_max_iters = v;
+    }
     if let Some(v) = time_limit_ms {
         settings.time_limit_ms = Some(v);
     }
@@ -309,10 +334,22 @@ fn default_settings(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let settings = SolverSettings::default();
     let dict = PyDict::new_bound(py);
     dict.set_item("max_iter", settings.max_iter)?;
+    dict.set_item("time_limit_ms", settings.time_limit_ms)?;
     dict.set_item("verbose", settings.verbose)?;
     dict.set_item("tol_feas", settings.tol_feas)?;
     dict.set_item("tol_gap", settings.tol_gap)?;
     dict.set_item("tol_infeas", settings.tol_infeas)?;
+    dict.set_item("ruiz_iters", settings.ruiz_iters)?;
+    dict.set_item("static_reg", settings.static_reg)?;
+    dict.set_item("dynamic_reg_min_pivot", settings.dynamic_reg_min_pivot)?;
+    dict.set_item("threads", settings.threads)?;
+    dict.set_item("kkt_refine_iters", settings.kkt_refine_iters)?;
+    dict.set_item("mcc_iters", settings.mcc_iters)?;
+    dict.set_item("centrality_beta", settings.centrality_beta)?;
+    dict.set_item("centrality_gamma", settings.centrality_gamma)?;
+    dict.set_item("line_search_max_iters", settings.line_search_max_iters)?;
+    dict.set_item("seed", settings.seed)?;
+    dict.set_item("enable_gpu", settings.enable_gpu)?;
     Ok(dict)
 }
 

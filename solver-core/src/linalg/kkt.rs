@@ -23,6 +23,16 @@ use crate::scaling::ScalingBlock;
 use sprs::TriMat;
 use sprs_suitesparse_camd::try_camd;
 
+fn symm_matvec_upper(a: &SparseCsc, x: &[f64], y: &mut [f64]) {
+    y.fill(0.0);
+    for (val, (row, col)) in a.iter() {
+        y[row] += val * x[col];
+        if row != col {
+            y[col] += val * x[row];
+        }
+    }
+}
+
 /// KKT system solver.
 ///
 /// Manages the construction, factorization, and solution of KKT systems
@@ -308,6 +318,31 @@ impl KktSolver {
         sol_x: &mut [f64],
         sol_z: &mut [f64],
     ) {
+        self.solve_with_refinement(factor, rhs_x, rhs_z, sol_x, sol_z, 0);
+    }
+
+    /// Solve with optional iterative refinement.
+    pub fn solve_refined(
+        &self,
+        factor: &QdldlFactorization,
+        rhs_x: &[f64],
+        rhs_z: &[f64],
+        sol_x: &mut [f64],
+        sol_z: &mut [f64],
+        refine_iters: usize,
+    ) {
+        self.solve_with_refinement(factor, rhs_x, rhs_z, sol_x, sol_z, refine_iters);
+    }
+
+    fn solve_with_refinement(
+        &self,
+        factor: &QdldlFactorization,
+        rhs_x: &[f64],
+        rhs_z: &[f64],
+        sol_x: &mut [f64],
+        sol_z: &mut [f64],
+        refine_iters: usize,
+    ) {
         assert_eq!(rhs_x.len(), self.n);
         assert_eq!(rhs_z.len(), self.m);
         assert_eq!(sol_x.len(), self.n);
@@ -333,6 +368,31 @@ impl KktSolver {
         // Solve permuted system
         let mut sol_perm = vec![0.0; kkt_dim];
         self.qdldl.solve(factor, &rhs_perm, &mut sol_perm);
+
+        if refine_iters > 0 {
+            if let Some(kkt) = &self.kkt_mat {
+                let mut kx = vec![0.0; kkt_dim];
+                let mut res = vec![0.0; kkt_dim];
+                let mut delta = vec![0.0; kkt_dim];
+
+                for _ in 0..refine_iters {
+                    symm_matvec_upper(kkt, &sol_perm, &mut kx);
+                    for i in 0..kkt_dim {
+                        res[i] = rhs_perm[i] - kx[i];
+                    }
+
+                    let res_norm = res.iter().map(|v| v * v).sum::<f64>().sqrt();
+                    if !res_norm.is_finite() || res_norm < 1e-12 {
+                        break;
+                    }
+
+                    self.qdldl.solve(factor, &res, &mut delta);
+                    for i in 0..kkt_dim {
+                        sol_perm[i] += delta[i];
+                    }
+                }
+            }
+        }
 
         // Unpermute solution back to original ordering
         if let Some(p_inv) = &self.perm_inv {

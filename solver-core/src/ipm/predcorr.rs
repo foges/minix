@@ -7,10 +7,10 @@
 //! This implementation follows §7 of the design doc.
 
 use super::hsde::{HsdeState, HsdeResiduals, compute_mu};
-use crate::cones::{ConeKernel, SocCone};
+use crate::cones::{ConeKernel, NonNegCone, SocCone};
 use crate::linalg::kkt::KktSolver;
 use crate::scaling::{ScalingBlock, nt};
-use crate::problem::ProblemData;
+use crate::problem::{ProblemData, SolverSettings};
 use std::any::Any;
 
 /// Predictor-corrector step result.
@@ -65,6 +65,126 @@ fn apply_tau_direction(dx: &mut [f64], dz: &mut [f64], dtau: f64, dx2: &[f64], d
     }
 }
 
+fn clamp_complementarity_nonneg(
+    state: &HsdeState,
+    ds: &[f64],
+    dz: &[f64],
+    cones: &[Box<dyn ConeKernel>],
+    beta: f64,
+    gamma: f64,
+    mu: f64,
+) -> Option<Vec<f64>> {
+    if mu <= 0.0 {
+        return None;
+    }
+
+    let mut has_nonneg = false;
+    let mut changed = false;
+    let mut override_w = vec![0.0; state.s.len()];
+    let mut offset = 0;
+
+    for cone in cones {
+        let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+
+        let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+        if !is_nonneg {
+            offset += dim;
+            continue;
+        }
+
+        has_nonneg = true;
+        for i in 0..dim {
+            let idx = offset + i;
+            let w = (state.s[idx] + ds[idx]) * (state.z[idx] + dz[idx]);
+            let w_clamped = w.max(beta * mu).min(gamma * mu);
+            if (w_clamped - w).abs() > 0.0 {
+                changed = true;
+            }
+            override_w[idx] = w_clamped;
+        }
+
+        offset += dim;
+    }
+
+    if !has_nonneg || !changed {
+        return None;
+    }
+
+    Some(override_w)
+}
+
+fn centrality_ok_nonneg_trial(
+    state: &HsdeState,
+    ds: &[f64],
+    dz: &[f64],
+    dtau: f64,
+    dkappa: f64,
+    cones: &[Box<dyn ConeKernel>],
+    beta: f64,
+    gamma: f64,
+    barrier_degree: usize,
+    alpha: f64,
+) -> bool {
+    if barrier_degree == 0 {
+        return true;
+    }
+
+    let tau_trial = state.tau + alpha * dtau;
+    let kappa_trial = state.kappa + alpha * dkappa;
+    if tau_trial <= 0.0 || kappa_trial <= 0.0 {
+        return false;
+    }
+
+    let mut s_dot_z = 0.0;
+    for i in 0..state.s.len() {
+        let s_i = state.s[i] + alpha * ds[i];
+        let z_i = state.z[i] + alpha * dz[i];
+        s_dot_z += s_i * z_i;
+    }
+
+    let mu_trial = (s_dot_z + tau_trial * kappa_trial) / (barrier_degree as f64 + 1.0);
+    if mu_trial <= 0.0 {
+        return false;
+    }
+
+    let mut has_nonneg = false;
+    let mut offset = 0;
+    for cone in cones {
+        let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+
+        let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+        if !is_nonneg {
+            offset += dim;
+            continue;
+        }
+
+        has_nonneg = true;
+        for i in 0..dim {
+            let idx = offset + i;
+            let s_i = state.s[idx] + alpha * ds[idx];
+            let z_i = state.z[idx] + alpha * dz[idx];
+            let w = s_i * z_i;
+            if w < beta * mu_trial || w > gamma * mu_trial {
+                return false;
+            }
+        }
+
+        offset += dim;
+    }
+
+    if !has_nonneg {
+        return true;
+    }
+
+    true
+}
+
 /// Take a predictor-corrector step.
 ///
 /// Implements the Mehrotra predictor-corrector algorithm with:
@@ -84,6 +204,7 @@ pub fn predictor_corrector_step(
     cones: &[Box<dyn ConeKernel>],
     mu: f64,
     barrier_degree: usize,
+    settings: &SolverSettings,
 ) -> Result<StepResult, String> {
     let n = prob.num_vars();
     let m = prob.num_constraints();
@@ -191,7 +312,14 @@ pub fn predictor_corrector_step(
         .map(|(si, ri)| si - ri)
         .collect();
 
-    kkt.solve(&factor, &rhs_x_aff, &rhs_z_aff, &mut dx_aff, &mut dz_aff);
+    kkt.solve_refined(
+        &factor,
+        &rhs_x_aff,
+        &rhs_z_aff,
+        &mut dx_aff,
+        &mut dz_aff,
+        settings.kkt_refine_iters,
+    );
 
     // Compute dtau via two-solve Schur complement strategy (design doc §5.4.1)
     // This replaces the old heuristic dtau = -(q'dx + b'dz)
@@ -227,7 +355,14 @@ pub fn predictor_corrector_step(
     let rhs_x2: Vec<f64> = prob.q.iter().map(|&qi| -qi).collect();
     let rhs_z2 = prob.b.clone();
 
-    kkt.solve(&factor, &rhs_x2, &rhs_z2, &mut dx2, &mut dz2);
+    kkt.solve_refined(
+        &factor,
+        &rhs_x2,
+        &rhs_z2,
+        &mut dx2,
+        &mut dz2,
+        settings.kkt_refine_iters,
+    );
 
     // Compute dtau via Schur complement formula (design doc §5.4.1)
     // Numerator: d_τ - d_κ/τ + (2Pξ+q)ᵀΔx₁ + bᵀΔz₁
@@ -347,174 +482,202 @@ pub fn predictor_corrector_step(
     //
     let mut dx = vec![0.0; n];
     let mut dz = vec![0.0; m];
-    let dtau;
-
+    let mut ds = vec![0.0; m];
+    let mut d_s_comb = vec![0.0; m];
+    let mut dtau = 0.0;
     let target_mu = sigma * mu;
 
     // Build RHS for combined step
     // rhs_x = -(1-σ) r_x (Newton step scaled by (1-σ))
     let rhs_x_comb: Vec<f64> = residuals.r_x.iter().map(|&r| -(1.0 - sigma) * r).collect();
 
-    // Compute d_s for each cone with Mehrotra correction
-    let mut d_s_comb = vec![0.0; m];
-    let mut offset = 0;
-    for (cone_idx, cone) in cones.iter().enumerate() {
-        let dim = cone.dim();
-        if dim == 0 {
-            continue;
-        }
-
-        if cone.barrier_degree() == 0 {
-            // Zero cone: d_s = 0
-            offset += dim;
-            continue;
-        }
-
-        let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
-
-        if is_soc {
-            if let ScalingBlock::SocStructured { w } = &scaling[cone_idx] {
-                let z_slice = &state.z[offset..offset + dim];
-                let ds_aff_slice = &ds_aff[offset..offset + dim];
-                let dz_aff_slice = &dz_aff[offset..offset + dim];
-
-                // Build W = P(w^{1/2}) and W^{-1} = P(w^{-1/2})
-                let mut w_half = vec![0.0; dim];
-                nt::jordan_sqrt_apply(w, &mut w_half);
-
-                let mut w_half_inv = vec![0.0; dim];
-                nt::jordan_inv_apply(&w_half, &mut w_half_inv);
-
-                // λ = W z
-                let mut lambda = vec![0.0; dim];
-                nt::quad_rep_apply(&w_half, z_slice, &mut lambda);
-
-                // η = (W^{-1} ds_aff) ∘ (W dz_aff)
-                let mut w_inv_ds = vec![0.0; dim];
-                nt::quad_rep_apply(&w_half_inv, ds_aff_slice, &mut w_inv_ds);
-
-                let mut w_dz = vec![0.0; dim];
-                nt::quad_rep_apply(&w_half, dz_aff_slice, &mut w_dz);
-
-                let mut eta = vec![0.0; dim];
-                nt::jordan_product_apply(&w_inv_ds, &w_dz, &mut eta);
-
-                // v = λ∘λ + η - σμ e, with e = (1, 0, ..., 0)
-                let mut lambda_sq = vec![0.0; dim];
-                nt::jordan_product_apply(&lambda, &lambda, &mut lambda_sq);
-
-                let mut v = vec![0.0; dim];
-                v[0] = lambda_sq[0] + eta[0] - target_mu;
-                for i in 1..dim {
-                    v[i] = lambda_sq[i] + eta[i];
-                }
-
-                // u solves λ ∘ u = v
-                let mut u = vec![0.0; dim];
-                nt::jordan_solve_apply(&lambda, &v, &mut u);
-
-                // d_s = W^T u (W is self-adjoint for SOC)
-                let mut d_s_block = vec![0.0; dim];
-                nt::quad_rep_apply(&w_half, &u, &mut d_s_block);
-
-                d_s_comb[offset..offset + dim].copy_from_slice(&d_s_block);
-            } else {
-                // Fallback: use diagonal correction if scaling block isn't SOC
-                for i in offset..offset + dim {
-                    let s_i = state.s[i];
-                    let z_i = state.z[i].max(1e-14);
-                    let mehrotra_term = ds_aff[i] * dz_aff[i];
-                    d_s_comb[i] = s_i + (mehrotra_term - target_mu) / z_i;
-                }
-            }
-        } else {
-            // NonNeg cone Mehrotra correction:
-            // d_s_i = s_i - σμ/z_i + (ds_aff_i * dz_aff_i)/z_i
-            //       = s_i + (ds_aff_i * dz_aff_i - σμ)/z_i
-            for i in offset..offset + dim {
-                let s_i = state.s[i];
-                let z_i = state.z[i].max(1e-14);
-                let mehrotra_term = ds_aff[i] * dz_aff[i];
-                d_s_comb[i] = s_i + (mehrotra_term - target_mu) / z_i;
-            }
-        }
-
-        offset += dim;
-        let _ = cone_idx;
-    }
-
-    // rhs_z = d_s - (1-σ) r_z
-    // The d_s from Mehrotra plus the scaled feasibility residual
-    let rhs_z_comb: Vec<f64> = d_s_comb.iter().zip(residuals.r_z.iter())
-        .map(|(ds_i, rz_i)| ds_i - (1.0 - sigma) * rz_i)
-        .collect();
-
-    kkt.solve(&factor, &rhs_x_comb, &rhs_z_comb, &mut dx, &mut dz);
-
-    // Compute dtau for corrector step using Schur complement formula
-    // From design doc §7.3:
-    //   d_tau = (1-σ) r_tau
-    //   d_kappa = κτ + Δκ_aff Δτ_aff - σμ
-    //
-    // Schur complement numerator: d_tau - d_kappa/τ + (2Pξ+q)ᵀΔx + bᵀΔz
-    let d_tau_corr = (1.0 - sigma) * residuals.r_tau;
-
     let d_kappa_corr = state.kappa * state.tau + dkappa_aff * dtau_aff - target_mu;
 
-    let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
-    let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
-    let numerator_corr = d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
+    let mut mcc_override: Option<Vec<f64>> = None;
+    for corr_iter in 0..=settings.mcc_iters {
+        d_s_comb.fill(0.0);
+        let mut offset = 0;
+        for (cone_idx, cone) in cones.iter().enumerate() {
+            let dim = cone.dim();
+            if dim == 0 {
+                continue;
+            }
 
-    dtau = compute_dtau(numerator_corr, denominator, state.tau, denom_scale)
-        .map_err(|e| format!("corrector dtau failed: {}", e))?;
+            if cone.barrier_degree() == 0 {
+                // Zero cone: d_s = 0
+                offset += dim;
+                continue;
+            }
 
-    apply_tau_direction(&mut dx, &mut dz, dtau, &dx2, &dz2);
+            let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+            let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
 
-    // Compute ds from complementarity equation (design doc §5.4):
-    //   Δs = -d_s - H Δz
-    let mut ds = vec![0.0; m];
-    let mut offset = 0;
-    for (cone_idx, cone) in cones.iter().enumerate() {
-        let dim = cone.dim();
-        if dim == 0 {
-            continue;
+            if is_soc {
+                if let ScalingBlock::SocStructured { w } = &scaling[cone_idx] {
+                    let z_slice = &state.z[offset..offset + dim];
+                    let ds_aff_slice = &ds_aff[offset..offset + dim];
+                    let dz_aff_slice = &dz_aff[offset..offset + dim];
+
+                    // Build W = P(w^{1/2}) and W^{-1} = P(w^{-1/2})
+                    let mut w_half = vec![0.0; dim];
+                    nt::jordan_sqrt_apply(w, &mut w_half);
+
+                    let mut w_half_inv = vec![0.0; dim];
+                    nt::jordan_inv_apply(&w_half, &mut w_half_inv);
+
+                    // λ = W z
+                    let mut lambda = vec![0.0; dim];
+                    nt::quad_rep_apply(&w_half, z_slice, &mut lambda);
+
+                    // η = (W^{-1} ds_aff) ∘ (W dz_aff)
+                    let mut w_inv_ds = vec![0.0; dim];
+                    nt::quad_rep_apply(&w_half_inv, ds_aff_slice, &mut w_inv_ds);
+
+                    let mut w_dz = vec![0.0; dim];
+                    nt::quad_rep_apply(&w_half, dz_aff_slice, &mut w_dz);
+
+                    let mut eta = vec![0.0; dim];
+                    nt::jordan_product_apply(&w_inv_ds, &w_dz, &mut eta);
+
+                    // v = λ∘λ + η - σμ e, with e = (1, 0, ..., 0)
+                    let mut lambda_sq = vec![0.0; dim];
+                    nt::jordan_product_apply(&lambda, &lambda, &mut lambda_sq);
+
+                    let mut v = vec![0.0; dim];
+                    v[0] = lambda_sq[0] + eta[0] - target_mu;
+                    for i in 1..dim {
+                        v[i] = lambda_sq[i] + eta[i];
+                    }
+
+                    // u solves λ ∘ u = v
+                    let mut u = vec![0.0; dim];
+                    nt::jordan_solve_apply(&lambda, &v, &mut u);
+
+                    // d_s = W^T u (W is self-adjoint for SOC)
+                    let mut d_s_block = vec![0.0; dim];
+                    nt::quad_rep_apply(&w_half, &u, &mut d_s_block);
+
+                    d_s_comb[offset..offset + dim].copy_from_slice(&d_s_block);
+                } else {
+                    // Fallback: use diagonal correction if scaling block isn't SOC
+                    for i in offset..offset + dim {
+                        let z_i = state.z[i].max(1e-14);
+                        let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
+                        d_s_comb[i] = (w_base - target_mu) / z_i;
+                    }
+                }
+            } else {
+                for i in offset..offset + dim {
+                    let z_i = state.z[i].max(1e-14);
+                    let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
+                    let w_i = if is_nonneg {
+                        mcc_override.as_ref().map_or(w_base, |w| w[i])
+                    } else {
+                        w_base
+                    };
+                    d_s_comb[i] = (w_i - target_mu) / z_i;
+                }
+            }
+
+            offset += dim;
+            let _ = cone_idx;
         }
 
-        if cone.barrier_degree() == 0 {
-            // Zero cone: ds = 0 always (s must remain 0)
-            for i in offset..offset + dim {
-                ds[i] = 0.0;
+        // rhs_z = d_s - (1-σ) r_z
+        // The d_s from Mehrotra plus the scaled feasibility residual
+        let rhs_z_comb: Vec<f64> = d_s_comb.iter().zip(residuals.r_z.iter())
+            .map(|(ds_i, rz_i)| ds_i - (1.0 - sigma) * rz_i)
+            .collect();
+
+        kkt.solve_refined(
+            &factor,
+            &rhs_x_comb,
+            &rhs_z_comb,
+            &mut dx,
+            &mut dz,
+            settings.kkt_refine_iters,
+        );
+
+        // Compute dtau for corrector step using Schur complement formula
+        // From design doc §7.3:
+        //   d_tau = (1-σ) r_tau
+        //   d_kappa = κτ + Δκ_aff Δτ_aff - σμ
+        //
+        // Schur complement numerator: d_tau - d_kappa/τ + (2Pξ+q)ᵀΔx + bᵀΔz
+        let d_tau_corr = (1.0 - sigma) * residuals.r_tau;
+
+        let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
+        let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
+        let numerator_corr = d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
+
+        dtau = compute_dtau(numerator_corr, denominator, state.tau, denom_scale)
+            .map_err(|e| format!("corrector dtau failed: {}", e))?;
+
+        apply_tau_direction(&mut dx, &mut dz, dtau, &dx2, &dz2);
+
+        // Compute ds from complementarity equation (design doc §5.4):
+        //   Δs = -d_s - H Δz
+        let mut offset = 0;
+        for (cone_idx, cone) in cones.iter().enumerate() {
+            let dim = cone.dim();
+            if dim == 0 {
+                continue;
             }
-        } else {
-            // Apply ds = -d_s - H*dz using the scaling block
-            match &scaling[cone_idx] {
-                ScalingBlock::Diagonal { d } => {
-                    for i in 0..dim {
-                        // ds = -d_s - H*dz
-                        ds[offset + i] = -d_s_comb[offset + i] - d[i] * dz[offset + i];
-                    }
+
+            if cone.barrier_degree() == 0 {
+                // Zero cone: ds = 0 always (s must remain 0)
+                for i in offset..offset + dim {
+                    ds[i] = 0.0;
                 }
-                ScalingBlock::SocStructured { w } => {
-                    // For SOC, H = P(w) (quadratic representation)
-                    // ds = -d_s - P(w)*dz
-                    let dz_slice = &dz[offset..offset + dim];
-                    let mut h_dz = vec![0.0; dim];
-                    crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
-                    for i in 0..dim {
-                        ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
+            } else {
+                // Apply ds = -d_s - H*dz using the scaling block
+                match &scaling[cone_idx] {
+                    ScalingBlock::Diagonal { d } => {
+                        for i in 0..dim {
+                            // ds = -d_s - H*dz
+                            ds[offset + i] = -d_s_comb[offset + i] - d[i] * dz[offset + i];
+                        }
                     }
-                }
-                _ => {
-                    // Fallback: assume diagonal with H = s/z
-                    for i in 0..dim {
-                        let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
-                        ds[offset + i] = -d_s_comb[offset + i] - h_ii * dz[offset + i];
+                    ScalingBlock::SocStructured { w } => {
+                        // For SOC, H = P(w) (quadratic representation)
+                        // ds = -d_s - P(w)*dz
+                        let dz_slice = &dz[offset..offset + dim];
+                        let mut h_dz = vec![0.0; dim];
+                        crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
+                        for i in 0..dim {
+                            ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
+                        }
+                    }
+                    _ => {
+                        // Fallback: assume diagonal with H = s/z
+                        for i in 0..dim {
+                            let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
+                            ds[offset + i] = -d_s_comb[offset + i] - h_ii * dz[offset + i];
+                        }
                     }
                 }
             }
+            offset += dim;
+            let _ = cone_idx;
         }
-        offset += dim;
-        let _ = cone_idx;
+
+        if corr_iter == settings.mcc_iters {
+            break;
+        }
+
+        let next_override = clamp_complementarity_nonneg(
+            state,
+            &ds,
+            &dz,
+            cones,
+            settings.centrality_beta,
+            settings.centrality_gamma,
+            mu,
+        );
+        if next_override.is_none() {
+            break;
+        }
+        mcc_override = next_override;
     }
 
     // ======================================================================
@@ -533,6 +696,29 @@ pub fn predictor_corrector_step(
 
     // Apply fraction-to-boundary and cap at 1.0 (never take more than a full Newton step)
     alpha = (0.99 * alpha).min(1.0);
+
+    if settings.line_search_max_iters > 0
+        && settings.centrality_gamma > settings.centrality_beta
+        && settings.centrality_beta > 0.0
+    {
+        for _ in 0..settings.line_search_max_iters {
+            if centrality_ok_nonneg_trial(
+                state,
+                &ds,
+                &dz,
+                dtau,
+                dkappa,
+                cones,
+                settings.centrality_beta,
+                settings.centrality_gamma,
+                barrier_degree,
+                alpha,
+            ) {
+                break;
+            }
+            alpha *= 0.5;
+        }
+    }
 
     // ======================================================================
     // Step 7: Update state

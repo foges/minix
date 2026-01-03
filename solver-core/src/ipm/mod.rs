@@ -171,6 +171,7 @@ pub fn solve_ipm(
             &cones,
             mu,
             barrier_degree,
+            settings,
         ) {
             Ok(result) => {
                 consecutive_failures = 0;  // Reset on success
