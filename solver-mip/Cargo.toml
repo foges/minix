@@ -12,3 +12,4 @@ description = "Mixed-integer programming layer for minix solver"
 solver-core = { path = "../solver-core" }
 thiserror.workspace = true
 log.workspace = true
+sprs.workspace = true

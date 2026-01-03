@@ -19,6 +19,10 @@ pub enum QdldlError {
     #[error("Factorization failed: matrix not quasi-definite")]
     FactorizationFailed,
 
+    /// Fill-reducing ordering failed
+    #[error("Ordering failed: {0}")]
+    OrderingFailed(String),
+
     /// Dimension mismatch
     #[error("Dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch {

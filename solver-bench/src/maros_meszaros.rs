@@ -2,9 +2,8 @@
 //!
 //! Downloads and runs the standard Maros-Meszaros test set of 138 QP problems.
 
-use std::fs::{self, File};
-use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -131,16 +130,6 @@ fn download_qps(name: &str) -> Result<PathBuf> {
     }
 
     Err(anyhow::anyhow!("Failed to download {} - file not found or invalid", name))
-}
-
-/// Decompress gzip data
-fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
-    use std::io::Cursor;
-    let cursor = Cursor::new(data);
-    let mut decoder = flate2::read::GzDecoder::new(cursor);
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
-    Ok(decompressed)
 }
 
 /// Load a QPS problem from file or URL

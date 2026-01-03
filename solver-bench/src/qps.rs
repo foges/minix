@@ -118,7 +118,7 @@ impl QpsProblem {
                 row += 1;
             }
         }
-        let eq_end = row;
+        let _eq_end = row;
 
         // 2. Inequality constraints (NonNeg cone)
         // Format: Ax + s = b, s >= 0

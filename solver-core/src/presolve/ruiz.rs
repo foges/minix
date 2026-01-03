@@ -244,12 +244,12 @@ pub fn equilibrate(
 }
 
 /// Scale a sparse matrix: result = diag(row_scale) * A * diag(col_scale)
-fn scale_matrix(A: &SparseCsc, row_scale: &[f64], col_scale: &[f64]) -> SparseCsc {
-    let m = A.rows();
-    let n = A.cols();
+fn scale_matrix(mat: &SparseCsc, row_scale: &[f64], col_scale: &[f64]) -> SparseCsc {
+    let m = mat.rows();
+    let n = mat.cols();
     let mut tri = TriMat::new((m, n));
 
-    for (&val, (row, col)) in A.iter() {
+    for (&val, (row, col)) in mat.iter() {
         tri.add_triplet(row, col, val * row_scale[row] * col_scale[col]);
     }
 
@@ -257,11 +257,11 @@ fn scale_matrix(A: &SparseCsc, row_scale: &[f64], col_scale: &[f64]) -> SparseCs
 }
 
 /// Scale a symmetric matrix: result = diag(scale) * P * diag(scale)
-fn scale_symmetric_matrix(P: &SparseSymmetricCsc, scale: &[f64]) -> SparseSymmetricCsc {
-    let n = P.rows();
+fn scale_symmetric_matrix(mat: &SparseSymmetricCsc, scale: &[f64]) -> SparseSymmetricCsc {
+    let n = mat.rows();
     let mut tri = TriMat::new((n, n));
 
-    for (&val, (row, col)) in P.iter() {
+    for (&val, (row, col)) in mat.iter() {
         tri.add_triplet(row, col, val * scale[row] * scale[col]);
     }
 
@@ -269,12 +269,12 @@ fn scale_symmetric_matrix(P: &SparseSymmetricCsc, scale: &[f64]) -> SparseSymmet
 }
 
 /// Scale a matrix by a scalar
-fn scale_matrix_scalar(A: &SparseCsc, scalar: f64) -> SparseCsc {
-    let m = A.rows();
-    let n = A.cols();
+fn scale_matrix_scalar(mat: &SparseCsc, scalar: f64) -> SparseCsc {
+    let m = mat.rows();
+    let n = mat.cols();
     let mut tri = TriMat::new((m, n));
 
-    for (&val, (row, col)) in A.iter() {
+    for (&val, (row, col)) in mat.iter() {
         tri.add_triplet(row, col, val * scalar);
     }
 

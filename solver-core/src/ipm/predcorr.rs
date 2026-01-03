@@ -26,6 +26,45 @@ pub struct StepResult {
     pub mu_new: f64,
 }
 
+fn compute_dtau(
+    numerator: f64,
+    denominator: f64,
+    tau: f64,
+    denom_scale: f64,
+) -> Result<f64, String> {
+    if !numerator.is_finite() || !denominator.is_finite() || !tau.is_finite() {
+        return Err("dtau inputs not finite".to_string());
+    }
+    if tau <= 0.0 {
+        return Err(format!("tau non-positive (tau={:.3e})", tau));
+    }
+
+    let scale = denom_scale.max(1.0);
+    if denominator.abs() <= 1e-10 * scale {
+        return Err(format!(
+            "dtau denominator ill-conditioned (denom={:.3e}, scale={:.3e})",
+            denominator, scale
+        ));
+    }
+
+    let raw_dtau = numerator / denominator;
+    let max_dtau = 2.0 * tau;
+    Ok(raw_dtau.max(-max_dtau).min(max_dtau))
+}
+
+fn apply_tau_direction(dx: &mut [f64], dz: &mut [f64], dtau: f64, dx2: &[f64], dz2: &[f64]) {
+    if dtau == 0.0 {
+        return;
+    }
+
+    for i in 0..dx.len() {
+        dx[i] += dtau * dx2[i];
+    }
+    for i in 0..dz.len() {
+        dz[i] += dtau * dz2[i];
+    }
+}
+
 /// Take a predictor-corrector step.
 ///
 /// Implements the Mehrotra predictor-corrector algorithm with:
@@ -196,12 +235,6 @@ pub fn predictor_corrector_step(
     //
     // Note: For LPs (P=None), we use higher regularization (≥1e-6) to stabilize
     // the second solve. This is set in ipm/mod.rs.
-    //
-    // TODO: Tau dynamics (HSDE) is currently disabled for all problem types.
-    // The Schur complement formula for dtau is ill-conditioned for many problems,
-    // causing tau to drop too quickly and triggering false infeasibility detection.
-    // Future work: investigate proper conditioning or use a different formulation.
-    let is_qp = false; // Disable tau dynamics for now
 
     // d_tau = r_tau (affine direction for tau)
     let d_tau = residuals.r_tau;
@@ -218,18 +251,13 @@ pub fn predictor_corrector_step(
     let dot_b_dz2: f64 = prob.b.iter().zip(dz2.iter()).map(|(a, b)| a * b).sum();
     let denominator = state.kappa / state.tau + dot_xi_mul_p_xi - dot_mul_p_xi_q_dx2 - dot_b_dz2;
 
-    // Compute dtau (with safeguards)
-    dtau_aff = if is_qp
-        && numerator.is_finite()
-        && denominator.is_finite()
-        && denominator.abs() > 1e-10
-    {
-        let raw_dtau = numerator / denominator;
-        let max_dtau = 2.0 * state.tau;
-        raw_dtau.max(-max_dtau).min(max_dtau)
-    } else {
-        0.0
-    };
+    let denom_scale = (state.kappa / state.tau).abs().max(dot_xi_mul_p_xi.abs());
+    dtau_aff = compute_dtau(numerator, denominator, state.tau, denom_scale)
+        .map_err(|e| format!("affine dtau failed: {}", e))?;
+
+    apply_tau_direction(&mut dx_aff, &mut dz_aff, dtau_aff, &dx2, &dz2);
+
+    let dkappa_aff = -(d_kappa + state.kappa * dtau_aff) / state.tau;
 
     // Debug output disabled by default
     // #[cfg(debug_assertions)]
@@ -284,7 +312,13 @@ pub fn predictor_corrector_step(
     }
 
     // Compute affine step size (step-to-boundary)
-    let alpha_aff = compute_step_size(&state.s, &ds_aff, &state.z, &dz_aff, cones, 1.0);
+    let mut alpha_aff = compute_step_size(&state.s, &ds_aff, &state.z, &dz_aff, cones, 1.0);
+    if dtau_aff < 0.0 {
+        alpha_aff = alpha_aff.min(-state.tau / dtau_aff);
+    }
+    if dkappa_aff < 0.0 {
+        alpha_aff = alpha_aff.min(-state.kappa / dkappa_aff);
+    }
 
     // ======================================================================
     // Step 4: Compute centering parameter σ
@@ -425,26 +459,16 @@ pub fn predictor_corrector_step(
     // Schur complement numerator: d_tau - d_kappa/τ + (2Pξ+q)ᵀΔx + bᵀΔz
     let d_tau_corr = (1.0 - sigma) * residuals.r_tau;
 
-    // Compute Δκ_aff from affine step: Δκ = -(d_κ + κΔτ)/τ with d_κ = κτ
-    let dkappa_aff = -(state.kappa * state.tau + state.kappa * dtau_aff) / state.tau;
     let d_kappa_corr = state.kappa * state.tau + dkappa_aff * dtau_aff - target_mu;
 
     let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
     let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
     let numerator_corr = d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
 
-    // Compute dtau with safeguards (reuse denominator from affine step)
-    dtau = if is_qp
-        && numerator_corr.is_finite()
-        && denominator.is_finite()
-        && denominator.abs() > 1e-10
-    {
-        let raw_dtau = numerator_corr / denominator;
-        let max_dtau = 2.0 * state.tau;
-        raw_dtau.max(-max_dtau).min(max_dtau)
-    } else {
-        0.0
-    };
+    dtau = compute_dtau(numerator_corr, denominator, state.tau, denom_scale)
+        .map_err(|e| format!("corrector dtau failed: {}", e))?;
+
+    apply_tau_direction(&mut dx, &mut dz, dtau, &dx2, &dz2);
 
     // Compute ds from complementarity equation (design doc §5.4):
     //   Δs = -d_s - H Δz
@@ -496,22 +520,19 @@ pub fn predictor_corrector_step(
     // ======================================================================
     // Step 6: Compute step size with fraction-to-boundary
     // ======================================================================
-    let mut alpha = compute_step_size(&state.s, &ds, &state.z, &dz, cones, 0.99);
+    let tau_old = state.tau;
+    let dkappa = -(d_kappa_corr + state.kappa * dtau) / tau_old;
 
-    // Also check step-to-boundary for tau (must remain positive)
+    let mut alpha = compute_step_size(&state.s, &ds, &state.z, &dz, cones, 1.0);
     if dtau < 0.0 {
-        let alpha_tau = -state.tau / dtau;
-        // Use standard fraction-to-boundary (0.99) for tau
-        let conservative_alpha_tau = 0.99 * alpha_tau;
-        if conservative_alpha_tau < alpha {
-            alpha = conservative_alpha_tau;
-        }
+        alpha = alpha.min(-state.tau / dtau);
+    }
+    if dkappa < 0.0 {
+        alpha = alpha.min(-state.kappa / dkappa);
     }
 
-    // Cap alpha at 1.0 (never take more than a full Newton step)
-    alpha = alpha.min(1.0);
-
-    // No need to check kappa step-to-boundary since we recompute it from mu/tau
+    // Apply fraction-to-boundary and cap at 1.0 (never take more than a full Newton step)
+    alpha = (0.99 * alpha).min(1.0);
 
     // ======================================================================
     // Step 7: Update state
@@ -547,10 +568,10 @@ pub fn predictor_corrector_step(
     // Update κ via Newton step (design doc §5.4):
     //   Δκ = -(d_κ + κΔτ)/τ
     // For combined step, d_κ = κτ + Δκ_aff Δτ_aff - σμ
-    let dkappa = -(d_kappa_corr + state.kappa * dtau) / state.tau;
+    // IMPORTANT: Use tau_old (pre-update) as per the Newton step formula
     state.kappa += alpha * dkappa;
 
-    // Ensure kappa stays positive
+    // Safety clamp (should rarely trigger now with proper step size)
     if state.kappa < 1e-12 {
         state.kappa = 1e-12;
     }

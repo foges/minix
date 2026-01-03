@@ -13,6 +13,8 @@ description = "State-of-the-art convex optimization solver core library"
 nalgebra.workspace = true
 sprs.workspace = true
 ldl.workspace = true
+sprs_suitesparse_camd.workspace = true
+suitesparse_camd_sys.workspace = true
 
 # Error handling
 thiserror.workspace = true

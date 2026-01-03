@@ -333,15 +333,17 @@ pub fn compute_residuals(
 ///
 /// where ν is the total barrier degree.
 ///
-/// Note: Since tau is fixed at 1.0 (HSDE dynamics disabled), we use the
-/// standard IPM formula without the tau*kappa term.
+/// HSDE barrier parameter:
+/// μ = (⟨s, z⟩ + τκ) / (ν + 1)
 pub fn compute_mu(state: &HsdeState, barrier_degree: usize) -> f64 {
+    let sz: f64 = state.s.iter().zip(state.z.iter()).map(|(si, zi)| si * zi).sum();
+    let tau_kappa = state.tau * state.kappa;
+
     if barrier_degree == 0 {
-        return 0.0;
+        return tau_kappa;
     }
 
-    let sz: f64 = state.s.iter().zip(state.z.iter()).map(|(si, zi)| si * zi).sum();
-    sz / barrier_degree as f64
+    (sz + tau_kappa) / (barrier_degree as f64 + 1.0)
 }
 
 #[cfg(test)]
@@ -439,10 +441,9 @@ mod tests {
         };
 
         // <s, z> = 1*3 + 2*2 + 3*1 = 10
-        // With ν = 3: μ = 10 / 3 ≈ 3.333...
-        // (Note: tau and kappa are not used since HSDE dynamics are disabled)
+        // With ν = 3 and τκ = 1: μ = (10 + 1) / 4 = 2.75
 
         let mu = compute_mu(&state, 3);
-        assert!((mu - 10.0 / 3.0).abs() < 1e-10);
+        assert!((mu - 2.75).abs() < 1e-10);
     }
 }

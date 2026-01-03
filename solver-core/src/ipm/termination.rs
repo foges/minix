@@ -143,8 +143,8 @@ pub fn check_termination(
     let q_norm = prob.q.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
 
     // Relative residuals (scaled by problem data norms)
-    let primal_res = rx_norm / (state.tau * q_norm);
-    let dual_res = rz_norm / (state.tau * b_norm);
+    let primal_res = rz_norm / (state.tau * b_norm);
+    let dual_res = rx_norm / (state.tau * q_norm);
     let gap = (primal_obj - dual_obj).abs();
 
     // Compute relative gap: gap / max(|primal_obj|, |dual_obj|, 1)

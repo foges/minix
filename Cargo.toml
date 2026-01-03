@@ -23,6 +23,8 @@ nalgebra = { version = "0.33", default-features = false, features = ["std"] }
 # Sparse matrices and linear algebra
 sprs = "0.11"
 ldl = "0.1"  # LDL factorization for quasi-definite systems
+sprs_suitesparse_camd = "0.3.0"
+suitesparse_camd_sys = { version = "0.1.1", features = ["static"] }
 
 # Error handling
 thiserror = "2.0"

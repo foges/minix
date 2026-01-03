@@ -21,6 +21,7 @@ use super::qdldl::{QdldlError, QdldlFactorization, QdldlSolver};
 use super::sparse::{SparseCsc, SparseSymmetricCsc};
 use crate::scaling::ScalingBlock;
 use sprs::TriMat;
+use sprs_suitesparse_camd::try_camd;
 
 /// KKT system solver.
 ///
@@ -39,6 +40,12 @@ pub struct KktSolver {
 
     /// Static regularization
     static_reg: f64,
+
+    /// Fill-reducing permutation (new index -> old index)
+    perm: Option<Vec<usize>>,
+
+    /// Inverse permutation (old index -> new index)
+    perm_inv: Option<Vec<usize>>,
 }
 
 impl KktSolver {
@@ -60,7 +67,15 @@ impl KktSolver {
             qdldl,
             kkt_mat: None,
             static_reg,
+            perm: None,
+            perm_inv: None,
         }
+    }
+
+    fn compute_camd_perm(&self, kkt: &SparseCsc) -> Result<(Vec<usize>, Vec<usize>), QdldlError> {
+        let perm = try_camd(kkt.structure_view())
+            .map_err(|e| QdldlError::OrderingFailed(e.to_string()))?;
+        Ok((perm.vec(), perm.inv_vec()))
     }
 
     /// Build the KKT matrix K = [[P + εI, A^T], [A, -(H + εI)]].
@@ -81,7 +96,17 @@ impl KktSolver {
     ///
     /// The KKT matrix in CSC format (upper triangle only).
     pub fn build_kkt_matrix(
-        &mut self,
+        &self,
+        p: Option<&SparseSymmetricCsc>,
+        a: &SparseCsc,
+        h_blocks: &[ScalingBlock],
+    ) -> SparseCsc {
+        self.build_kkt_matrix_with_perm(self.perm_inv.as_deref(), p, a, h_blocks)
+    }
+
+    fn build_kkt_matrix_with_perm(
+        &self,
+        perm: Option<&[usize]>,
         p: Option<&SparseSymmetricCsc>,
         a: &SparseCsc,
         h_blocks: &[ScalingBlock],
@@ -91,6 +116,16 @@ impl KktSolver {
 
         let kkt_dim = self.n + self.m;
         let mut tri = TriMat::new((kkt_dim, kkt_dim));
+        let map_index = |idx: usize| perm.map_or(idx, |p| p[idx]);
+        let add_triplet = |row: usize, col: usize, val: f64, tri: &mut TriMat<f64>| {
+            let r = map_index(row);
+            let c = map_index(col);
+            if r <= c {
+                tri.add_triplet(r, c, val);
+            } else {
+                tri.add_triplet(c, r, val);
+            }
+        };
 
         // ===================================================================
         // Top-left block: P (n×n, upper triangle) + regularization
@@ -102,7 +137,7 @@ impl KktSolver {
             for (val, (row, col)) in p_mat.iter() {
                 if row <= col {
                     // Only upper triangle
-                    tri.add_triplet(row, col, *val);
+                    add_triplet(row, col, *val, &mut tri);
                 }
             }
         }
@@ -112,7 +147,7 @@ impl KktSolver {
         // QDLDL will then add static_reg to these diagonal entries.
         // Using add_triplet with 0.0 is safe - it sums with existing values if present.
         for i in 0..self.n {
-            tri.add_triplet(i, i, 0.0);
+            add_triplet(i, i, 0.0, &mut tri);
         }
 
         // ===================================================================
@@ -126,9 +161,7 @@ impl KktSolver {
             let kkt_row = col_a;
             let kkt_col = self.n + row_a;
 
-            if kkt_row <= kkt_col {
-                tri.add_triplet(kkt_row, kkt_col, *val);
-            }
+            add_triplet(kkt_row, kkt_col, *val, &mut tri);
         }
 
         // ===================================================================
@@ -154,14 +187,14 @@ impl KktSolver {
                     // So we assemble -2ε here
                     for i in 0..*dim {
                         let kkt_idx = self.n + offset + i;
-                        tri.add_triplet(kkt_idx, kkt_idx, -2.0 * self.static_reg);
+                        add_triplet(kkt_idx, kkt_idx, -2.0 * self.static_reg, &mut tri);
                     }
                 }
                 ScalingBlock::Diagonal { d } => {
                     // -(H + 2ε) for diagonal scaling
                     for i in 0..d.len() {
                         let kkt_idx = self.n + offset + i;
-                        tri.add_triplet(kkt_idx, kkt_idx, -d[i] - 2.0 * self.static_reg);
+                        add_triplet(kkt_idx, kkt_idx, -d[i] - 2.0 * self.static_reg, &mut tri);
                     }
                 }
                 ScalingBlock::Dense3x3 { h } => {
@@ -175,7 +208,7 @@ impl KktSolver {
                             if i == j {
                                 val -= 2.0 * self.static_reg;
                             }
-                            tri.add_triplet(kkt_row, kkt_col, val);
+                            add_triplet(kkt_row, kkt_col, val, &mut tri);
                         }
                     }
                 }
@@ -191,19 +224,16 @@ impl KktSolver {
                         let mut col_i = vec![0.0; dim];
                         crate::scaling::nt::quad_rep_apply(w, &e_i, &mut col_i);
 
-                        // Add -(H_ij + 2ε*δ_ij) to KKT
-                        for j in 0..dim {
+                        // Add upper triangle (j <= i) to avoid duplicates
+                        for j in 0..=i {
                             let kkt_row = self.n + offset + j;
                             let kkt_col = self.n + offset + i;
-                            // Only add lower triangle (or diagonal and below)
-                            if kkt_row >= kkt_col {
-                                let mut val = -col_i[j];
-                                // Add regularization to diagonal
-                                if i == j {
-                                    val -= 2.0 * self.static_reg;
-                                }
-                                tri.add_triplet(kkt_row, kkt_col, val);
+                            let mut val = -col_i[j];
+                            // Add regularization to diagonal
+                            if i == j {
+                                val -= 2.0 * self.static_reg;
                             }
+                            add_triplet(kkt_row, kkt_col, val, &mut tri);
                         }
                     }
                 }
@@ -230,6 +260,16 @@ impl KktSolver {
         a: &SparseCsc,
         h_blocks: &[ScalingBlock],
     ) -> Result<(), QdldlError> {
+        let kkt_unpermuted = self.build_kkt_matrix_with_perm(None, p, a, h_blocks);
+        let (perm, perm_inv) = self.compute_camd_perm(&kkt_unpermuted)?;
+        if perm.iter().enumerate().all(|(i, &pi)| i == pi) {
+            self.perm = None;
+            self.perm_inv = None;
+        } else {
+            self.perm = Some(perm);
+            self.perm_inv = Some(perm_inv);
+        }
+
         let kkt = self.build_kkt_matrix(p, a, h_blocks);
         self.qdldl.symbolic_factorization(&kkt)?;
         self.kkt_mat = Some(kkt);
@@ -273,18 +313,39 @@ impl KktSolver {
         assert_eq!(sol_x.len(), self.n);
         assert_eq!(sol_z.len(), self.m);
 
-        // Assemble full RHS
-        let mut rhs = vec![0.0; self.n + self.m];
-        rhs[..self.n].copy_from_slice(rhs_x);
-        rhs[self.n..].copy_from_slice(rhs_z);
+        // Assemble and permute RHS (if needed)
+        let kkt_dim = self.n + self.m;
+        let mut rhs_perm = vec![0.0; kkt_dim];
+        if let Some(p) = &self.perm {
+            for i in 0..kkt_dim {
+                let src = p[i];
+                if src < self.n {
+                    rhs_perm[i] = rhs_x[src];
+                } else {
+                    rhs_perm[i] = rhs_z[src - self.n];
+                }
+            }
+        } else {
+            rhs_perm[..self.n].copy_from_slice(rhs_x);
+            rhs_perm[self.n..].copy_from_slice(rhs_z);
+        }
 
-        // Solve
-        let mut sol = vec![0.0; self.n + self.m];
-        self.qdldl.solve(factor, &rhs, &mut sol);
+        // Solve permuted system
+        let mut sol_perm = vec![0.0; kkt_dim];
+        self.qdldl.solve(factor, &rhs_perm, &mut sol_perm);
 
-        // Extract solution
-        sol_x.copy_from_slice(&sol[..self.n]);
-        sol_z.copy_from_slice(&sol[self.n..]);
+        // Unpermute solution back to original ordering
+        if let Some(p_inv) = &self.perm_inv {
+            for i in 0..self.n {
+                sol_x[i] = sol_perm[p_inv[i]];
+            }
+            for i in 0..self.m {
+                sol_z[i] = sol_perm[p_inv[self.n + i]];
+            }
+        } else {
+            sol_x.copy_from_slice(&sol_perm[..self.n]);
+            sol_z.copy_from_slice(&sol_perm[self.n..]);
+        }
     }
 
     /// Two-solve strategy for predictor-corrector (§5.4.1 of design doc).

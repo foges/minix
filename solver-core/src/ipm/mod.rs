@@ -144,9 +144,11 @@ pub fn solve_ipm(
                  state.x, state.s, state.z, state.tau, state.kappa);
         println!("Initial mu: {}", mu);
         println!();
-        println!("{:>4} {:>12} {:>12} {:>12} {:>12} {:>8}",
-                 "Iter", "μ", "Primal Res", "Dual Res", "Gap", "Alpha");
-        println!("{}", "-".repeat(72));
+        println!(
+            "{:>4} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>10}",
+            "Iter", "μ", "Primal Res", "Dual Res", "GapObj", "GapComp", "TauKappa", "Alpha"
+        );
+        println!("{}", "-".repeat(100));
     }
 
     // Main IPM loop
@@ -228,19 +230,49 @@ pub fn solve_ipm(
         // Verbose output
         if settings.verbose {
             let (rx_norm, rz_norm, _) = residuals.norms();
-            let primal_res = rx_norm / state.tau.max(1.0);
-            let dual_res = rz_norm / state.tau.max(1.0);
+            let primal_res = rz_norm / state.tau.max(1.0);
+            let dual_res = rx_norm / state.tau.max(1.0);
 
             // Compute gap (on scaled problem)
             let x_bar: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
             let z_bar: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
 
+            let mut xpx = 0.0;
+            if let Some(ref p) = scaled_prob.P {
+                for col in 0..n {
+                    if let Some(col_view) = p.outer_view(col) {
+                        for (row, &val) in col_view.iter() {
+                            if row == col {
+                                xpx += x_bar[row] * val * x_bar[col];
+                            } else {
+                                xpx += 2.0 * x_bar[row] * val * x_bar[col];
+                            }
+                        }
+                    }
+                }
+            }
+
             let qtx: f64 = scaled_prob.q.iter().zip(x_bar.iter()).map(|(qi, xi)| qi * xi).sum();
             let btz: f64 = scaled_prob.b.iter().zip(z_bar.iter()).map(|(bi, zi)| bi * zi).sum();
-            let gap = (qtx + btz).abs();
+            let gap_obj = (xpx + qtx + btz).abs();
 
-            println!("{:4} {:12.4e} {:12.4e} {:12.4e} {:12.4e} {:8.4}",
-                     iter, mu, primal_res, dual_res, gap, step_result.alpha);
+            let s_dot_z: f64 = state
+                .s
+                .iter()
+                .zip(state.z.iter())
+                .map(|(si, zi)| si * zi)
+                .sum();
+            let tau_kappa = state.tau * state.kappa;
+            let gap_comp = if state.tau > 0.0 {
+                s_dot_z / (state.tau * state.tau)
+            } else {
+                s_dot_z
+            };
+
+            println!(
+                "{:4} {:12.4e} {:12.4e} {:12.4e} {:12.4e} {:12.4e} {:12.4e} {:10.4}",
+                iter, mu, primal_res, dual_res, gap_obj, gap_comp, tau_kappa, step_result.alpha
+            );
         }
 
         iter += 1;
