@@ -33,6 +33,26 @@ fn symm_matvec_upper(a: &SparseCsc, x: &[f64], y: &mut [f64]) {
     }
 }
 
+struct SolveWorkspace {
+    rhs_perm: Vec<f64>,
+    sol_perm: Vec<f64>,
+    kx: Vec<f64>,
+    res: Vec<f64>,
+    delta: Vec<f64>,
+}
+
+impl SolveWorkspace {
+    fn new(kkt_dim: usize) -> Self {
+        Self {
+            rhs_perm: vec![0.0; kkt_dim],
+            sol_perm: vec![0.0; kkt_dim],
+            kx: vec![0.0; kkt_dim],
+            res: vec![0.0; kkt_dim],
+            delta: vec![0.0; kkt_dim],
+        }
+    }
+}
+
 /// KKT system solver.
 ///
 /// Manages the construction, factorization, and solution of KKT systems
@@ -56,6 +76,13 @@ pub struct KktSolver {
 
     /// Inverse permutation (old index -> new index)
     perm_inv: Option<Vec<usize>>,
+
+    /// Fast-path: positions of diagonal entries of the -(H + 2εI) block inside `kkt_mat`.
+    /// Indexed by slack row `0..m` in the original (unpermuted) ordering.
+    h_diag_positions: Option<Vec<usize>>,
+
+    /// Workspace to make repeated solves allocation-free.
+    solve_ws: SolveWorkspace,
 }
 
 impl KktSolver {
@@ -79,6 +106,8 @@ impl KktSolver {
             static_reg,
             perm: None,
             perm_inv: None,
+            h_diag_positions: None,
+            solve_ws: SolveWorkspace::new(kkt_dim),
         }
     }
 
@@ -247,12 +276,14 @@ impl KktSolver {
                     // For SOC, the scaling matrix is H(w) = quadratic representation P(w)
                     // We need to compute the full dim x dim matrix and add -(H + 2ε*I) to KKT
                     let dim = w.len();
+                    let mut e_i = vec![0.0; dim];
+                    let mut col_i = vec![0.0; dim];
                     for i in 0..dim {
                         // Compute P(w) e_i to get column i of the matrix
-                        let mut e_i = vec![0.0; dim];
+                        e_i.fill(0.0);
                         e_i[i] = 1.0;
 
-                        let mut col_i = vec![0.0; dim];
+                        col_i.fill(0.0);
                         crate::scaling::nt::quad_rep_apply(w, &e_i, &mut col_i);
 
                         // Add upper triangle (j <= i) to avoid duplicates
@@ -279,6 +310,76 @@ impl KktSolver {
         assert_eq!(offset, self.m, "Scaling blocks must cover all {} slacks", self.m);
 
         tri.to_csc()
+    }
+
+    fn compute_h_diag_positions(&self, kkt: &SparseCsc) -> Vec<usize> {
+        let kkt_dim = self.n + self.m;
+        assert_eq!(kkt.rows(), kkt_dim);
+        assert_eq!(kkt.cols(), kkt_dim);
+
+        let indptr = kkt.indptr();
+        let col_ptr = indptr.raw_storage();
+        let row_idx = kkt.indices();
+
+        let mut positions = vec![0usize; self.m];
+
+        for slack in 0..self.m {
+            let orig_idx = self.n + slack;
+            let col = if let Some(p_inv) = &self.perm_inv {
+                p_inv[orig_idx]
+            } else {
+                orig_idx
+            };
+
+            let start = col_ptr[col];
+            let end = col_ptr[col + 1];
+
+            let mut found = None;
+            for idx in start..end {
+                if row_idx[idx] == col {
+                    found = Some(idx);
+                    break;
+                }
+            }
+
+            positions[slack] = found.unwrap_or_else(|| {
+                panic!("KKT matrix missing diagonal entry at column {}", col);
+            });
+        }
+
+        positions
+    }
+
+    fn update_h_diagonal_in_place(&mut self, h_blocks: &[ScalingBlock]) {
+        let positions = self
+            .h_diag_positions
+            .as_ref()
+            .expect("H diagonal positions not initialized");
+        let kkt = self.kkt_mat.as_mut().expect("KKT matrix not initialized");
+        let data = kkt.data_mut();
+
+        let mut offset = 0usize;
+        for block in h_blocks {
+            match block {
+                ScalingBlock::Zero { dim } => {
+                    for i in 0..*dim {
+                        let slack = offset + i;
+                        data[positions[slack]] = -2.0 * self.static_reg;
+                    }
+                    offset += *dim;
+                }
+                ScalingBlock::Diagonal { d } => {
+                    for (i, &di) in d.iter().enumerate() {
+                        let slack = offset + i;
+                        data[positions[slack]] = -di - 2.0 * self.static_reg;
+                    }
+                    offset += d.len();
+                }
+                _ => panic!("update_h_diagonal_in_place called with non-diagonal ScalingBlock"),
+            }
+        }
+
+        assert_eq!(offset, self.m, "Scaling blocks must cover all {} slacks", self.m);
     }
 
     /// Initialize the solver with the KKT matrix sparsity pattern.
@@ -317,9 +418,32 @@ impl KktSolver {
         a: &SparseCsc,
         h_blocks: &[ScalingBlock],
     ) -> Result<QdldlFactorization, QdldlError> {
+        let diag_h = h_blocks
+            .iter()
+            .all(|b| matches!(b, ScalingBlock::Zero { .. } | ScalingBlock::Diagonal { .. }));
+
+        if diag_h {
+            if self.kkt_mat.is_none() {
+                // Fallback: build once if initialize() was not called.
+                self.kkt_mat = Some(self.build_kkt_matrix(p, a, h_blocks));
+            }
+            if self.h_diag_positions.is_none() {
+                let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
+                self.h_diag_positions = Some(self.compute_h_diag_positions(kkt_ref));
+            }
+
+            self.update_h_diagonal_in_place(h_blocks);
+
+            let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
+            return self.qdldl.numeric_factorization(kkt_ref);
+        }
+
+        // General path: rebuild the full KKT matrix (needed for dense cone blocks like SOC).
+        self.h_diag_positions = None;
         let kkt = self.build_kkt_matrix(p, a, h_blocks);
-        self.kkt_mat = Some(kkt.clone());
-        self.qdldl.numeric_factorization(&kkt)
+        self.kkt_mat = Some(kkt);
+        let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
+        self.qdldl.numeric_factorization(kkt_ref)
     }
 
     /// Solve a single KKT system: K * [dx; dz] = [rhs_x; rhs_z].
@@ -332,7 +456,7 @@ impl KktSolver {
     /// * `sol_x` - Solution for x block (output, length n)
     /// * `sol_z` - Solution for z block (output, length m)
     pub fn solve(
-        &self,
+        &mut self,
         factor: &QdldlFactorization,
         rhs_x: &[f64],
         rhs_z: &[f64],
@@ -344,7 +468,7 @@ impl KktSolver {
 
     /// Solve with optional iterative refinement.
     pub fn solve_refined(
-        &self,
+        &mut self,
         factor: &QdldlFactorization,
         rhs_x: &[f64],
         rhs_z: &[f64],
@@ -356,7 +480,7 @@ impl KktSolver {
     }
 
     fn solve_with_refinement(
-        &self,
+        &mut self,
         factor: &QdldlFactorization,
         rhs_x: &[f64],
         rhs_z: &[f64],
@@ -371,50 +495,52 @@ impl KktSolver {
 
         // Assemble and permute RHS (if needed)
         let kkt_dim = self.n + self.m;
-        let mut rhs_perm = vec![0.0; kkt_dim];
         if let Some(p) = &self.perm {
             for i in 0..kkt_dim {
                 let src = p[i];
                 if src < self.n {
-                    rhs_perm[i] = rhs_x[src];
+                    self.solve_ws.rhs_perm[i] = rhs_x[src];
                 } else {
-                    rhs_perm[i] = rhs_z[src - self.n];
+                    self.solve_ws.rhs_perm[i] = rhs_z[src - self.n];
                 }
             }
         } else {
-            rhs_perm[..self.n].copy_from_slice(rhs_x);
-            rhs_perm[self.n..].copy_from_slice(rhs_z);
+            self.solve_ws.rhs_perm[..self.n].copy_from_slice(rhs_x);
+            self.solve_ws.rhs_perm[self.n..].copy_from_slice(rhs_z);
         }
 
         // Solve permuted system
-        let mut sol_perm = vec![0.0; kkt_dim];
-        self.qdldl.solve(factor, &rhs_perm, &mut sol_perm);
+        self.qdldl
+            .solve(factor, &self.solve_ws.rhs_perm, &mut self.solve_ws.sol_perm);
 
         if refine_iters > 0 {
             if let Some(kkt) = &self.kkt_mat {
-                let mut kx = vec![0.0; kkt_dim];
-                let mut res = vec![0.0; kkt_dim];
-                let mut delta = vec![0.0; kkt_dim];
-
                 for _ in 0..refine_iters {
-                    symm_matvec_upper(kkt, &sol_perm, &mut kx);
+                    symm_matvec_upper(kkt, &self.solve_ws.sol_perm, &mut self.solve_ws.kx);
                     if self.static_reg != 0.0 {
                         for i in 0..kkt_dim {
-                            kx[i] += self.static_reg * sol_perm[i];
+                            self.solve_ws.kx[i] += self.static_reg * self.solve_ws.sol_perm[i];
                         }
                     }
                     for i in 0..kkt_dim {
-                        res[i] = rhs_perm[i] - kx[i];
+                        self.solve_ws.res[i] = self.solve_ws.rhs_perm[i] - self.solve_ws.kx[i];
                     }
 
-                    let res_norm = res.iter().map(|v| v * v).sum::<f64>().sqrt();
+                    let res_norm = self
+                        .solve_ws
+                        .res
+                        .iter()
+                        .map(|v| v * v)
+                        .sum::<f64>()
+                        .sqrt();
                     if !res_norm.is_finite() || res_norm < 1e-12 {
                         break;
                     }
 
-                    self.qdldl.solve(factor, &res, &mut delta);
+                    self.qdldl
+                        .solve(factor, &self.solve_ws.res, &mut self.solve_ws.delta);
                     for i in 0..kkt_dim {
-                        sol_perm[i] += delta[i];
+                        self.solve_ws.sol_perm[i] += self.solve_ws.delta[i];
                     }
                 }
             }
@@ -423,14 +549,14 @@ impl KktSolver {
         // Unpermute solution back to original ordering
         if let Some(p_inv) = &self.perm_inv {
             for i in 0..self.n {
-                sol_x[i] = sol_perm[p_inv[i]];
+                sol_x[i] = self.solve_ws.sol_perm[p_inv[i]];
             }
             for i in 0..self.m {
-                sol_z[i] = sol_perm[p_inv[self.n + i]];
+                sol_z[i] = self.solve_ws.sol_perm[p_inv[self.n + i]];
             }
         } else {
-            sol_x.copy_from_slice(&sol_perm[..self.n]);
-            sol_z.copy_from_slice(&sol_perm[self.n..]);
+            sol_x.copy_from_slice(&self.solve_ws.sol_perm[..self.n]);
+            sol_z.copy_from_slice(&self.solve_ws.sol_perm[self.n..]);
         }
     }
 
@@ -444,7 +570,7 @@ impl KktSolver {
     /// factorization is reused.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_two_rhs(
-        &self,
+        &mut self,
         factor: &QdldlFactorization,
         rhs_x1: &[f64],
         rhs_z1: &[f64],
@@ -529,8 +655,33 @@ mod tests {
 
         kkt_solver.solve(&factor, &rhs_x, &rhs_z, &mut sol_x, &mut sol_z);
 
-        // Just check that we got a solution (exact values depend on regularization)
-        assert!(sol_x.iter().any(|&x| x.abs() > 1e-6));
+        // Validate solution by checking residual against the regularized system.
+        let kkt_unpermuted = kkt_solver.build_kkt_matrix_with_perm(None, None, &a, &h_blocks);
+        let mut sol_full = vec![0.0; n + m];
+        sol_full[..n].copy_from_slice(&sol_x);
+        sol_full[n..].copy_from_slice(&sol_z);
+
+        let mut kx = vec![0.0; n + m];
+        symm_matvec_upper(&kkt_unpermuted, &sol_full, &mut kx);
+        let static_reg = kkt_solver.static_reg();
+        if static_reg != 0.0 {
+            for i in 0..n + m {
+                kx[i] += static_reg * sol_full[i];
+            }
+        }
+
+        let mut res_norm = 0.0;
+        for i in 0..n {
+            let r = rhs_x[i] - kx[i];
+            res_norm += r * r;
+        }
+        for i in 0..m {
+            let r = rhs_z[i] - kx[n + i];
+            res_norm += r * r;
+        }
+        res_norm = res_norm.sqrt();
+
+        assert!(res_norm < 1e-6, "KKT residual too large: {}", res_norm);
     }
 
     #[test]

@@ -62,6 +62,9 @@ pub fn solve_ipm(
         integrality: prob.integrality.clone(),
     };
 
+    // Precompute constant RHS used by the two-solve dtau strategy: rhs_x2 = -q.
+    let neg_q: Vec<f64> = scaled_prob.q.iter().map(|&v| -v).collect();
+
     // Build cone kernels from cone specs
     let cones = build_cones(&scaled_prob.cones)?;
 
@@ -160,7 +163,7 @@ pub fn solve_ipm(
         compute_residuals(&scaled_prob, &state, &mut residuals);
 
         // Check termination
-        if let Some(term_status) = check_termination(&prob, &scaling, &state, &residuals, mu, iter, &criteria) {
+        if let Some(term_status) = check_termination(&prob, &scaling, &state, iter, &criteria) {
             status = term_status;
             break;
         }
@@ -169,6 +172,7 @@ pub fn solve_ipm(
         let step_result = match predictor_corrector_step(
             &mut kkt,
             &scaled_prob,
+            &neg_q,
             &mut state,
             &residuals,
             &cones,

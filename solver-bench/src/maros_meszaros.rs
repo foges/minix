@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use solver_core::{solve, SolveStatus, SolverSettings};
+use solver_core::{solve, ProblemData, SolveResult, SolveStatus, SolverSettings};
 
 use crate::qps::{parse_qps, QpsProblem};
 
@@ -34,6 +34,92 @@ const MM_PROBLEMS: &[&str] = &[
     "QSIERRA", "QSTAIR", "QSTANDAT", "S268", "STADAT1", "STADAT2", "STADAT3", "STCQP1",
     "STCQP2", "TAME", "UBH1", "VALUES", "YAO", "ZECEVIC2",
 ];
+
+#[inline]
+fn inf_norm(v: &[f64]) -> f64 {
+    v.iter()
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max)
+}
+
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter().zip(b.iter()).map(|(ai, bi)| ai * bi).sum()
+}
+
+fn print_diagnostics(name: &str, prob: &ProblemData, res: &SolveResult) {
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    let mut r_p = res.s.clone();
+    for i in 0..m {
+        r_p[i] -= prob.b[i];
+    }
+    for (&val, (row, col)) in prob.A.iter() {
+        r_p[row] += val * res.x[col];
+    }
+
+    let mut p_x = vec![0.0; n];
+    if let Some(ref p) = prob.P {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    if row == col {
+                        p_x[row] += val * res.x[col];
+                    } else {
+                        p_x[row] += val * res.x[col];
+                        p_x[col] += val * res.x[row];
+                    }
+                }
+            }
+        }
+    }
+
+    let mut r_d = vec![0.0; n];
+    for i in 0..n {
+        r_d[i] = p_x[i] + prob.q[i];
+    }
+    for (&val, (row, col)) in prob.A.iter() {
+        r_d[col] += val * res.z[row];
+    }
+
+    let rp_inf = inf_norm(&r_p);
+    let rd_inf = inf_norm(&r_d);
+    let x_inf = inf_norm(&res.x);
+    let s_inf = inf_norm(&res.s);
+    let z_inf = inf_norm(&res.z);
+    let b_inf = inf_norm(&prob.b);
+    let q_inf = inf_norm(&prob.q);
+    let primal_scale = (b_inf + x_inf + s_inf).max(1.0);
+    let dual_scale = (q_inf + x_inf + z_inf).max(1.0);
+
+    let xpx = dot(&res.x, &p_x);
+    let qtx = dot(&prob.q, &res.x);
+    let btz = dot(&prob.b, &res.z);
+    let primal_obj = 0.5 * xpx + qtx;
+    let dual_obj = -0.5 * xpx - btz;
+    let gap = (primal_obj - dual_obj).abs();
+    let gap_scale = primal_obj.abs().max(dual_obj.abs()).max(1.0);
+
+    println!("Diagnostics for {}:", name);
+    println!(
+        "  r_p_inf={:.3e} (scale {:.3e}), r_d_inf={:.3e} (scale {:.3e})",
+        rp_inf, primal_scale, rd_inf, dual_scale
+    );
+    println!(
+        "  rel_p={:.3e}, rel_d={:.3e}",
+        rp_inf / primal_scale,
+        rd_inf / dual_scale
+    );
+    println!(
+        "  gap={:.3e}, gap_rel={:.3e}, obj_p={:.3e}, obj_d={:.3e}",
+        gap,
+        gap / gap_scale,
+        primal_obj,
+        dual_obj
+    );
+}
 
 /// Result of running a single benchmark problem
 #[derive(Debug, Clone)]
@@ -196,18 +282,26 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
     let result = solve(&prob, settings);
     let elapsed = start.elapsed();
 
+    let diagnostics_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+
     match result {
-        Ok(res) => BenchmarkResult {
-            name: name.to_string(),
-            n: prob.num_vars(),
-            m: prob.num_constraints(),
-            status: res.status,
-            iterations: res.info.iters,
-            obj_val: res.obj_val,
-            mu: res.info.mu,
-            solve_time_ms: elapsed.as_secs_f64() * 1000.0,
-            error: None,
-        },
+        Ok(res) => {
+            if diagnostics_enabled || res.status != SolveStatus::Optimal {
+                print_diagnostics(name, &prob, &res);
+            }
+
+            BenchmarkResult {
+                name: name.to_string(),
+                n: prob.num_vars(),
+                m: prob.num_constraints(),
+                status: res.status,
+                iterations: res.info.iters,
+                obj_val: res.obj_val,
+                mu: res.info.mu,
+                solve_time_ms: elapsed.as_secs_f64() * 1000.0,
+                error: None,
+            }
+        }
         Err(e) => BenchmarkResult {
             name: name.to_string(),
             n: prob.num_vars(),

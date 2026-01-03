@@ -243,7 +243,9 @@ impl ConeKernel for SocCone {
         let b = 2.0 * (t * dt - x_dot_dx);
         let c = t * t - x_norm_sq;
 
-        assert!(c > 0.0, "s not in interior");
+        if c <= 0.0 || !c.is_finite() {
+            return 0.0;
+        }
 
         // Solve aα² + bα + c = 0
         // If a ≈ 0, linear case: α = -c/b

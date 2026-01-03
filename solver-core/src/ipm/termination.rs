@@ -5,10 +5,13 @@
 //! - Primal infeasibility: τ → 0 with b^T z < 0
 //! - Dual infeasibility: τ → 0 with q^T x < 0
 //! - Numerical errors: NaN, factorization failure, stalled progress
+//!
+//! IMPORTANT: All termination checks should be done on **unscaled** data
+//! (after undoing Ruiz scaling). See design doc §16.
 
-use super::hsde::{HsdeState, HsdeResiduals};
+use super::hsde::HsdeState;
 use crate::presolve::ruiz::RuizScaling;
-use crate::problem::{ProblemData, SolveStatus};
+use crate::problem::{ConeSpec, ProblemData, SolveStatus};
 
 /// Termination criteria.
 #[derive(Debug, Clone)]
@@ -49,6 +52,19 @@ impl Default for TerminationCriteria {
     }
 }
 
+#[inline]
+fn inf_norm(v: &[f64]) -> f64 {
+    v.iter()
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max)
+}
+
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter().zip(b.iter()).map(|(ai, bi)| ai * bi).sum()
+}
+
 /// Check termination conditions.
 ///
 /// Returns `Some(status)` if solver should terminate, `None` otherwise.
@@ -56,13 +72,11 @@ pub fn check_termination(
     prob: &ProblemData,
     scaling: &RuizScaling,
     state: &HsdeState,
-    _residuals: &HsdeResiduals,
-    mu: f64,
     iter: usize,
     criteria: &TerminationCriteria,
 ) -> Option<SolveStatus> {
     // Check for NaN
-    if state.tau.is_nan() || state.kappa.is_nan() || mu.is_nan() {
+    if state.tau.is_nan() || state.kappa.is_nan() {
         return Some(SolveStatus::NumericalError);
     }
 
@@ -77,13 +91,12 @@ pub fn check_termination(
         return Some(SolveStatus::MaxIters);
     }
 
-    // Unscale solution by τ
+    // τ ≈ 0: check infeasibility certificates.
     if state.tau < criteria.tau_min {
-        // τ ≈ 0: Check for infeasibility certificates
         return check_infeasibility(prob, scaling, state, criteria);
     }
 
-    // Compute unscaled quantities
+    // Unscale solution by τ and undo Ruiz scaling.
     let inv_tau = 1.0 / state.tau;
     let x_bar_scaled: Vec<f64> = state.x.iter().map(|xi| xi * inv_tau).collect();
     let s_bar_scaled: Vec<f64> = state.s.iter().map(|si| si * inv_tau).collect();
@@ -93,114 +106,87 @@ pub fn check_termination(
     let s_bar = scaling.unscale_s(&s_bar_scaled);
     let z_bar = scaling.unscale_z(&z_bar_scaled);
 
-    // Compute primal objective: 0.5 * x^T P x + q^T x
-    let mut primal_obj = 0.0;
-    let mut px = vec![0.0; prob.num_vars()];
-    let mut xpx = 0.0;
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+    debug_assert_eq!(x_bar.len(), n);
+    debug_assert_eq!(s_bar.len(), m);
+    debug_assert_eq!(z_bar.len(), m);
+
+    // Residuals on unscaled data:
+    //   r_p = A x̄ + s̄ - b
+    //   r_d = P x̄ + A^T z̄ + q
+    let mut r_p = s_bar.clone();
+    for i in 0..m {
+        r_p[i] -= prob.b[i];
+    }
+    for (&val, (row, col)) in prob.A.iter() {
+        r_p[row] += val * x_bar[col];
+    }
+
+    let mut p_x = vec![0.0; n];
     if let Some(ref p) = prob.P {
-        // x^T P x
-        for col in 0..prob.num_vars() {
+        for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
-                    px[row] += val * x_bar[col];
-                    if row != col {
-                        px[col] += val * x_bar[row]; // Symmetric
+                    if row == col {
+                        p_x[row] += val * x_bar[col];
+                    } else {
+                        p_x[row] += val * x_bar[col];
+                        p_x[col] += val * x_bar[row];
                     }
                 }
             }
         }
-        for i in 0..prob.num_vars() {
-            xpx += x_bar[i] * px[i];
-        }
-        primal_obj += 0.5 * xpx;
     }
 
-    // q^T x
-    for i in 0..prob.num_vars() {
-        primal_obj += prob.q[i] * x_bar[i];
-    }
-
-    // Compute dual objective: -b^T z (for LP) or -b^T z - 0.5 x^T P x (for QP)
-    // For QP: dual obj = -b^T z - 0.5 x^T P x (the quadratic term appears in both)
-    let mut dual_obj = 0.0;
-    for i in 0..prob.num_constraints() {
-        dual_obj -= prob.b[i] * z_bar[i];
-    }
-    // Add quadratic contribution for QP (dual objective includes -0.5 x^T P x)
-    if let Some(ref p) = prob.P {
-        dual_obj -= 0.5 * xpx;
-    }
-
-    // Compute residuals (unscaled)
-    let n = prob.num_vars();
-    let m = prob.num_constraints();
-
-    let mut r_dual = px;
-    for col in 0..n {
-        if let Some(col_view) = prob.A.outer_view(col) {
-            for (row, &a_ij) in col_view.iter() {
-                r_dual[col] += a_ij * z_bar[row];
-            }
-        }
-    }
+    let mut r_d = vec![0.0; n];
     for i in 0..n {
-        r_dual[i] += prob.q[i];
+        r_d[i] = p_x[i] + prob.q[i];
     }
-    let rx_norm = r_dual.iter().map(|&x| x * x).sum::<f64>().sqrt();
-
-    let mut r_primal = vec![0.0; m];
-    for col in 0..n {
-        if let Some(col_view) = prob.A.outer_view(col) {
-            for (row, &a_ij) in col_view.iter() {
-                r_primal[row] += a_ij * x_bar[col];
-            }
-        }
+    for (&val, (row, col)) in prob.A.iter() {
+        r_d[col] += val * z_bar[row];
     }
-    for i in 0..m {
-        r_primal[i] += s_bar[i] - prob.b[i];
+
+    let rp_inf = inf_norm(&r_p);
+    let rd_inf = inf_norm(&r_d);
+
+    if !rp_inf.is_finite() || !rd_inf.is_finite() {
+        return Some(SolveStatus::NumericalError);
     }
-    let rz_norm = r_primal.iter().map(|&x| x * x).sum::<f64>().sqrt();
 
-    // Compute scaling factors for relative residuals
-    let b_norm = prob.b.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
-    let q_norm = prob.q.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
+    // Feasibility scaling.
+    let b_inf = inf_norm(&prob.b);
+    let q_inf = inf_norm(&prob.q);
+    let x_inf = inf_norm(&x_bar);
+    let s_inf = inf_norm(&s_bar);
+    let z_inf = inf_norm(&z_bar);
 
-    // Relative residuals (scaled by problem data norms)
-    let primal_res = rz_norm / (state.tau * b_norm);
-    let dual_res = rx_norm / (state.tau * q_norm);
+    let primal_scale = (b_inf + x_inf + s_inf).max(1.0);
+    let dual_scale = (q_inf + x_inf + z_inf).max(1.0);
+
+    let primal_ok = rp_inf <= criteria.tol_feas * primal_scale;
+    let dual_ok = rd_inf <= criteria.tol_feas * dual_scale;
+
+    // Objectives on unscaled data.
+    let xpx = dot(&x_bar, &p_x);
+    let qtx = dot(&prob.q, &x_bar);
+    let btz = dot(&prob.b, &z_bar);
+
+    let primal_obj = 0.5 * xpx + qtx;
+    let dual_obj = -0.5 * xpx - btz;
     let gap = (primal_obj - dual_obj).abs();
 
-    // Compute relative gap: gap / max(|primal_obj|, |dual_obj|, 1)
-    let obj_scale = primal_obj.abs().max(dual_obj.abs()).max(1.0);
-    let gap_rel = gap / obj_scale;
+    // Absolute gap scaling: max(1, min(|g_p|, |g_d|)).
+    let gap_scale_abs = primal_obj.abs().min(dual_obj.abs()).max(1.0);
+    let gap_ok_abs = gap <= criteria.tol_gap * gap_scale_abs;
 
-    // Primary optimality check: μ-based convergence
-    // When μ is very small, complementarity is satisfied. Check feasibility.
-    let mu_converged = mu < criteria.tol_gap;
-    let feas_ok = primal_res < criteria.tol_feas && dual_res < criteria.tol_feas;
-    let gap_ok = gap < criteria.tol_gap || gap_rel < criteria.tol_gap_rel;
+    // Relative gap fallback.
+    let gap_scale_rel = primal_obj.abs().max(dual_obj.abs()).max(1.0);
+    let gap_rel = gap / gap_scale_rel;
+    let gap_ok = gap_ok_abs || gap_rel <= criteria.tol_gap_rel;
 
-    // Optimal if: (feasible AND gap small) OR (μ very small AND reasonably feasible)
-    if feas_ok && gap_ok {
+    if primal_ok && dual_ok && gap_ok {
         return Some(SolveStatus::Optimal);
-    }
-
-    // μ-based termination: if μ is very small, algorithm has converged
-    // Use relaxed feasibility check (10x tolerance)
-    if mu_converged {
-        let relaxed_feas = primal_res < 10.0 * criteria.tol_feas
-                        && dual_res < 10.0 * criteria.tol_feas;
-        if relaxed_feas {
-            return Some(SolveStatus::Optimal);
-        }
-    }
-
-    // Check for stalled progress with very small μ
-    if mu < criteria.min_progress && iter > 10 {
-        // Consider this "solved" if residuals are reasonable (100x tolerance)
-        if primal_res < 100.0 * criteria.tol_feas && dual_res < 100.0 * criteria.tol_feas {
-            return Some(SolveStatus::Optimal);
-        }
     }
 
     None
@@ -217,25 +203,104 @@ fn check_infeasibility(
         return None;
     }
 
-    let x_unscaled = scaling.unscale_x(&state.x);
-    let z_unscaled = scaling.unscale_z(&state.z);
+    let has_unsupported_cone = prob.cones.iter().any(|cone| {
+        !matches!(cone, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. })
+    });
+    if has_unsupported_cone {
+        return Some(SolveStatus::NumericalError);
+    }
 
-    // Check primal infeasibility: b^T z < 0
-    let btz: f64 = prob.b.iter().zip(z_unscaled.iter()).map(|(bi, zi)| bi * zi).sum();
+    // Use unnormalized variables (x, s, z) and undo Ruiz scaling.
+    let x = scaling.unscale_x(&state.x);
+    let s = scaling.unscale_s(&state.s);
+    let z = scaling.unscale_z(&state.z);
 
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+    debug_assert_eq!(x.len(), n);
+    debug_assert_eq!(s.len(), m);
+    debug_assert_eq!(z.len(), m);
+
+    let x_inf = inf_norm(&x);
+    let s_inf = inf_norm(&s);
+    let z_inf = inf_norm(&z);
+
+    // Primal infeasibility certificate:
+    //  - b^T z < -eps_abs
+    //  - ||A^T z||_inf <= eps_rel * max(1, ||x||_inf + ||z||_inf) * |b^T z|
+    let btz = dot(&prob.b, &z);
     if btz < -criteria.tol_infeas {
-        return Some(SolveStatus::PrimalInfeasible);
+        let mut atz = vec![0.0; n];
+        for (&val, (row, col)) in prob.A.iter() {
+            atz[col] += val * z[row];
+        }
+        let atz_inf = inf_norm(&atz);
+        let bound = criteria.tol_infeas * (x_inf + z_inf).max(1.0) * btz.abs();
+        let z_cone_ok = dual_cone_ok(prob, &z, criteria.tol_infeas);
+
+        if atz_inf <= bound && z_cone_ok {
+            return Some(SolveStatus::PrimalInfeasible);
+        }
     }
 
-    // Check dual infeasibility: q^T x < 0
-    let qtx: f64 = prob.q.iter().zip(x_unscaled.iter()).map(|(qi, xi)| qi * xi).sum();
-
+    // Dual infeasibility certificate:
+    //  - q^T x < -eps_abs
+    //  - ||P x||_inf <= eps_rel * max(1, ||x||_inf) * |q^T x|
+    //  - ||A x + s||_inf <= eps_rel * max(1, ||x||_inf + ||s||_inf) * |q^T x|
+    let qtx = dot(&prob.q, &x);
     if qtx < -criteria.tol_infeas {
-        return Some(SolveStatus::DualInfeasible);
+        let mut p_x = vec![0.0; n];
+        if let Some(ref p) = prob.P {
+            for col in 0..n {
+                if let Some(col_view) = p.outer_view(col) {
+                    for (row, &val) in col_view.iter() {
+                        if row == col {
+                            p_x[row] += val * x[col];
+                        } else {
+                            p_x[row] += val * x[col];
+                            p_x[col] += val * x[row];
+                        }
+                    }
+                }
+            }
+        }
+        let p_x_inf = inf_norm(&p_x);
+        let px_bound = criteria.tol_infeas * x_inf.max(1.0) * qtx.abs();
+
+        let mut ax_s = s.clone();
+        for (&val, (row, col)) in prob.A.iter() {
+            ax_s[row] += val * x[col];
+        }
+        let ax_s_inf = inf_norm(&ax_s);
+        let axs_bound = criteria.tol_infeas * (x_inf + s_inf).max(1.0) * qtx.abs();
+
+        if p_x_inf <= px_bound && ax_s_inf <= axs_bound {
+            return Some(SolveStatus::DualInfeasible);
+        }
     }
 
-    // τ ≈ 0 but no clear certificate
     Some(SolveStatus::NumericalError)
+}
+
+fn dual_cone_ok(prob: &ProblemData, z: &[f64], tol: f64) -> bool {
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match *cone {
+            ConeSpec::Zero { dim } => {
+                offset += dim;
+            }
+            ConeSpec::NonNeg { dim } => {
+                if z[offset..offset + dim].iter().any(|&v| v < -tol) {
+                    return false;
+                }
+                offset += dim;
+            }
+            _ => {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -243,6 +308,7 @@ mod tests {
     use super::*;
     use crate::linalg::sparse;
     use crate::presolve::ruiz::RuizScaling;
+    use crate::problem::ConeSpec;
 
     #[test]
     fn test_termination_optimal() {
@@ -252,7 +318,7 @@ mod tests {
             q: vec![1.0, 1.0],
             A: sparse::from_triplets(1, 2, vec![(0, 0, 1.0), (0, 1, 1.0)]),
             b: vec![1.0],
-            cones: vec![],
+            cones: vec![ConeSpec::Zero { dim: 1 }],
             var_bounds: None,
             integrality: None,
         };
@@ -268,16 +334,10 @@ mod tests {
             xi: vec![0.5, 0.5],  // ξ = x/τ
         };
 
-        let mut residuals = HsdeResiduals::new(2, 1);
-        // Make residuals small (near-optimal)
-        residuals.r_x = vec![1e-9, 1e-9];
-        residuals.r_z = vec![1e-9];
-        residuals.r_tau = 1e-9;
-
         let criteria = TerminationCriteria::default();
 
         let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
-        let status = check_termination(&prob, &scaling, &state, &residuals, 1e-9, 10, &criteria);
+        let status = check_termination(&prob, &scaling, &state, 10, &criteria);
 
         // Should detect optimality
         assert!(matches!(status, Some(SolveStatus::Optimal)));
@@ -290,20 +350,19 @@ mod tests {
             q: vec![1.0],
             A: sparse::from_triplets(1, 1, vec![(0, 0, 1.0)]),
             b: vec![1.0],
-            cones: vec![],
+            cones: vec![ConeSpec::Zero { dim: 1 }],
             var_bounds: None,
             integrality: None,
         };
 
         let state = HsdeState::new(1, 1);
-        let residuals = HsdeResiduals::new(1, 1);
         let criteria = TerminationCriteria {
             max_iter: 50,
             ..Default::default()
         };
 
         let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
-        let status = check_termination(&prob, &scaling, &state, &residuals, 1.0, 51, &criteria);
+        let status = check_termination(&prob, &scaling, &state, 51, &criteria);
 
         assert!(matches!(status, Some(SolveStatus::MaxIters)));
     }
@@ -314,27 +373,26 @@ mod tests {
         let prob = ProblemData {
             P: None,
             q: vec![0.0],
-            A: sparse::from_triplets(1, 1, vec![(0, 0, 1.0)]),
-            b: vec![-1.0], // Infeasible for x >= 0
-            cones: vec![],
+            A: sparse::from_triplets(1, 1, vec![]), // A = 0, so Ax = b is infeasible if b != 0
+            b: vec![-1.0],
+            cones: vec![ConeSpec::NonNeg { dim: 1 }],
             var_bounds: None,
             integrality: None,
         };
 
         let state = HsdeState {
             x: vec![0.0],
-            s: vec![1.0],
+            s: vec![0.0],
             z: vec![1.0], // z > 0
             tau: 1e-10,   // τ → 0
             kappa: 1.0,
             xi: vec![0.0],  // ξ = x/τ (but x=0 anyway)
         };
 
-        let residuals = HsdeResiduals::new(1, 1);
         let criteria = TerminationCriteria::default();
 
         let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
-        let status = check_termination(&prob, &scaling, &state, &residuals, 1.0, 10, &criteria);
+        let status = check_termination(&prob, &scaling, &state, 10, &criteria);
 
         // Should detect primal infeasibility (b^T z = -1 * 1 = -1 < 0)
         assert!(matches!(status, Some(SolveStatus::PrimalInfeasible)));

@@ -200,6 +200,7 @@ fn centrality_ok_nonneg_trial(
 pub fn predictor_corrector_step(
     kkt: &mut KktSolver,
     prob: &ProblemData,
+    neg_q: &[f64],
     state: &mut HsdeState,
     residuals: &HsdeResiduals,
     cones: &[Box<dyn ConeKernel>],
@@ -209,6 +210,8 @@ pub fn predictor_corrector_step(
 ) -> Result<StepResult, String> {
     let n = prob.num_vars();
     let m = prob.num_constraints();
+
+    assert_eq!(neg_q.len(), n, "neg_q must have length n");
 
     // ======================================================================
     // Step 1: Compute NT scaling for all cones with adaptive regularization
@@ -367,13 +370,13 @@ pub fn predictor_corrector_step(
     // (design doc §5.4.1)
     let mut dx2 = vec![0.0; n];
     let mut dz2 = vec![0.0; m];
-    let rhs_x2: Vec<f64> = prob.q.iter().map(|&qi| -qi).collect();
-    let rhs_z2 = prob.b.clone();
+    let rhs_x2 = neg_q;
+    let rhs_z2 = &prob.b;
 
     kkt.solve_refined(
         &factor,
-        &rhs_x2,
-        &rhs_z2,
+        rhs_x2,
+        rhs_z2,
         &mut dx2,
         &mut dz2,
         settings.kkt_refine_iters,

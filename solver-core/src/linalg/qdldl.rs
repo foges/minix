@@ -63,6 +63,17 @@ pub struct QdldlSolver {
 
     /// Number of dynamic regularization bumps applied
     dynamic_bumps: u64,
+
+    /// Cached diagonal positions (col -> index in CSC data) for applying static regularization
+    diag_positions: Option<Vec<Option<usize>>>,
+
+    /// Reusable workspace for the matrix values (A_x + static_reg on diagonal)
+    a_x_work: Vec<f64>,
+
+    /// Reusable factorization workspaces (allocated once)
+    bwork: Vec<ldl::Marker>,
+    iwork: Vec<usize>,
+    fwork: Vec<f64>,
 }
 
 /// Internal storage for LDL factorization
@@ -103,6 +114,11 @@ impl QdldlSolver {
             static_reg,
             dynamic_reg_min_pivot,
             dynamic_bumps: 0,
+            diag_positions: None,
+            a_x_work: Vec::new(),
+            bwork: vec![ldl::Marker::Unused; n],
+            iwork: vec![0; 3 * n],
+            fwork: vec![0.0; n],
         }
     }
 
@@ -163,6 +179,21 @@ impl QdldlSolver {
             Ok(_) => {
                 self.etree = Some(etree);
                 self.l_nz = Some(l_nz);
+
+                // Cache diagonal positions for fast static-regularization application.
+                let mut diag_positions = vec![None; self.n];
+                for col in 0..self.n {
+                    let start = a_p[col];
+                    let end = a_p[col + 1];
+                    for idx in start..end {
+                        if a_i[idx] == col {
+                            diag_positions[col] = Some(idx);
+                            break;
+                        }
+                    }
+                }
+                self.diag_positions = Some(diag_positions);
+
                 Ok(())
             }
             Err(_) => Err(QdldlError::FactorizationFailed),
@@ -195,16 +226,30 @@ impl QdldlSolver {
         let a_i = mat.indices();
         let a_x_orig = mat.data();
 
-        // Apply static regularization to diagonal
-        let mut a_x = a_x_orig.to_vec();
+        // Ensure a_x workspace is allocated
+        if self.a_x_work.len() != a_x_orig.len() {
+            self.a_x_work.resize(a_x_orig.len(), 0.0);
+        }
+        self.a_x_work.copy_from_slice(a_x_orig);
+
+        // Apply static regularization to diagonal (fast via cached diagonal positions)
         if self.static_reg > 0.0 {
-            for col in 0..self.n {
-                let start = a_p[col];
-                let end = a_p[col + 1];
-                for idx in start..end {
-                    if a_i[idx] == col {
-                        // Diagonal entry
-                        a_x[idx] += self.static_reg;
+            if let Some(diag_pos) = &self.diag_positions {
+                for col in 0..self.n {
+                    if let Some(idx) = diag_pos[col] {
+                        self.a_x_work[idx] += self.static_reg;
+                    }
+                }
+            } else {
+                // Fallback (should not happen): scan for diagonal entries.
+                for col in 0..self.n {
+                    let start = a_p[col];
+                    let end = a_p[col + 1];
+                    for idx in start..end {
+                        if a_i[idx] == col {
+                            self.a_x_work[idx] += self.static_reg;
+                            break;
+                        }
                     }
                 }
             }
@@ -217,34 +262,57 @@ impl QdldlSolver {
         // Compute total nonzeros in L from l_nz (fill-in can make L larger than A)
         let nnz_l: usize = l_nz.iter().sum();
 
-        // Allocate workspace for factorization
-        let mut l_p = vec![0; self.n + 1];
-        let mut l_i = vec![0; nnz_l];
-        let mut l_x = vec![0.0; nnz_l];
-        let mut d = vec![0.0; self.n];
-        let mut d_inv = vec![0.0; self.n];
+        // Ensure factorization buffers exist and are correctly sized
+        if self.factorization.is_none() {
+            self.factorization = Some(LdlFactorData {
+                l_p: vec![0; self.n + 1],
+                l_i: vec![0; nnz_l],
+                l_x: vec![0.0; nnz_l],
+                d: vec![0.0; self.n],
+                d_inv: vec![0.0; self.n],
+            });
+        } else {
+            let f = self.factorization.as_mut().unwrap();
+            if f.l_p.len() != self.n + 1 {
+                f.l_p.resize(self.n + 1, 0);
+            }
+            if f.l_i.len() != nnz_l {
+                f.l_i.resize(nnz_l, 0);
+            }
+            if f.l_x.len() != nnz_l {
+                f.l_x.resize(nnz_l, 0.0);
+            }
+            if f.d.len() != self.n {
+                f.d.resize(self.n, 0.0);
+            }
+            if f.d_inv.len() != self.n {
+                f.d_inv.resize(self.n, 0.0);
+            }
+        }
 
-        // Workspace arrays
-        let mut bwork = vec![ldl::Marker::Unused; self.n];
-        let mut iwork = vec![0; 3 * self.n];
-        let mut fwork = vec![0.0; self.n];
+        let f = self.factorization.as_mut().unwrap();
+
+        // Reset workspaces (ldl expects clean markers)
+        self.bwork.fill(ldl::Marker::Unused);
+        self.iwork.fill(0);
+        self.fwork.fill(0.0);
 
         // Perform factorization
         let result = ldl::factor(
             self.n,
             a_p,
             a_i,
-            &a_x,
-            &mut l_p,
-            &mut l_i,
-            &mut l_x,
-            &mut d,
-            &mut d_inv,
-            &l_nz,
+            &self.a_x_work,
+            &mut f.l_p,
+            &mut f.l_i,
+            &mut f.l_x,
+            &mut f.d,
+            &mut f.d_inv,
+            l_nz,
             etree,
-            &mut bwork,
-            &mut iwork,
-            &mut fwork,
+            &mut self.bwork,
+            &mut self.iwork,
+            &mut self.fwork,
         );
 
         // Check for factorization failure
@@ -253,28 +321,20 @@ impl QdldlSolver {
                 // Apply dynamic regularization if needed
                 self.dynamic_bumps = 0;
                 for i in 0..self.n {
-                    if d[i].abs() < self.dynamic_reg_min_pivot {
-                        d[i] = if d[i] >= 0.0 {
+                    if f.d[i].abs() < self.dynamic_reg_min_pivot {
+                        f.d[i] = if f.d[i] >= 0.0 {
                             self.dynamic_reg_min_pivot
                         } else {
                             -self.dynamic_reg_min_pivot
                         };
-                        d_inv[i] = 1.0 / d[i];
+                        f.d_inv[i] = 1.0 / f.d[i];
                         self.dynamic_bumps += 1;
                     }
                 }
 
-                let factor_data = LdlFactorData {
-                    l_p,
-                    l_i,
-                    l_x,
-                    d: d.clone(),
-                    d_inv,
-                };
-
-                self.factorization = Some(factor_data);
-
-                Ok(QdldlFactorization { d_values: d })
+                Ok(QdldlFactorization {
+                    d_values: f.d.clone(),
+                })
             }
             Err(_) => Err(QdldlError::FactorizationFailed),
         }
