@@ -10,6 +10,7 @@ use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone};
 use crate::linalg::kkt::KktSolver;
 use crate::presolve::ruiz::equilibrate;
 use crate::problem::{ProblemData, ConeSpec, SolverSettings, SolveResult, SolveStatus, SolveInfo};
+use crate::scaling::ScalingBlock;
 use hsde::{HsdeState, HsdeResiduals, compute_residuals, compute_mu};
 use predcorr::predictor_corrector_step;
 use termination::{TerminationCriteria, check_termination};
@@ -92,6 +93,26 @@ pub fn solve_ipm(
         static_reg,
         settings.dynamic_reg_min_pivot,
     );
+
+    // Perform symbolic factorization once with initial scaling structure.
+    // This determines the sparsity pattern of L and the elimination tree.
+    // Subsequent calls to factor() reuse this symbolic factorization.
+    let initial_scaling: Vec<ScalingBlock> = cones.iter().map(|cone| {
+        let dim = cone.dim();
+        if cone.barrier_degree() == 0 {
+            ScalingBlock::Zero { dim }
+        } else if (cone.as_ref() as &dyn std::any::Any).downcast_ref::<SocCone>().is_some() {
+            // SOC creates a dense block in KKT
+            ScalingBlock::SocStructured { w: vec![1.0; dim] }
+        } else {
+            // NonNeg uses diagonal scaling
+            ScalingBlock::Diagonal { d: vec![1.0; dim] }
+        }
+    }).collect();
+
+    if let Err(e) = kkt.initialize(scaled_prob.P.as_ref(), &scaled_prob.A, &initial_scaling) {
+        return Err(format!("KKT symbolic factorization failed: {}", e).into());
+    }
 
     // Termination criteria
     let criteria = TerminationCriteria {

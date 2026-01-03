@@ -47,20 +47,22 @@ impl RuizScaling {
     }
 
     /// Unscale the slack variables s.
-    /// s_original = diag(row_scale) * s_scaled
+    /// Given A_scaled = R * A * C and b_scaled = R * b,
+    /// the scaled slack is s_scaled = R * s, so s_original = s_scaled / R
     pub fn unscale_s(&self, s_scaled: &[f64]) -> Vec<f64> {
         s_scaled.iter()
             .zip(self.row_scale.iter())
-            .map(|(&si, &ri)| ri * si)
+            .map(|(&si, &ri)| si / ri)
             .collect()
     }
 
     /// Unscale the dual variables z.
-    /// z_original = diag(1/row_scale) * z_scaled / cost_scale
+    /// Given the dual equation scales as A^T z → C * A^T * R * z_scaled,
+    /// we have z_original = cost_scale * R * z_scaled
     pub fn unscale_z(&self, z_scaled: &[f64]) -> Vec<f64> {
         z_scaled.iter()
             .zip(self.row_scale.iter())
-            .map(|(&zi, &ri)| zi / (ri * self.cost_scale))
+            .map(|(&zi, &ri)| self.cost_scale * ri * zi)
             .collect()
     }
 
@@ -315,10 +317,8 @@ mod tests {
 
         let (_, _, _, _, scaling) = equilibrate(&A, None, &q, &b, 5);
 
-        // Test that scaling and unscaling is consistent
+        // Test x roundtrip: x_scaled = x / C, unscale gives x = C * x_scaled
         let x_orig = vec![1.0, 2.0, 3.0];
-
-        // Scale then unscale x
         let x_scaled: Vec<f64> = x_orig.iter()
             .zip(scaling.col_scale.iter())
             .map(|(&xi, &ci)| xi / ci)
@@ -327,6 +327,30 @@ mod tests {
         for i in 0..3 {
             assert!((x_orig[i] - x_unscaled[i]).abs() < 1e-10,
                 "x roundtrip failed at {}: {} vs {}", i, x_orig[i], x_unscaled[i]);
+        }
+
+        // Test s roundtrip: s_scaled = R * s, unscale gives s = s_scaled / R
+        let s_orig = vec![1.0, 2.0];
+        let s_scaled: Vec<f64> = s_orig.iter()
+            .zip(scaling.row_scale.iter())
+            .map(|(&si, &ri)| ri * si)
+            .collect();
+        let s_unscaled = scaling.unscale_s(&s_scaled);
+        for i in 0..2 {
+            assert!((s_orig[i] - s_unscaled[i]).abs() < 1e-10,
+                "s roundtrip failed at {}: {} vs {}", i, s_orig[i], s_unscaled[i]);
+        }
+
+        // Test z roundtrip: z_scaled = z / (cost_scale * R), unscale gives z = cost_scale * R * z_scaled
+        let z_orig = vec![1.0, 2.0];
+        let z_scaled: Vec<f64> = z_orig.iter()
+            .zip(scaling.row_scale.iter())
+            .map(|(&zi, &ri)| zi / (scaling.cost_scale * ri))
+            .collect();
+        let z_unscaled = scaling.unscale_z(&z_scaled);
+        for i in 0..2 {
+            assert!((z_orig[i] - z_unscaled[i]).abs() < 1e-10,
+                "z roundtrip failed at {}: {} vs {}", i, z_orig[i], z_unscaled[i]);
         }
     }
 
