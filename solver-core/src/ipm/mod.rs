@@ -84,14 +84,14 @@ pub fn solve_ipm(
     //   [εI, A^T] [dx]   [rhs_x]
     //   [A,  -(H)] [dz] = [rhs_z]
     // gives dx ≈ rhs_x/ε, which blows up for small ε.
-    // Using ε=1e-4 provides stability while allowing good convergence.
+    // Use a small ε floor for stability while preserving high-accuracy convergence.
     let p_is_sparse = scaled_prob.P.as_ref().map_or(true, |p| {
         p.nnz() < n / 2  // Less than 50% diagonal fill
     });
     let static_reg = if p_is_sparse {
-        settings.static_reg.max(1e-4)  // LP or sparse QP: use at least 1e-4
+        settings.static_reg.max(1e-6)
     } else {
-        settings.static_reg.max(1e-6)  // Dense QP: use at least 1e-6
+        settings.static_reg.max(1e-6)
     };
 
     let mut kkt = KktSolver::new(

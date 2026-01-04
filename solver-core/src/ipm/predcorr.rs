@@ -13,6 +13,15 @@ use crate::scaling::{ScalingBlock, nt};
 use crate::problem::{ProblemData, SolverSettings};
 use std::any::Any;
 
+fn diagnostics_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MINIX_DIAGNOSTICS")
+            .map(|v| v != "0")
+            .unwrap_or(false)
+    })
+}
+
 /// Predictor-corrector step result.
 #[derive(Debug)]
 pub struct StepResult {
@@ -218,6 +227,7 @@ pub fn predictor_corrector_step(
     // ======================================================================
     let mut scaling: Vec<ScalingBlock> = Vec::new();
     let mut offset = 0;
+    let mut nt_fallbacks: usize = 0;
 
     // Track minimum s and z values for adaptive regularization
     let mut s_min = f64::INFINITY;
@@ -249,19 +259,21 @@ pub fn predictor_corrector_step(
         }
 
         // Compute NT scaling based on cone type
-        let scale = nt::compute_nt_scaling(s, z, cone.as_ref())
-            .unwrap_or_else(|_| {
-                // Fallback to simple diagonal scaling if NT fails
-                let eps = 1e-18;
-                let d: Vec<f64> = s.iter().zip(z.iter())
+        let scale = match nt::compute_nt_scaling(s, z, cone.as_ref()) {
+            Ok(scale) => scale,
+            Err(_) => {
+                nt_fallbacks += 1;
+                let d: Vec<f64> = s
+                    .iter()
+                    .zip(z.iter())
                     .map(|(si, zi)| {
-                        let num = si.max(eps);
-                        let den = zi.max(eps);
-                        (num / den).max(eps)
+                        let denom = zi.max(1e-300);
+                        (si / denom).clamp(1e-18, 1e18)
                     })
                     .collect();
                 ScalingBlock::Diagonal { d }
-            });
+            }
+        };
 
         scaling.push(scale);
         offset += dim;
@@ -281,6 +293,17 @@ pub fn predictor_corrector_step(
     } else {
         0.0
     };
+
+    if diagnostics_enabled() && nt_fallbacks > 0 {
+        eprintln!(
+            "nt scaling fallback: blocks={}, s_min={:.3e}, z_min={:.3e}, mu={:.3e}, extra_reg={:.3e}",
+            nt_fallbacks,
+            s_min,
+            z_min,
+            mu,
+            extra_reg,
+        );
+    }
 
     if settings.verbose && extra_reg > 0.0 {
         eprintln!(

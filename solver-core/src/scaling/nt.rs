@@ -50,7 +50,9 @@ pub fn nt_scaling_nonneg(
         });
     }
 
-    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
+    if s.iter().any(|&x| !x.is_finite() || x <= 0.0)
+        || z.iter().any(|&x| !x.is_finite() || x <= 0.0)
+    {
         return Err(NtScalingError::NotInterior);
     }
 
