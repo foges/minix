@@ -38,9 +38,11 @@ impl NonNegCone {
     const INTERIOR_TOL: f64 = 1e-12;
 
     /// Scaling interior tolerance: accept very small positive values.
+    #[allow(dead_code)]
     const SCALING_INTERIOR_TOL: f64 = 1e-300;
 
     /// Relaxed interior check for scaling computations.
+    #[allow(dead_code)]
     pub(crate) fn is_interior_scaling(&self, s: &[f64]) -> bool {
         assert_eq!(s.len(), self.dim);
         if s.iter().any(|&x| !x.is_finite()) {

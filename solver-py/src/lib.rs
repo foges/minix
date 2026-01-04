@@ -5,9 +5,12 @@
 //! and numpy arrays.
 
 use numpy::{PyArray1, PyReadonlyArray1};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use solver_core::{solve, ConeSpec, ProblemData, SolveResult, SolveStatus, SolverSettings};
+use solver_core::{
+    ipm2, solve, ConeSpec, ProblemData, SolveResult, SolveStatus, SolverSettings, WarmStart,
+};
 use sprs::CsMat;
 
 /// Convert scipy CSC arrays to sprs CsMat in CSC format.
@@ -58,6 +61,200 @@ fn parse_cones(cones: Vec<(String, usize)>) -> PyResult<Vec<ConeSpec>> {
     }
 
     Ok(result)
+}
+
+fn build_problem(
+    a_indptr: PyReadonlyArray1<i64>,
+    a_indices: PyReadonlyArray1<i64>,
+    a_data: PyReadonlyArray1<f64>,
+    a_shape: (usize, usize),
+    q: PyReadonlyArray1<f64>,
+    b: PyReadonlyArray1<f64>,
+    cones: Vec<(String, usize)>,
+    p_indptr: Option<PyReadonlyArray1<i64>>,
+    p_indices: Option<PyReadonlyArray1<i64>>,
+    p_data: Option<PyReadonlyArray1<f64>>,
+) -> PyResult<ProblemData> {
+    // Extract all data from Python arrays first (while we hold the GIL)
+    let a_indptr_vec: Vec<usize> = a_indptr
+        .as_slice()?
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let a_indices_vec: Vec<usize> = a_indices
+        .as_slice()?
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let a_data_vec: Vec<f64> = a_data.as_slice()?.to_vec();
+    let q_vec: Vec<f64> = q.as_slice()?.to_vec();
+    let b_vec: Vec<f64> = b.as_slice()?.to_vec();
+
+    // Extract P if provided
+    let p_data_extracted = match (&p_indptr, &p_indices, &p_data) {
+        (Some(indptr), Some(indices), Some(data)) => {
+            let indptr_vec: Vec<usize> = indptr
+                .as_slice()?
+                .iter()
+                .map(|&x| x as usize)
+                .collect();
+            let indices_vec: Vec<usize> = indices
+                .as_slice()?
+                .iter()
+                .map(|&x| x as usize)
+                .collect();
+            let data_vec: Vec<f64> = data.as_slice()?.to_vec();
+            Some((indptr_vec, indices_vec, data_vec))
+        }
+        _ => None,
+    };
+
+    // Parse cone specifications
+    let cone_specs = parse_cones(cones)?;
+
+    // Convert constraint matrix A
+    let a_mat = scipy_csc_to_sprs(a_indptr_vec, a_indices_vec, a_data_vec, a_shape);
+
+    // Convert quadratic cost P if provided
+    let n = q_vec.len();
+    let p_mat = p_data_extracted.map(|(indptr, indices, data)| {
+        scipy_csc_to_sprs(indptr, indices, data, (n, n))
+    });
+
+    Ok(ProblemData {
+        P: p_mat,
+        q: q_vec,
+        A: a_mat,
+        b: b_vec,
+        cones: cone_specs,
+        var_bounds: None,
+        integrality: None,
+    })
+}
+
+fn build_warm_start(
+    warm_x: Option<PyReadonlyArray1<f64>>,
+    warm_s: Option<PyReadonlyArray1<f64>>,
+    warm_z: Option<PyReadonlyArray1<f64>>,
+    warm_tau: Option<f64>,
+    warm_kappa: Option<f64>,
+) -> PyResult<Option<WarmStart>> {
+    let warm_x_vec = match warm_x {
+        Some(arr) => Some(arr.as_slice()?.to_vec()),
+        None => None,
+    };
+    let warm_s_vec = match warm_s {
+        Some(arr) => Some(arr.as_slice()?.to_vec()),
+        None => None,
+    };
+    let warm_z_vec = match warm_z {
+        Some(arr) => Some(arr.as_slice()?.to_vec()),
+        None => None,
+    };
+
+    if warm_x_vec.is_some()
+        || warm_s_vec.is_some()
+        || warm_z_vec.is_some()
+        || warm_tau.is_some()
+        || warm_kappa.is_some()
+    {
+        Ok(Some(WarmStart {
+            x: warm_x_vec,
+            s: warm_s_vec,
+            z: warm_z_vec,
+            tau: warm_tau,
+            kappa: warm_kappa,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_settings(
+    max_iter: Option<usize>,
+    verbose: Option<bool>,
+    tol_feas: Option<f64>,
+    tol_gap: Option<f64>,
+    kkt_refine_iters: Option<usize>,
+    mcc_iters: Option<usize>,
+    centrality_beta: Option<f64>,
+    centrality_gamma: Option<f64>,
+    line_search_max_iters: Option<usize>,
+    time_limit_ms: Option<u64>,
+    warm_start: Option<WarmStart>,
+) -> SolverSettings {
+    let mut settings = SolverSettings::default();
+    if let Some(v) = max_iter {
+        settings.max_iter = v;
+    }
+    if let Some(v) = verbose {
+        settings.verbose = v;
+    }
+    if let Some(v) = tol_feas {
+        settings.tol_feas = v;
+    }
+    if let Some(v) = tol_gap {
+        settings.tol_gap = v;
+    }
+    if let Some(v) = kkt_refine_iters {
+        settings.kkt_refine_iters = v;
+    }
+    if let Some(v) = mcc_iters {
+        settings.mcc_iters = v;
+    }
+    if let Some(v) = centrality_beta {
+        settings.centrality_beta = v;
+    }
+    if let Some(v) = centrality_gamma {
+        settings.centrality_gamma = v;
+    }
+    if let Some(v) = line_search_max_iters {
+        settings.line_search_max_iters = v;
+    }
+    if let Some(v) = time_limit_ms {
+        settings.time_limit_ms = Some(v);
+    }
+    settings.warm_start = warm_start;
+    settings
+}
+
+fn solve_with_backend(
+    solver: Option<&str>,
+    problem: &ProblemData,
+    settings: &SolverSettings,
+) -> PyResult<SolveResult> {
+    let result = match solver {
+        None => solve(problem, settings),
+        Some(name) if name.eq_ignore_ascii_case("ipm") => solve(problem, settings),
+        Some(name) if name.eq_ignore_ascii_case("ipm2") => ipm2::solve_ipm2(problem, settings),
+        Some(name) => {
+            return Err(PyErr::new::<PyValueError, _>(format!(
+                "Unknown solver '{}'. Expected 'ipm' or 'ipm2'.",
+                name
+            )));
+        }
+    };
+
+    result.map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Solver error: {}", e)))
+}
+
+fn update_vec_from_array(
+    target: &mut Vec<f64>,
+    source: &PyReadonlyArray1<f64>,
+    name: &str,
+) -> PyResult<()> {
+    let slice = source.as_slice()?;
+    if slice.len() != target.len() {
+        return Err(PyErr::new::<PyValueError, _>(format!(
+            "{} has length {}, expected {}",
+            name,
+            slice.len(),
+            target.len()
+        )));
+    }
+    target.copy_from_slice(slice);
+    Ok(())
 }
 
 /// Result returned from the solve function.
@@ -142,6 +339,129 @@ impl From<SolveResult> for MinixResult {
     }
 }
 
+/// Persistent solver instance for repeated solves with updated parameters.
+#[pyclass]
+pub struct MinixSolver {
+    problem: ProblemData,
+}
+
+#[pymethods]
+impl MinixSolver {
+    #[new]
+    #[pyo3(signature = (
+        a_indptr,
+        a_indices,
+        a_data,
+        a_shape,
+        q,
+        b,
+        cones,
+        p_indptr = None,
+        p_indices = None,
+        p_data = None
+    ))]
+    fn new(
+        a_indptr: PyReadonlyArray1<i64>,
+        a_indices: PyReadonlyArray1<i64>,
+        a_data: PyReadonlyArray1<f64>,
+        a_shape: (usize, usize),
+        q: PyReadonlyArray1<f64>,
+        b: PyReadonlyArray1<f64>,
+        cones: Vec<(String, usize)>,
+        p_indptr: Option<PyReadonlyArray1<i64>>,
+        p_indices: Option<PyReadonlyArray1<i64>>,
+        p_data: Option<PyReadonlyArray1<f64>>,
+    ) -> PyResult<Self> {
+        let problem = build_problem(
+            a_indptr, a_indices, a_data, a_shape, q, b, cones, p_indptr, p_indices, p_data,
+        )?;
+        Ok(Self { problem })
+    }
+
+    #[pyo3(signature = (
+        q = None,
+        b = None,
+        max_iter = None,
+        verbose = None,
+        tol_feas = None,
+        tol_gap = None,
+        kkt_refine_iters = None,
+        mcc_iters = None,
+        centrality_beta = None,
+        centrality_gamma = None,
+        line_search_max_iters = None,
+        time_limit_ms = None,
+        warm_x = None,
+        warm_s = None,
+        warm_z = None,
+        warm_tau = None,
+        warm_kappa = None,
+        solver = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn solve(
+        &mut self,
+        q: Option<PyReadonlyArray1<f64>>,
+        b: Option<PyReadonlyArray1<f64>>,
+        max_iter: Option<usize>,
+        verbose: Option<bool>,
+        tol_feas: Option<f64>,
+        tol_gap: Option<f64>,
+        kkt_refine_iters: Option<usize>,
+        mcc_iters: Option<usize>,
+        centrality_beta: Option<f64>,
+        centrality_gamma: Option<f64>,
+        line_search_max_iters: Option<usize>,
+        time_limit_ms: Option<u64>,
+        warm_x: Option<PyReadonlyArray1<f64>>,
+        warm_s: Option<PyReadonlyArray1<f64>>,
+        warm_z: Option<PyReadonlyArray1<f64>>,
+        warm_tau: Option<f64>,
+        warm_kappa: Option<f64>,
+        solver: Option<String>,
+    ) -> PyResult<MinixResult> {
+        if let Some(q_arr) = q {
+            update_vec_from_array(&mut self.problem.q, &q_arr, "q")?;
+        }
+        if let Some(b_arr) = b {
+            update_vec_from_array(&mut self.problem.b, &b_arr, "b")?;
+        }
+
+        let warm_start = build_warm_start(warm_x, warm_s, warm_z, warm_tau, warm_kappa)?;
+        let settings = build_settings(
+            max_iter,
+            verbose,
+            tol_feas,
+            tol_gap,
+            kkt_refine_iters,
+            mcc_iters,
+            centrality_beta,
+            centrality_gamma,
+            line_search_max_iters,
+            time_limit_ms,
+            warm_start,
+        );
+
+        let result = solve_with_backend(solver.as_deref(), &self.problem, &settings)?;
+        Ok(MinixResult::from(result))
+    }
+
+    #[pyo3(signature = (q = None, b = None))]
+    fn update(
+        &mut self,
+        q: Option<PyReadonlyArray1<f64>>,
+        b: Option<PyReadonlyArray1<f64>>,
+    ) -> PyResult<()> {
+        if let Some(q_arr) = q {
+            update_vec_from_array(&mut self.problem.q, &q_arr, "q")?;
+        }
+        if let Some(b_arr) = b {
+            update_vec_from_array(&mut self.problem.b, &b_arr, "b")?;
+        }
+        Ok(())
+    }
+}
+
 /// Solve a conic optimization problem.
 ///
 /// Problem form:
@@ -168,6 +488,12 @@ impl From<SolveResult> for MinixResult {
 /// * `tol_feas` - Feasibility tolerance (default: 1e-8)
 /// * `tol_gap` - Duality gap tolerance (default: 1e-8)
 /// * `time_limit_ms` - Time limit in milliseconds (optional)
+/// * `warm_x` - Warm-start primal vector (optional)
+/// * `warm_s` - Warm-start slack vector (optional)
+/// * `warm_z` - Warm-start dual vector (optional)
+/// * `warm_tau` - Warm-start tau value (optional)
+/// * `warm_kappa` - Warm-start kappa value (optional)
+/// * `solver` - Solver backend ("ipm" or "ipm2")
 ///
 /// # Returns
 ///
@@ -193,7 +519,13 @@ impl From<SolveResult> for MinixResult {
     centrality_beta = None,
     centrality_gamma = None,
     line_search_max_iters = None,
-    time_limit_ms = None
+    time_limit_ms = None,
+    warm_x = None,
+    warm_s = None,
+    warm_z = None,
+    warm_tau = None,
+    warm_kappa = None,
+    solver = None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_conic(
@@ -223,101 +555,43 @@ fn solve_conic(
     centrality_gamma: Option<f64>,
     line_search_max_iters: Option<usize>,
     time_limit_ms: Option<u64>,
+    warm_x: Option<PyReadonlyArray1<f64>>,
+    warm_s: Option<PyReadonlyArray1<f64>>,
+    warm_z: Option<PyReadonlyArray1<f64>>,
+    warm_tau: Option<f64>,
+    warm_kappa: Option<f64>,
+    solver: Option<String>,
 ) -> PyResult<MinixResult> {
-    // Extract all data from Python arrays first (while we hold the GIL)
-    let a_indptr_vec: Vec<usize> = a_indptr
-        .as_slice()?
-        .iter()
-        .map(|&x| x as usize)
-        .collect();
-    let a_indices_vec: Vec<usize> = a_indices
-        .as_slice()?
-        .iter()
-        .map(|&x| x as usize)
-        .collect();
-    let a_data_vec: Vec<f64> = a_data.as_slice()?.to_vec();
-    let q_vec: Vec<f64> = q.as_slice()?.to_vec();
-    let b_vec: Vec<f64> = b.as_slice()?.to_vec();
+    let warm_start = build_warm_start(warm_x, warm_s, warm_z, warm_tau, warm_kappa)?;
 
-    // Extract P if provided
-    let p_data_extracted = match (&p_indptr, &p_indices, &p_data) {
-        (Some(indptr), Some(indices), Some(data)) => {
-            let indptr_vec: Vec<usize> = indptr
-                .as_slice()?
-                .iter()
-                .map(|&x| x as usize)
-                .collect();
-            let indices_vec: Vec<usize> = indices
-                .as_slice()?
-                .iter()
-                .map(|&x| x as usize)
-                .collect();
-            let data_vec: Vec<f64> = data.as_slice()?.to_vec();
-            Some((indptr_vec, indices_vec, data_vec))
-        }
-        _ => None,
-    };
+    let problem = build_problem(
+        a_indptr,
+        a_indices,
+        a_data,
+        a_shape,
+        q,
+        b,
+        cones,
+        p_indptr,
+        p_indices,
+        p_data,
+    )?;
 
-    // Parse cone specifications
-    let cone_specs = parse_cones(cones)?;
+    let settings = build_settings(
+        max_iter,
+        verbose,
+        tol_feas,
+        tol_gap,
+        kkt_refine_iters,
+        mcc_iters,
+        centrality_beta,
+        centrality_gamma,
+        line_search_max_iters,
+        time_limit_ms,
+        warm_start,
+    );
 
-    // Convert constraint matrix A
-    let a_mat = scipy_csc_to_sprs(a_indptr_vec, a_indices_vec, a_data_vec, a_shape);
-
-    // Convert quadratic cost P if provided
-    let n = q_vec.len();
-    let p_mat = p_data_extracted.map(|(indptr, indices, data)| {
-        scipy_csc_to_sprs(indptr, indices, data, (n, n))
-    });
-
-    // Build problem
-    let problem = ProblemData {
-        P: p_mat,
-        q: q_vec,
-        A: a_mat,
-        b: b_vec,
-        cones: cone_specs,
-        var_bounds: None,
-        integrality: None,
-    };
-
-    // Build settings
-    let mut settings = SolverSettings::default();
-    if let Some(v) = max_iter {
-        settings.max_iter = v;
-    }
-    if let Some(v) = verbose {
-        settings.verbose = v;
-    }
-    if let Some(v) = tol_feas {
-        settings.tol_feas = v;
-    }
-    if let Some(v) = tol_gap {
-        settings.tol_gap = v;
-    }
-    if let Some(v) = kkt_refine_iters {
-        settings.kkt_refine_iters = v;
-    }
-    if let Some(v) = mcc_iters {
-        settings.mcc_iters = v;
-    }
-    if let Some(v) = centrality_beta {
-        settings.centrality_beta = v;
-    }
-    if let Some(v) = centrality_gamma {
-        settings.centrality_gamma = v;
-    }
-    if let Some(v) = line_search_max_iters {
-        settings.line_search_max_iters = v;
-    }
-    if let Some(v) = time_limit_ms {
-        settings.time_limit_ms = Some(v);
-    }
-
-    // Solve
-    let result = solve(&problem, &settings).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Solver error: {}", e))
-    })?;
+    let result = solve_with_backend(solver.as_deref(), &problem, &settings)?;
 
     Ok(MinixResult::from(result))
 }
@@ -360,5 +634,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(default_settings, m)?)?;
     m.add_class::<MinixResult>()?;
+    m.add_class::<MinixSolver>()?;
     Ok(())
 }

@@ -15,6 +15,7 @@ sprs.workspace = true
 ldl.workspace = true
 sprs_suitesparse_camd.workspace = true
 suitesparse_camd_sys.workspace = true
+sprs_suitesparse_ldl = { workspace = true, optional = true }
 
 # Error handling
 thiserror.workspace = true
@@ -39,6 +40,7 @@ env_logger.workspace = true
 default = []
 parallel = ["rayon"]
 gpu = []  # Placeholder for future GPU support
+suitesparse-ldl = ["sprs_suitesparse_ldl"]
 
 # Benchmarks will be added later
 # [[bench]]

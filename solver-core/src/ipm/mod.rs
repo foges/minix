@@ -8,12 +8,16 @@ pub mod termination;
 
 use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone};
 use crate::linalg::kkt::KktSolver;
+use crate::presolve::apply_presolve;
 use crate::presolve::ruiz::equilibrate;
+use crate::presolve::singleton::detect_singleton_rows;
 use crate::problem::{ProblemData, ConeSpec, SolverSettings, SolveResult, SolveStatus, SolveInfo};
+use crate::ipm2::metrics::compute_unscaled_metrics;
 use crate::scaling::ScalingBlock;
 use hsde::{HsdeState, HsdeResiduals, compute_residuals, compute_mu};
-use predcorr::predictor_corrector_step;
+use predcorr::{predictor_corrector_step, StepTimings};
 use termination::{TerminationCriteria, check_termination};
+use std::time::Instant;
 
 /// Main IPM solver.
 ///
@@ -35,11 +39,17 @@ pub fn solve_ipm(
     // Validate problem
     prob.validate()?;
 
+    let orig_prob = prob.clone();
+    let presolved = apply_presolve(prob);
+    let prob = presolved.problem;
+    let postsolve = presolved.postsolve;
+
     // Convert var_bounds to explicit constraints if present
     let prob = prob.with_bounds_as_constraints();
 
     let n = prob.num_vars();
     let m = prob.num_constraints();
+    let orig_n = orig_prob.num_vars();
 
     // Apply Ruiz equilibration for numerical stability
     let (a_scaled, p_scaled, q_scaled, b_scaled, scaling) = equilibrate(
@@ -62,6 +72,15 @@ pub fn solve_ipm(
         integrality: prob.integrality.clone(),
     };
 
+    let singleton_partition = detect_singleton_rows(&scaled_prob.A);
+    if settings.verbose {
+        eprintln!(
+            "presolve: singleton_rows={} non_singleton_rows={}",
+            singleton_partition.singleton_rows.len(),
+            singleton_partition.non_singleton_rows.len(),
+        );
+    }
+
     // Precompute constant RHS used by the two-solve dtau strategy: rhs_x2 = -q.
     let neg_q: Vec<f64> = scaled_prob.q.iter().map(|&v| -v).collect();
 
@@ -74,6 +93,9 @@ pub fn solve_ipm(
     // Initialize HSDE state
     let mut state = HsdeState::new(n, m);
     state.initialize_with_prob(&cones, &scaled_prob);
+    if let Some(warm) = settings.warm_start.as_ref() {
+        state.apply_warm_start(warm, &postsolve, &scaling, &cones);
+    }
 
     // Initialize residuals
     let mut residuals = HsdeResiduals::new(n, m);
@@ -88,22 +110,13 @@ pub fn solve_ipm(
     let p_is_sparse = scaled_prob.P.as_ref().map_or(true, |p| {
         p.nnz() < n / 2  // Less than 50% diagonal fill
     });
-    let static_reg = if p_is_sparse {
+    let mut static_reg = if p_is_sparse {
         settings.static_reg.max(1e-6)
     } else {
         settings.static_reg.max(1e-6)
     };
 
-    let mut kkt = KktSolver::new(
-        n,
-        m,
-        static_reg,
-        settings.dynamic_reg_min_pivot,
-    );
-
-    // Perform symbolic factorization once with initial scaling structure.
-    // This determines the sparsity pattern of L and the elimination tree.
-    // Subsequent calls to factor() reuse this symbolic factorization.
+    // Build initial scaling structure for KKT assembly.
     let initial_scaling: Vec<ScalingBlock> = cones.iter().map(|cone| {
         let dim = cone.dim();
         if cone.barrier_degree() == 0 {
@@ -116,6 +129,19 @@ pub fn solve_ipm(
             ScalingBlock::Diagonal { d: vec![1.0; dim] }
         }
     }).collect();
+
+    let mut kkt = KktSolver::new_with_singleton_elimination(
+        n,
+        m,
+        static_reg,
+        settings.dynamic_reg_min_pivot,
+        &scaled_prob.A,
+        &initial_scaling,
+    );
+
+    // Perform symbolic factorization once with initial scaling structure.
+    // This determines the sparsity pattern of L and the elimination tree.
+    // Subsequent calls to factor() reuse this symbolic factorization.
 
     if let Err(e) = kkt.initialize(scaled_prob.P.as_ref(), &scaled_prob.A, &initial_scaling) {
         return Err(format!("KKT symbolic factorization failed: {}", e).into());
@@ -137,6 +163,9 @@ pub fn solve_ipm(
     let mut iter = 0;
     let mut consecutive_failures = 0;
     const MAX_CONSECUTIVE_FAILURES: usize = 3;
+    let mut timings = StepTimings::default();
+    let mut last_dynamic_bumps = 0;
+    let start = Instant::now();
 
     if settings.verbose {
         println!("Minix IPM Solver");
@@ -179,6 +208,7 @@ pub fn solve_ipm(
             mu,
             barrier_degree,
             settings,
+            &mut timings,
         ) {
             Ok(result) => {
                 consecutive_failures = 0;  // Reset on success
@@ -201,7 +231,7 @@ pub fn solve_ipm(
                 }
 
                 // Push s and z back to interior with larger margin
-                let recovery_margin = (mu * 0.1).max(1e-4);
+                let recovery_margin = (mu * 0.1).clamp(1e-4, 1e4);
                 state.push_to_interior(&cones, recovery_margin);
 
                 // Recompute mu after recovery
@@ -283,6 +313,8 @@ pub fn solve_ipm(
             );
         }
 
+        last_dynamic_bumps = kkt.dynamic_bumps();
+        static_reg = kkt.static_reg();
         iter += 1;
     }
 
@@ -317,15 +349,19 @@ pub fn solve_ipm(
     };
 
     // Unscale solution back to original coordinates
-    let x = scaling.unscale_x(&x_scaled);
-    let s = scaling.unscale_s(&s_scaled);
-    let z = scaling.unscale_z(&z_scaled);
+    let x_unscaled = scaling.unscale_x(&x_scaled);
+    let s_unscaled = scaling.unscale_s(&s_scaled);
+    let z_unscaled = scaling.unscale_z(&z_scaled);
+
+    let x = postsolve.recover_x(&x_unscaled);
+    let s = postsolve.recover_s(&s_unscaled, &x);
+    let z = postsolve.recover_z(&z_unscaled);
 
     // Compute objective value using ORIGINAL (unscaled) problem data
     let mut obj_val = 0.0;
-    if let Some(ref p) = prob.P {
-        let mut px = vec![0.0; n];
-        for col in 0..n {
+    if let Some(ref p) = orig_prob.P {
+        let mut px = vec![0.0; orig_n];
+        for col in 0..orig_n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
                     px[row] += val * x[col];
@@ -335,13 +371,33 @@ pub fn solve_ipm(
                 }
             }
         }
-        for i in 0..n {
+        for i in 0..orig_n {
             obj_val += 0.5 * x[i] * px[i];
         }
     }
-    for i in 0..n {
-        obj_val += prob.q[i] * x[i];
+    for i in 0..orig_n {
+        obj_val += orig_prob.q[i] * x[i];
     }
+
+    let orig_prob_bounds = orig_prob.with_bounds_as_constraints();
+    let (primal_res, dual_res, gap) = {
+        let mut r_p = vec![0.0; orig_prob_bounds.num_constraints()];
+        let mut r_d = vec![0.0; orig_prob_bounds.num_vars()];
+        let mut p_x = vec![0.0; orig_prob_bounds.num_vars()];
+        let metrics = compute_unscaled_metrics(
+            &orig_prob_bounds.A,
+            orig_prob_bounds.P.as_ref(),
+            &orig_prob_bounds.q,
+            &orig_prob_bounds.b,
+            &x,
+            &s,
+            &z,
+            &mut r_p,
+            &mut r_d,
+            &mut p_x,
+        );
+        (metrics.rel_p, metrics.rel_d, metrics.gap_rel)
+    };
 
     Ok(SolveResult {
         status,
@@ -351,16 +407,16 @@ pub fn solve_ipm(
         obj_val,
         info: SolveInfo {
             iters: iter,
-            solve_time_ms: 0,  // TODO: Add timing
-            kkt_factor_time_ms: 0,
-            kkt_solve_time_ms: 0,
-            cone_time_ms: 0,
-            primal_res: 0.0,  // TODO: Record final residuals
-            dual_res: 0.0,
-            gap: 0.0,
+            solve_time_ms: start.elapsed().as_millis() as u64,
+            kkt_factor_time_ms: timings.kkt_factor.as_millis() as u64,
+            kkt_solve_time_ms: timings.kkt_solve.as_millis() as u64,
+            cone_time_ms: timings.cone.as_millis() as u64,
+            primal_res,
+            dual_res,
+            gap,
             mu,
             reg_static: static_reg,
-            reg_dynamic_bumps: 0,
+            reg_dynamic_bumps: last_dynamic_bumps,
         },
     })
 }

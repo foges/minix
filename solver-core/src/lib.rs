@@ -55,7 +55,7 @@
 //! - MOSEK: Commercial-grade nonsymmetric cone handling
 //! - ECOS: Embedded conic solver (baseline for comparison)
 
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 #![warn(clippy::all)]
 #![allow(clippy::too_many_arguments)]  // IPM algorithms need many parameters
 
@@ -64,13 +64,15 @@ pub mod cones;
 pub mod scaling;
 pub mod linalg;
 pub mod ipm;
+pub mod ipm2;
 pub mod presolve;
+pub mod postsolve;
 pub mod util;
 
 // Re-export main types
 pub use problem::{
     ProblemData, ConeSpec, Pow3D, VarBound, VarType,
-    SolverSettings, SolveResult, SolveStatus, SolveInfo,
+    SolverSettings, SolveResult, SolveStatus, SolveInfo, WarmStart,
 };
 
 /// Main solve entry point.

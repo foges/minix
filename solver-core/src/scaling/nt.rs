@@ -50,16 +50,19 @@ pub fn nt_scaling_nonneg(
         });
     }
 
-    if s.iter().any(|&x| !x.is_finite() || x <= 0.0)
-        || z.iter().any(|&x| !x.is_finite() || x <= 0.0)
-    {
+    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
         return Err(NtScalingError::NotInterior);
     }
 
     // NT scaling for nonnegative orthant: H = diag(s/z)
     // This satisfies: H*z = s and H^{-1}*s = z.
-    let d: Vec<f64> = s.iter().zip(z.iter())
-        .map(|(si, zi)| si / zi)
+    //
+    // The ratio can overflow/underflow on extreme instances, so clamp it to
+    // a numerically safe range.
+    let d: Vec<f64> = s
+        .iter()
+        .zip(z.iter())
+        .map(|(si, zi)| (si / zi).clamp(1e-18, 1e18))
         .collect();
 
     Ok(ScalingBlock::Diagonal { d })

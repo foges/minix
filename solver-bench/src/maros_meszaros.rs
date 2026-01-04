@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use solver_core::{solve, ProblemData, SolveResult, SolveStatus, SolverSettings};
+use solver_core::{ProblemData, SolveResult, SolveStatus, SolverSettings};
+
+use crate::solver_choice::{solve_with_choice, SolverChoice};
 
 use crate::qps::{parse_qps, QpsProblem};
 
@@ -169,6 +171,37 @@ fn get_cache_dir() -> PathBuf {
     PathBuf::from(home).join(".cache").join("minix-bench").join("maros-meszaros")
 }
 
+pub fn find_local_qps(name: &str) -> Option<PathBuf> {
+    let local_paths = [
+        PathBuf::from(format!("{}.QPS", name)),
+        PathBuf::from(format!("{}.qps", name)),
+        PathBuf::from(format!("data/{}.QPS", name)),
+        PathBuf::from(format!("data/{}.qps", name)),
+    ];
+
+    for path in &local_paths {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+
+    let cache_dir = get_cache_dir();
+    let cached_path = cache_dir.join(format!("{}.QPS", name));
+    if cached_path.exists() {
+        return Some(cached_path);
+    }
+
+    None
+}
+
+pub fn load_local_problem(name: &str) -> Result<QpsProblem> {
+    let Some(path) = find_local_qps(name) else {
+        return Err(anyhow::anyhow!("No local QPS file found for {}", name));
+    };
+
+    parse_qps(path)
+}
+
 /// Download a QPS file if not cached
 fn download_qps(name: &str) -> Result<PathBuf> {
     let cache_dir = get_cache_dir();
@@ -220,18 +253,8 @@ fn download_qps(name: &str) -> Result<PathBuf> {
 
 /// Load a QPS problem from file or URL
 pub fn load_problem(name: &str) -> Result<QpsProblem> {
-    // Check for local file first
-    let local_paths = [
-        PathBuf::from(format!("{}.QPS", name)),
-        PathBuf::from(format!("{}.qps", name)),
-        PathBuf::from(format!("data/{}.QPS", name)),
-        PathBuf::from(format!("data/{}.qps", name)),
-    ];
-
-    for path in &local_paths {
-        if path.exists() {
-            return parse_qps(path);
-        }
+    if let Ok(prob) = load_local_problem(name) {
+        return Ok(prob);
     }
 
     // Try cache or download
@@ -240,7 +263,7 @@ pub fn load_problem(name: &str) -> Result<QpsProblem> {
 }
 
 /// Run a single benchmark problem
-pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
+pub fn run_single(name: &str, settings: &SolverSettings, solver: SolverChoice) -> BenchmarkResult {
     // Load and parse problem
     let qps = match load_problem(name) {
         Ok(q) => q,
@@ -258,6 +281,23 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
             };
         }
     };
+
+    // Debug: print OBJSENSE
+    let diagnostics_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+    if diagnostics_enabled {
+        let eq_count = qps.con_lower.iter().zip(qps.con_upper.iter())
+            .filter(|(&l, &u)| (l - u).abs() < 1e-10 && l.is_finite())
+            .count();
+        eprintln!("[{}] obj_sense={} ({}) n={} m={} p_triplets={} equalities={}",
+            name,
+            qps.obj_sense,
+            if qps.obj_sense < 0.0 { "MAX" } else { "MIN" },
+            qps.n,
+            qps.m,
+            qps.p_triplets.len(),
+            eq_count
+        );
+    }
 
     // Convert to conic form
     let prob = match qps.to_problem_data() {
@@ -279,7 +319,7 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
 
     // Solve
     let start = Instant::now();
-    let result = solve(&prob, settings);
+    let result = solve_with_choice(&prob, settings, solver);
     let elapsed = start.elapsed();
 
     let diagnostics_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
@@ -317,7 +357,11 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
 }
 
 /// Run full Maros-Meszaros benchmark suite
-pub fn run_full_suite(settings: &SolverSettings, max_problems: Option<usize>) -> Vec<BenchmarkResult> {
+pub fn run_full_suite(
+    settings: &SolverSettings,
+    max_problems: Option<usize>,
+    solver: SolverChoice,
+) -> Vec<BenchmarkResult> {
     let problems: Vec<&str> = MM_PROBLEMS
         .iter()
         .take(max_problems.unwrap_or(MM_PROBLEMS.len()))
@@ -328,7 +372,7 @@ pub fn run_full_suite(settings: &SolverSettings, max_problems: Option<usize>) ->
 
     for (i, name) in problems.iter().enumerate() {
         eprint!("[{}/{}] {} ... ", i + 1, problems.len(), name);
-        let result = run_single(name, settings);
+        let result = run_single(name, settings, solver);
 
         let status_str = match result.status {
             SolveStatus::Optimal => "✓",

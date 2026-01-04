@@ -332,9 +332,7 @@ impl QdldlSolver {
                     }
                 }
 
-                Ok(QdldlFactorization {
-                    d_values: f.d.clone(),
-                })
+                Ok(QdldlFactorization {})
             }
             Err(_) => Err(QdldlError::FactorizationFailed),
         }
@@ -382,13 +380,15 @@ impl QdldlSolver {
 ///
 /// Holds the diagonal D values for diagnostics.
 pub struct QdldlFactorization {
-    d_values: Vec<f64>,
 }
 
 impl QdldlFactorization {
-    /// Get the diagonal D values (for diagnostics).
-    pub fn d_values(&self) -> &[f64] {
-        &self.d_values
+}
+
+impl QdldlSolver {
+    /// Get the diagonal D values from the most recent factorization.
+    pub fn d_values(&self) -> Option<&[f64]> {
+        self.factorization.as_ref().map(|f| f.d.as_slice())
     }
 }
 
@@ -442,7 +442,7 @@ mod tests {
         let factor = solver.numeric_factorization(&mat).unwrap();
 
         // Check that D has entries
-        let d = factor.d_values();
+        let d = solver.d_values().expect("missing D values");
         assert_eq!(d.len(), 4);
 
         // Test that we can solve a system
