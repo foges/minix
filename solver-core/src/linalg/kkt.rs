@@ -234,7 +234,7 @@ impl KktSolver {
                 ScalingBlock::Zero { dim } => *dim,
                 ScalingBlock::Diagonal { d } => d.len(),
                 ScalingBlock::Dense3x3 { .. } => 3,
-                ScalingBlock::SocStructured { w } => w.len(),
+                ScalingBlock::SocStructured { w, .. } => w.len(),
                 ScalingBlock::PsdStructured { n, .. } => n * (n + 1) / 2,
             };
 
@@ -272,7 +272,7 @@ impl KktSolver {
                         }
                     }
                 }
-                ScalingBlock::SocStructured { w } => {
+                ScalingBlock::SocStructured { w, diag_reg } => {
                     // For SOC, the scaling matrix is H(w) = quadratic representation P(w)
                     // We need to compute the full dim x dim matrix and add -(H + 2ε*I) to KKT
                     let dim = w.len();
@@ -294,6 +294,9 @@ impl KktSolver {
                             // Add regularization to diagonal
                             if i == j {
                                 val -= 2.0 * self.static_reg;
+                                if *diag_reg != 0.0 {
+                                    val -= diag_reg;
+                                }
                             }
                             add_triplet(kkt_row, kkt_col, val, &mut tri);
                         }
@@ -307,7 +310,11 @@ impl KktSolver {
             offset += block_dim;
         }
 
-        assert_eq!(offset, self.m, "Scaling blocks must cover all {} slacks", self.m);
+        assert_eq!(
+            offset, self.m,
+            "Scaling blocks must cover all {} slacks",
+            self.m
+        );
 
         tri.to_csc()
     }
@@ -379,7 +386,11 @@ impl KktSolver {
             }
         }
 
-        assert_eq!(offset, self.m, "Scaling blocks must cover all {} slacks", self.m);
+        assert_eq!(
+            offset, self.m,
+            "Scaling blocks must cover all {} slacks",
+            self.m
+        );
     }
 
     /// Initialize the solver with the KKT matrix sparsity pattern.
@@ -526,13 +537,7 @@ impl KktSolver {
                         self.solve_ws.res[i] = self.solve_ws.rhs_perm[i] - self.solve_ws.kx[i];
                     }
 
-                    let res_norm = self
-                        .solve_ws
-                        .res
-                        .iter()
-                        .map(|v| v * v)
-                        .sum::<f64>()
-                        .sqrt();
+                    let res_norm = self.solve_ws.res.iter().map(|v| v * v).sum::<f64>().sqrt();
                     if !res_norm.is_finite() || res_norm < 1e-12 {
                         break;
                     }
@@ -627,9 +632,10 @@ mod tests {
         // P = None (LP, no quadratic term)
         // A = [[1, 1], [1, 0], [0, 1]]  (m×n)
         let a_triplets = vec![
-            (0, 0, 1.0), (0, 1, 1.0),  // Equality constraint
-            (1, 0, 1.0),               // x1 >= 0
-            (2, 1, 1.0),               // x2 >= 0
+            (0, 0, 1.0),
+            (0, 1, 1.0), // Equality constraint
+            (1, 0, 1.0), // x1 >= 0
+            (2, 1, 1.0), // x2 >= 0
         ];
         let a = sparse::from_triplets(m, n, a_triplets);
 
@@ -752,10 +758,14 @@ mod tests {
 
         kkt_solver.solve_two_rhs(
             &factor,
-            &rhs_x1, &rhs_z1,
-            &rhs_x2, &rhs_z2,
-            &mut sol_x1, &mut sol_z1,
-            &mut sol_x2, &mut sol_z2,
+            &rhs_x1,
+            &rhs_z1,
+            &rhs_x2,
+            &rhs_z2,
+            &mut sol_x1,
+            &mut sol_z1,
+            &mut sol_x2,
+            &mut sol_z2,
         );
 
         // Check that both solutions are non-trivial
