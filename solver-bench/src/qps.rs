@@ -185,11 +185,7 @@ impl QpsProblem {
         let p = if self.p_triplets.is_empty() {
             None
         } else {
-            Some(sparse::from_triplets(
-                self.n,
-                self.n,
-                self.p_triplets.clone(),
-            ))
+            Some(sparse::from_triplets(self.n, self.n, self.p_triplets.clone()))
         };
 
         // Scale objective by sense
@@ -255,11 +251,7 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
 
         // Check for section headers
         if line.starts_with("NAME") {
-            name = line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("unknown")
-                .to_string();
+            name = line.split_whitespace().nth(1).unwrap_or("unknown").to_string();
             section = "NAME".to_string();
             continue;
         } else if line == "ROWS" {
