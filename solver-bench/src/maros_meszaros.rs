@@ -14,32 +14,34 @@ use crate::matparser;
 use crate::qps::{parse_qps, QpsProblem};
 
 /// URL for Maros-Meszaros QPS files (from GitHub mirror)
-const MM_BASE_URL: &str =
-    "https://raw.githubusercontent.com/YimingYAN/QP-Test-Problems/master/QPS_Files";
+const MM_BASE_URL: &str = "https://raw.githubusercontent.com/YimingYAN/QP-Test-Problems/master/QPS_Files";
 
 /// Known Maros-Meszaros problem names (138 problems)
 const MM_PROBLEMS: &[&str] = &[
-    "AUG2D", "AUG2DC", "AUG2DCQP", "AUG2DQP", "AUG3D", "AUG3DC", "AUG3DCQP", "AUG3DQP", "BOYD1",
-    "BOYD2", "CONT-050", "CONT-100", "CONT-101", "CONT-200", "CONT-201", "CONT-300", "CVXQP1_L",
-    "CVXQP1_M", "CVXQP1_S", "CVXQP2_L", "CVXQP2_M", "CVXQP2_S", "CVXQP3_L", "CVXQP3_M", "CVXQP3_S",
-    "DPKLO1", "DTOC3", "DUAL1", "DUAL2", "DUAL3", "DUAL4", "DUALC1", "DUALC2", "DUALC5", "DUALC8",
-    "EXDATA", "GOULDQP2", "GOULDQP3", "HS118", "HS21", "HS268", "HS35", "HS35MOD", "HS51", "HS52",
-    "HS53", "HS76", "HUES-MOD", "HUESTIS", "KSIP", "LASER", "LISWET1", "LISWET10", "LISWET11",
-    "LISWET12", "LISWET2", "LISWET3", "LISWET4", "LISWET5", "LISWET6", "LISWET7", "LISWET8",
-    "LISWET9", "LOTSCHD", "MOSARQP1", "MOSARQP2", "POWELL20", "PRIMAL1", "PRIMAL2", "PRIMAL3",
-    "PRIMAL4", "PRIMALC1", "PRIMALC2", "PRIMALC5", "PRIMALC8", "Q25FV47", "QADLITTL", "QAFIRO",
-    "QBANDM", "QBEACONF", "QBORE3D", "QBRANDY", "QCAPRI", "QE226", "QETAMACR", "QFFFFF80",
-    "QFORPLAN", "QGFRDXPN", "QGROW15", "QGROW22", "QGROW7", "QISRAEL", "QPCBLEND", "QPCBOEI1",
-    "QPCBOEI2", "QPCSTAIR", "QPILOTNO", "QRECIPE", "QSC205", "QSCAGR25", "QSCAGR7", "QSCFXM1",
-    "QSCFXM2", "QSCFXM3", "QSCORPIO", "QSCRS8", "QSCSD1", "QSCSD6", "QSCSD8", "QSCTAP1", "QSCTAP2",
-    "QSCTAP3", "QSEBA", "QSHARE1B", "QSHARE2B", "QSHELL", "QSHIP04L", "QSHIP04S", "QSHIP08L",
-    "QSHIP08S", "QSHIP12L", "QSHIP12S", "QSIERRA", "QSTAIR", "QSTANDAT", "S268", "STADAT1",
-    "STADAT2", "STADAT3", "STCQP1", "STCQP2", "TAME", "UBH1", "VALUES", "YAO", "ZECEVIC2",
+    "AUG2D", "AUG2DC", "AUG2DCQP", "AUG2DQP", "AUG3D", "AUG3DC", "AUG3DCQP", "AUG3DQP",
+    "BOYD1", "BOYD2", "CONT-050", "CONT-100", "CONT-101", "CONT-200", "CONT-201", "CONT-300",
+    "CVXQP1_L", "CVXQP1_M", "CVXQP1_S", "CVXQP2_L", "CVXQP2_M", "CVXQP2_S", "CVXQP3_L",
+    "CVXQP3_M", "CVXQP3_S", "DPKLO1", "DTOC3", "DUAL1", "DUAL2", "DUAL3", "DUAL4", "DUALC1",
+    "DUALC2", "DUALC5", "DUALC8", "EXDATA", "GOULDQP2", "GOULDQP3", "HS118", "HS21", "HS268",
+    "HS35", "HS35MOD", "HS51", "HS52", "HS53", "HS76", "HUES-MOD", "HUESTIS", "KSIP",
+    "LASER", "LISWET1", "LISWET10", "LISWET11", "LISWET12", "LISWET2", "LISWET3", "LISWET4",
+    "LISWET5", "LISWET6", "LISWET7", "LISWET8", "LISWET9", "LOTSCHD", "MOSARQP1", "MOSARQP2",
+    "POWELL20", "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4", "PRIMALC1", "PRIMALC2", "PRIMALC5",
+    "PRIMALC8", "Q25FV47", "QADLITTL", "QAFIRO", "QBANDM", "QBEACONF", "QBORE3D", "QBRANDY",
+    "QCAPRI", "QE226", "QETAMACR", "QFFFFF80", "QFORPLAN", "QGFRDXPN", "QGROW15", "QGROW22",
+    "QGROW7", "QISRAEL", "QPCBLEND", "QPCBOEI1", "QPCBOEI2", "QPCSTAIR", "QPILOTNO", "QRECIPE",
+    "QSC205", "QSCAGR25", "QSCAGR7", "QSCFXM1", "QSCFXM2", "QSCFXM3", "QSCORPIO", "QSCRS8",
+    "QSCSD1", "QSCSD6", "QSCSD8", "QSCTAP1", "QSCTAP2", "QSCTAP3", "QSEBA", "QSHARE1B",
+    "QSHARE2B", "QSHELL", "QSHIP04L", "QSHIP04S", "QSHIP08L", "QSHIP08S", "QSHIP12L", "QSHIP12S",
+    "QSIERRA", "QSTAIR", "QSTANDAT", "S268", "STADAT1", "STADAT2", "STADAT3", "STCQP1",
+    "STCQP2", "TAME", "UBH1", "VALUES", "YAO", "ZECEVIC2",
 ];
 
 #[inline]
 fn inf_norm(v: &[f64]) -> f64 {
-    v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max)
+    v.iter()
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max)
 }
 
 #[inline]
@@ -166,10 +168,7 @@ pub struct BenchmarkSummary {
 /// Get the cache directory for benchmark problems
 fn get_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".cache")
-        .join("minix-bench")
-        .join("maros-meszaros")
+    PathBuf::from(home).join(".cache").join("minix-bench").join("maros-meszaros")
 }
 
 /// Download a QPS file if not cached
@@ -218,10 +217,7 @@ fn download_qps(name: &str) -> Result<PathBuf> {
         }
     }
 
-    Err(anyhow::anyhow!(
-        "Failed to download {} - file not found or invalid",
-        name
-    ))
+    Err(anyhow::anyhow!("Failed to download {} - file not found or invalid", name))
 }
 
 /// Get the local ClarabelBenchmarks MAT directory if available.
@@ -379,10 +375,7 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
 }
 
 /// Run full Maros-Meszaros benchmark suite
-pub fn run_full_suite(
-    settings: &SolverSettings,
-    max_problems: Option<usize>,
-) -> Vec<BenchmarkResult> {
+pub fn run_full_suite(settings: &SolverSettings, max_problems: Option<usize>) -> Vec<BenchmarkResult> {
     let problems: Vec<&str> = MM_PROBLEMS
         .iter()
         .take(max_problems.unwrap_or(MM_PROBLEMS.len()))
@@ -405,10 +398,7 @@ pub fn run_full_suite(
         if result.error.is_some() {
             eprintln!("ERROR");
         } else {
-            eprintln!(
-                "{} ({} iters, {:.1}ms)",
-                status_str, result.iterations, result.solve_time_ms
-            );
+            eprintln!("{} ({} iters, {:.1}ms)", status_str, result.iterations, result.solve_time_ms);
         }
 
         results.push(result);
@@ -473,11 +463,9 @@ pub fn print_summary(summary: &BenchmarkSummary) {
     println!("Maros-Meszaros Benchmark Summary");
     println!("{}", "=".repeat(60));
     println!("Total problems:      {}", summary.total);
-    println!(
-        "Optimal:             {} ({:.1}%)",
-        summary.optimal,
-        100.0 * summary.optimal as f64 / summary.total as f64
-    );
+    println!("Optimal:             {} ({:.1}%)",
+             summary.optimal,
+             100.0 * summary.optimal as f64 / summary.total as f64);
     println!("Max iterations:      {}", summary.max_iters);
     println!("Numerical errors:    {}", summary.numerical_errors);
     println!("Parse errors:        {}", summary.parse_errors);
@@ -488,10 +476,8 @@ pub fn print_summary(summary: &BenchmarkSummary) {
 
 /// Print detailed results table
 pub fn print_results_table(results: &[BenchmarkResult]) {
-    println!(
-        "\n{:<15} {:>6} {:>8} {:>8} {:>10} {:>12} {:>10}",
-        "Problem", "n", "m", "Status", "Iters", "Obj", "Time(ms)"
-    );
+    println!("\n{:<15} {:>6} {:>8} {:>8} {:>10} {:>12} {:>10}",
+             "Problem", "n", "m", "Status", "Iters", "Obj", "Time(ms)");
     println!("{}", "-".repeat(75));
 
     for r in results {
@@ -505,15 +491,11 @@ pub fn print_results_table(results: &[BenchmarkResult]) {
         };
 
         if r.error.is_some() {
-            println!(
-                "{:<15} {:>6} {:>8} {:>8} {:>10} {:>12} {:>10}",
-                r.name, "-", "-", "Error", "-", "-", "-"
-            );
+            println!("{:<15} {:>6} {:>8} {:>8} {:>10} {:>12} {:>10}",
+                     r.name, "-", "-", "Error", "-", "-", "-");
         } else {
-            println!(
-                "{:<15} {:>6} {:>8} {:>8} {:>10} {:>12.4e} {:>10.1}",
-                r.name, r.n, r.m, status_str, r.iterations, r.obj_val, r.solve_time_ms
-            );
+            println!("{:<15} {:>6} {:>8} {:>8} {:>10} {:>12.4e} {:>10.1}",
+                     r.name, r.n, r.m, status_str, r.iterations, r.obj_val, r.solve_time_ms);
         }
     }
 }
