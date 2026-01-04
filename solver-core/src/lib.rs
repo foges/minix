@@ -57,20 +57,20 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-#![allow(clippy::too_many_arguments)]  // IPM algorithms need many parameters
+#![allow(clippy::too_many_arguments)] // IPM algorithms need many parameters
 
-pub mod problem;
 pub mod cones;
-pub mod scaling;
-pub mod linalg;
 pub mod ipm;
+pub mod linalg;
 pub mod presolve;
+pub mod problem;
+pub mod scaling;
 pub mod util;
 
 // Re-export main types
 pub use problem::{
-    ProblemData, ConeSpec, Pow3D, VarBound, VarType,
-    SolverSettings, SolveResult, SolveStatus, SolveInfo,
+    ConeSpec, Pow3D, ProblemData, SolveInfo, SolveResult, SolveStatus, SolverSettings, VarBound,
+    VarType,
 };
 
 /// Main solve entry point.

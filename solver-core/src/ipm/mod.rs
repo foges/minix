@@ -6,14 +6,14 @@ pub mod hsde;
 pub mod predcorr;
 pub mod termination;
 
-use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone};
+use crate::cones::{ConeKernel, NonNegCone, SocCone, ZeroCone};
 use crate::linalg::kkt::KktSolver;
 use crate::presolve::ruiz::equilibrate;
-use crate::problem::{ProblemData, ConeSpec, SolverSettings, SolveResult, SolveStatus, SolveInfo};
+use crate::problem::{ConeSpec, ProblemData, SolveInfo, SolveResult, SolveStatus, SolverSettings};
 use crate::scaling::ScalingBlock;
-use hsde::{HsdeState, HsdeResiduals, compute_residuals, compute_mu};
+use hsde::{compute_mu, compute_residuals, HsdeResiduals, HsdeState};
 use predcorr::predictor_corrector_step;
-use termination::{TerminationCriteria, check_termination};
+use termination::{check_termination, TerminationCriteria};
 
 /// Main IPM solver.
 ///
@@ -86,36 +86,40 @@ pub fn solve_ipm(
     // gives dx ≈ rhs_x/ε, which blows up for small ε.
     // Using ε=1e-4 provides stability while allowing good convergence.
     let p_is_sparse = scaled_prob.P.as_ref().map_or(true, |p| {
-        p.nnz() < n / 2  // Less than 50% diagonal fill
+        p.nnz() < n / 2 // Less than 50% diagonal fill
     });
     let static_reg = if p_is_sparse {
-        settings.static_reg.max(1e-4)  // LP or sparse QP: use at least 1e-4
+        settings.static_reg.max(1e-4) // LP or sparse QP: use at least 1e-4
     } else {
-        settings.static_reg.max(1e-6)  // Dense QP: use at least 1e-6
+        settings.static_reg.max(1e-6) // Dense QP: use at least 1e-6
     };
 
-    let mut kkt = KktSolver::new(
-        n,
-        m,
-        static_reg,
-        settings.dynamic_reg_min_pivot,
-    );
+    let mut kkt = KktSolver::new(n, m, static_reg, settings.dynamic_reg_min_pivot);
 
     // Perform symbolic factorization once with initial scaling structure.
     // This determines the sparsity pattern of L and the elimination tree.
     // Subsequent calls to factor() reuse this symbolic factorization.
-    let initial_scaling: Vec<ScalingBlock> = cones.iter().map(|cone| {
-        let dim = cone.dim();
-        if cone.barrier_degree() == 0 {
-            ScalingBlock::Zero { dim }
-        } else if (cone.as_ref() as &dyn std::any::Any).downcast_ref::<SocCone>().is_some() {
-            // SOC creates a dense block in KKT
-            ScalingBlock::SocStructured { w: vec![1.0; dim] }
-        } else {
-            // NonNeg uses diagonal scaling
-            ScalingBlock::Diagonal { d: vec![1.0; dim] }
-        }
-    }).collect();
+    let initial_scaling: Vec<ScalingBlock> = cones
+        .iter()
+        .map(|cone| {
+            let dim = cone.dim();
+            if cone.barrier_degree() == 0 {
+                ScalingBlock::Zero { dim }
+            } else if (cone.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<SocCone>()
+                .is_some()
+            {
+                // SOC creates a dense block in KKT
+                ScalingBlock::SocStructured {
+                    w: vec![1.0; dim],
+                    diag_reg: 0.0,
+                }
+            } else {
+                // NonNeg uses diagonal scaling
+                ScalingBlock::Diagonal { d: vec![1.0; dim] }
+            }
+        })
+        .collect();
 
     if let Err(e) = kkt.initialize(scaled_prob.P.as_ref(), &scaled_prob.A, &initial_scaling) {
         return Err(format!("KKT symbolic factorization failed: {}", e).into());
@@ -133,21 +137,29 @@ pub fn solve_ipm(
     // Initial barrier parameter
     let mut mu = compute_mu(&state, barrier_degree);
 
-    let mut status = SolveStatus::NumericalError;  // Will be overwritten
+    let mut status = SolveStatus::NumericalError; // Will be overwritten
     let mut iter = 0;
+    let mut line_search_backtracks = 0u64;
     let mut consecutive_failures = 0;
     const MAX_CONSECUTIVE_FAILURES: usize = 3;
 
     if settings.verbose {
         println!("Minix IPM Solver");
         println!("================");
-        println!("Problem: n = {}, m = {}, cones = {:?}", n, m, scaled_prob.cones.len());
+        println!(
+            "Problem: n = {}, m = {}, cones = {:?}",
+            n,
+            m,
+            scaled_prob.cones.len()
+        );
         if settings.ruiz_iters > 0 {
             println!("Ruiz equilibration: {} iterations", settings.ruiz_iters);
         }
         println!("Barrier degree: {}", barrier_degree);
-        println!("Initial state: x={:?}, s={:?}, z={:?}, tau={}, kappa={}",
-                 state.x, state.s, state.z, state.tau, state.kappa);
+        println!(
+            "Initial state: x={:?}, s={:?}, z={:?}, tau={}, kappa={}",
+            state.x, state.s, state.z, state.tau, state.kappa
+        );
         println!("Initial mu: {}", mu);
         println!();
         println!(
@@ -181,7 +193,7 @@ pub fn solve_ipm(
             settings,
         ) {
             Ok(result) => {
-                consecutive_failures = 0;  // Reset on success
+                consecutive_failures = 0; // Reset on success
                 result
             }
             Err(e) => {
@@ -197,7 +209,10 @@ pub fn solve_ipm(
 
                 // Infeasible-start recovery: push state back to cone interior
                 if settings.verbose {
-                    eprintln!("IPM step failed (attempt {}), recovering: {}", consecutive_failures, e);
+                    eprintln!(
+                        "IPM step failed (attempt {}), recovering: {}",
+                        consecutive_failures, e
+                    );
                 }
 
                 // Push s and z back to interior with larger margin
@@ -215,6 +230,8 @@ pub fn solve_ipm(
 
         // Update mu
         mu = step_result.mu_new;
+        line_search_backtracks =
+            line_search_backtracks.saturating_add(step_result.line_search_backtracks);
 
         // Check for divergence or numerical issues
         if !mu.is_finite() || mu > 1e15 {
@@ -260,8 +277,18 @@ pub fn solve_ipm(
                 }
             }
 
-            let qtx: f64 = scaled_prob.q.iter().zip(x_bar.iter()).map(|(qi, xi)| qi * xi).sum();
-            let btz: f64 = scaled_prob.b.iter().zip(z_bar.iter()).map(|(bi, zi)| bi * zi).sum();
+            let qtx: f64 = scaled_prob
+                .q
+                .iter()
+                .zip(x_bar.iter())
+                .map(|(qi, xi)| qi * xi)
+                .sum();
+            let btz: f64 = scaled_prob
+                .b
+                .iter()
+                .zip(z_bar.iter())
+                .map(|(bi, zi)| bi * zi)
+                .sum();
             let gap_obj = (xpx + qtx + btz).abs();
 
             let s_dot_z: f64 = state
@@ -351,16 +378,17 @@ pub fn solve_ipm(
         obj_val,
         info: SolveInfo {
             iters: iter,
-            solve_time_ms: 0,  // TODO: Add timing
+            solve_time_ms: 0, // TODO: Add timing
             kkt_factor_time_ms: 0,
             kkt_solve_time_ms: 0,
             cone_time_ms: 0,
-            primal_res: 0.0,  // TODO: Record final residuals
+            primal_res: 0.0, // TODO: Record final residuals
             dual_res: 0.0,
             gap: 0.0,
             mu,
             reg_static: static_reg,
             reg_dynamic_bumps: 0,
+            line_search_backtracks,
         },
     })
 }
@@ -415,9 +443,10 @@ mod tests {
 
         // A is 3x2: [equality, bound x1, bound x2]
         let a_triplets = vec![
-            (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 = 1
-            (1, 0, -1.0),              // -x1 + s_1 = 0
-            (2, 1, -1.0),              // -x2 + s_2 = 0
+            (0, 0, 1.0),
+            (0, 1, 1.0),  // x1 + x2 = 1
+            (1, 0, -1.0), // -x1 + s_1 = 0
+            (2, 1, -1.0), // -x2 + s_2 = 0
         ];
 
         let prob = ProblemData {
@@ -426,8 +455,8 @@ mod tests {
             A: sparse::from_triplets(3, 2, a_triplets),
             b: vec![1.0, 0.0, 0.0],
             cones: vec![
-                ConeSpec::Zero { dim: 1 },    // equality constraint
-                ConeSpec::NonNeg { dim: 2 },  // bounds x >= 0
+                ConeSpec::Zero { dim: 1 },   // equality constraint
+                ConeSpec::NonNeg { dim: 2 }, // bounds x >= 0
             ],
             var_bounds: None,
             integrality: None,
@@ -448,7 +477,10 @@ mod tests {
         println!("obj = {}", result.obj_val);
 
         // Check status
-        assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::MaxIters));
+        assert!(matches!(
+            result.status,
+            SolveStatus::Optimal | SolveStatus::MaxIters
+        ));
 
         // Check solution satisfies constraints
         if result.status == SolveStatus::Optimal {

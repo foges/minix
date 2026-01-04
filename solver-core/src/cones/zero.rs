@@ -30,7 +30,7 @@ impl ConeKernel for ZeroCone {
     }
 
     fn barrier_degree(&self) -> usize {
-        0  // No barrier for zero cone
+        0 // No barrier for zero cone
     }
 
     fn is_interior_primal(&self, _s: &[f64]) -> bool {

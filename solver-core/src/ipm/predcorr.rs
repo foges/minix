@@ -6,11 +6,11 @@
 //!
 //! This implementation follows §7 of the design doc.
 
-use super::hsde::{HsdeState, HsdeResiduals, compute_mu};
+use super::hsde::{compute_mu, HsdeResiduals, HsdeState};
 use crate::cones::{ConeKernel, NonNegCone, SocCone};
 use crate::linalg::kkt::KktSolver;
-use crate::scaling::{ScalingBlock, nt};
 use crate::problem::{ProblemData, SolverSettings};
+use crate::scaling::{nt, ScalingBlock};
 use std::any::Any;
 
 /// Predictor-corrector step result.
@@ -24,6 +24,31 @@ pub struct StepResult {
 
     /// New barrier parameter after step
     pub mu_new: f64,
+
+    /// Number of line-search backtracks
+    pub line_search_backtracks: u64,
+}
+
+fn soc_min_eig(v: &[f64]) -> f64 {
+    let t = v[0];
+    let x_norm = v[1..].iter().map(|&xi| xi * xi).sum::<f64>().sqrt();
+    t - x_norm
+}
+
+fn soc_max_eig(v: &[f64]) -> f64 {
+    let t = v[0];
+    let x_norm = v[1..].iter().map(|&xi| xi * xi).sum::<f64>().sqrt();
+    t + x_norm
+}
+
+fn soc_jordan_product(a: &[f64], b: &[f64], out: &mut [f64]) {
+    out[0] = a[0] * b[0];
+    for i in 1..a.len() {
+        out[0] += a[i] * b[i];
+    }
+    for i in 1..a.len() {
+        out[i] = a[0] * b[i] + b[0] * a[i];
+    }
 }
 
 fn compute_dtau(
@@ -117,7 +142,7 @@ fn clamp_complementarity_nonneg(
     Some(delta_w)
 }
 
-fn centrality_ok_nonneg_trial(
+fn centrality_ok_trial(
     state: &HsdeState,
     ds: &[f64],
     dz: &[f64],
@@ -126,8 +151,14 @@ fn centrality_ok_nonneg_trial(
     cones: &[Box<dyn ConeKernel>],
     beta: f64,
     gamma: f64,
+    soc_beta: f64,
+    soc_gamma: f64,
     barrier_degree: usize,
     alpha: f64,
+    enable_soc: bool,
+    soc_use_upper: bool,
+    soc_use_jordan: bool,
+    soc_mu_threshold: f64,
 ) -> bool {
     if barrier_degree == 0 {
         return true;
@@ -152,6 +183,7 @@ fn centrality_ok_nonneg_trial(
     }
 
     let mut has_nonneg = false;
+    let mut has_soc = false;
     let mut offset = 0;
     for cone in cones {
         let dim = cone.dim();
@@ -160,26 +192,69 @@ fn centrality_ok_nonneg_trial(
         }
 
         let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
-        if !is_nonneg {
-            offset += dim;
-            continue;
-        }
+        let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+        if is_nonneg {
+            has_nonneg = true;
+            for i in 0..dim {
+                let idx = offset + i;
+                let s_i = state.s[idx] + alpha * ds[idx];
+                let z_i = state.z[idx] + alpha * dz[idx];
+                let w = s_i * z_i;
+                if w < beta * mu_trial || w > gamma * mu_trial {
+                    return false;
+                }
+            }
+        } else if is_soc && enable_soc {
+            if mu_trial < soc_mu_threshold {
+                offset += dim;
+                continue;
+            }
 
-        has_nonneg = true;
-        for i in 0..dim {
-            let idx = offset + i;
-            let s_i = state.s[idx] + alpha * ds[idx];
-            let z_i = state.z[idx] + alpha * dz[idx];
-            let w = s_i * z_i;
-            if w < beta * mu_trial || w > gamma * mu_trial {
-                return false;
+            has_soc = true;
+            let s_block = &state.s[offset..offset + dim];
+            let z_block = &state.z[offset..offset + dim];
+            let ds_block = &ds[offset..offset + dim];
+            let dz_block = &dz[offset..offset + dim];
+
+            let mut s_trial = vec![0.0; dim];
+            let mut z_trial = vec![0.0; dim];
+            for i in 0..dim {
+                s_trial[i] = s_block[i] + alpha * ds_block[i];
+                z_trial[i] = z_block[i] + alpha * dz_block[i];
+            }
+
+            if soc_use_jordan {
+                let mut w = vec![0.0; dim];
+                soc_jordan_product(&s_trial, &z_trial, &mut w);
+                let w_min = soc_min_eig(&w);
+                let w_max = soc_max_eig(&w);
+
+                if w_min < soc_beta * mu_trial {
+                    return false;
+                }
+                if soc_use_upper && w_max > soc_gamma * mu_trial {
+                    return false;
+                }
+            } else {
+                let s_min = soc_min_eig(&s_trial);
+                let z_min = soc_min_eig(&z_trial);
+                let s_max = soc_max_eig(&s_trial);
+                let z_max = soc_max_eig(&z_trial);
+                let lower = (soc_beta * mu_trial).sqrt();
+
+                if s_min < lower || z_min < lower {
+                    return false;
+                }
+                if soc_use_upper && s_max * z_max > soc_gamma * mu_trial {
+                    return false;
+                }
             }
         }
 
         offset += dim;
     }
 
-    if !has_nonneg {
+    if !has_nonneg && !has_soc {
         return true;
     }
 
@@ -219,7 +294,7 @@ pub fn predictor_corrector_step(
     let mut scaling: Vec<ScalingBlock> = Vec::new();
     let mut offset = 0;
 
-    // Track minimum s and z values for adaptive regularization
+    // Track minimum interior measures for adaptive regularization
     let mut s_min = f64::INFINITY;
     let mut z_min = f64::INFINITY;
 
@@ -240,28 +315,57 @@ pub fn predictor_corrector_step(
         let s = &state.s[offset..offset + dim];
         let z = &state.z[offset..offset + dim];
 
-        // Track minimum values for adaptive regularization (exclude zero cones)
-        for &si in s.iter() {
-            if si < s_min { s_min = si; }
-        }
-        for &zi in z.iter() {
-            if zi < z_min { z_min = zi; }
+        // Track minimum interior measures for adaptive regularization.
+        let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+        let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+        if is_nonneg {
+            for &si in s.iter() {
+                if si < s_min {
+                    s_min = si;
+                }
+            }
+            for &zi in z.iter() {
+                if zi < z_min {
+                    z_min = zi;
+                }
+            }
+        } else if is_soc {
+            let s_eig_min = soc_min_eig(s);
+            let z_eig_min = soc_min_eig(z);
+            if s_eig_min < s_min {
+                s_min = s_eig_min;
+            }
+            if z_eig_min < z_min {
+                z_min = z_eig_min;
+            }
+        } else {
+            for &si in s.iter() {
+                if si < s_min {
+                    s_min = si;
+                }
+            }
+            for &zi in z.iter() {
+                if zi < z_min {
+                    z_min = zi;
+                }
+            }
         }
 
         // Compute NT scaling based on cone type
-        let scale = nt::compute_nt_scaling(s, z, cone.as_ref())
-            .unwrap_or_else(|_| {
-                // Fallback to simple diagonal scaling if NT fails
-                let eps = 1e-18;
-                let d: Vec<f64> = s.iter().zip(z.iter())
-                    .map(|(si, zi)| {
-                        let num = si.max(eps);
-                        let den = zi.max(eps);
-                        (num / den).max(eps)
-                    })
-                    .collect();
-                ScalingBlock::Diagonal { d }
-            });
+        let scale = nt::compute_nt_scaling(s, z, cone.as_ref()).unwrap_or_else(|_| {
+            // Fallback to simple diagonal scaling if NT fails
+            let eps = 1e-18;
+            let d: Vec<f64> = s
+                .iter()
+                .zip(z.iter())
+                .map(|(si, zi)| {
+                    let num = si.max(eps);
+                    let den = zi.max(eps);
+                    (num / den).max(eps)
+                })
+                .collect();
+            ScalingBlock::Diagonal { d }
+        });
 
         scaling.push(scale);
         offset += dim;
@@ -292,11 +396,19 @@ pub fn predictor_corrector_step(
     // Apply extra regularization by modifying the scaling
     if extra_reg > 0.0 {
         for block in scaling.iter_mut() {
-            if let ScalingBlock::Diagonal { d } = block {
-                for di in d.iter_mut() {
-                    // Add regularization to H directly (H_reg = H + extra_reg * I)
-                    *di += extra_reg;
+            match block {
+                ScalingBlock::Diagonal { d } => {
+                    for di in d.iter_mut() {
+                        // Add regularization to H directly (H_reg = H + extra_reg * I)
+                        *di += extra_reg;
+                    }
                 }
+                ScalingBlock::SocStructured { diag_reg, .. } => {
+                    if settings.enable_soc_adaptive_reg {
+                        *diag_reg += extra_reg * settings.soc_adaptive_reg_scale;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -304,7 +416,8 @@ pub fn predictor_corrector_step(
     // ======================================================================
     // Step 2: Factor KKT system
     // ======================================================================
-    let factor = kkt.factor(prob.P.as_ref(), &prob.A, &scaling)
+    let factor = kkt
+        .factor(prob.P.as_ref(), &prob.A, &scaling)
         .map_err(|e| format!("KKT factorization failed: {}", e))?;
 
     // ======================================================================
@@ -326,7 +439,10 @@ pub fn predictor_corrector_step(
     //   rhs_x = -r_x (Newton step to reduce dual residual)
     //   rhs_z = s - r_z (combining -r_z from primal + s from complementarity)
     let rhs_x_aff: Vec<f64> = residuals.r_x.iter().map(|&r| -r).collect();
-    let rhs_z_aff: Vec<f64> = state.s.iter().zip(residuals.r_z.iter())
+    let rhs_z_aff: Vec<f64> = state
+        .s
+        .iter()
+        .zip(residuals.r_z.iter())
         .map(|(si, ri)| si - ri)
         .collect();
 
@@ -361,7 +477,8 @@ pub fn predictor_corrector_step(
     }
 
     // Compute mul_p_xi_q = 2*P*ξ + q
-    let mul_p_xi_q: Vec<f64> = mul_p_xi.iter()
+    let mul_p_xi_q: Vec<f64> = mul_p_xi
+        .iter()
         .zip(prob.q.iter())
         .map(|(pxi, qi)| 2.0 * pxi + qi)
         .collect();
@@ -395,11 +512,20 @@ pub fn predictor_corrector_step(
     // d_kappa for affine step (design doc §7.1): d_kappa = κ * τ
     let d_kappa = state.kappa * state.tau;
 
-    let dot_mul_p_xi_q_dx1: f64 = mul_p_xi_q.iter().zip(dx_aff.iter()).map(|(a, b)| a * b).sum();
+    let dot_mul_p_xi_q_dx1: f64 = mul_p_xi_q
+        .iter()
+        .zip(dx_aff.iter())
+        .map(|(a, b)| a * b)
+        .sum();
     let dot_b_dz1: f64 = prob.b.iter().zip(dz_aff.iter()).map(|(a, b)| a * b).sum();
     let numerator = d_tau - d_kappa / state.tau + dot_mul_p_xi_q_dx1 + dot_b_dz1;
 
-    let dot_xi_mul_p_xi: f64 = state.xi.iter().zip(mul_p_xi.iter()).map(|(a, b)| a * b).sum();
+    let dot_xi_mul_p_xi: f64 = state
+        .xi
+        .iter()
+        .zip(mul_p_xi.iter())
+        .map(|(a, b)| a * b)
+        .sum();
     let dot_mul_p_xi_q_dx2: f64 = mul_p_xi_q.iter().zip(dx2.iter()).map(|(a, b)| a * b).sum();
     let dot_b_dz2: f64 = prob.b.iter().zip(dz2.iter()).map(|(a, b)| a * b).sum();
     let denominator = state.kappa / state.tau + dot_xi_mul_p_xi - dot_mul_p_xi_q_dx2 - dot_b_dz2;
@@ -442,14 +568,15 @@ pub fn predictor_corrector_step(
                         ds_aff[offset + i] = -state.s[offset + i] - d[i] * dz_aff[offset + i];
                     }
                 }
-                ScalingBlock::SocStructured { w } => {
+                ScalingBlock::SocStructured { w, diag_reg } => {
                     // For SOC, H = P(w) (quadratic representation)
-                    // ds = -s - P(w)*dz
+                    // ds = -s - (P(w) + diag_reg*I)*dz
                     let dz_slice = &dz_aff[offset..offset + dim];
                     let mut h_dz = vec![0.0; dim];
                     crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
                     for i in 0..dim {
-                        ds_aff[offset + i] = -state.s[offset + i] - h_dz[i];
+                        ds_aff[offset + i] =
+                            -state.s[offset + i] - h_dz[i] - diag_reg * dz_slice[i];
                     }
                 }
                 _ => {
@@ -487,7 +614,6 @@ pub fn predictor_corrector_step(
     );
     let sigma = compute_centering_parameter(alpha_aff, mu, mu_aff, barrier_degree);
 
-
     // ======================================================================
     // Step 5: Combined corrector step (+ step size, with stall recovery)
     // ======================================================================
@@ -520,6 +646,7 @@ pub fn predictor_corrector_step(
     let mut feas_weight_floor = 0.05;
     let mut refine_iters = settings.kkt_refine_iters;
     let mut final_feas_weight = 0.0;
+    let mut line_search_backtracks = 0u64;
 
     let max_retries = 2usize;
     for attempt in 0..=max_retries {
@@ -553,7 +680,7 @@ pub fn predictor_corrector_step(
                 let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
 
                 if is_soc {
-                    if let ScalingBlock::SocStructured { w } = &scaling[cone_idx] {
+                    if let ScalingBlock::SocStructured { w, .. } = &scaling[cone_idx] {
                         let z_slice = &state.z[offset..offset + dim];
                         let ds_aff_slice = &ds_aff[offset..offset + dim];
                         let dz_aff_slice = &dz_aff[offset..offset + dim];
@@ -624,7 +751,9 @@ pub fn predictor_corrector_step(
             }
 
             // rhs_z = d_s - d_z (weighted feasibility residual)
-            let rhs_z_comb: Vec<f64> = d_s_comb.iter().zip(residuals.r_z.iter())
+            let rhs_z_comb: Vec<f64> = d_s_comb
+                .iter()
+                .zip(residuals.r_z.iter())
                 .map(|(ds_i, rz_i)| ds_i - feas_weight * rz_i)
                 .collect();
 
@@ -647,7 +776,8 @@ pub fn predictor_corrector_step(
 
             let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
             let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
-            let numerator_corr = d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
+            let numerator_corr =
+                d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
 
             dtau = compute_dtau(numerator_corr, denominator, state.tau, denom_scale)
                 .map_err(|e| format!("corrector dtau failed: {}", e))?;
@@ -677,14 +807,15 @@ pub fn predictor_corrector_step(
                                 ds[offset + i] = -d_s_comb[offset + i] - d[i] * dz[offset + i];
                             }
                         }
-                        ScalingBlock::SocStructured { w } => {
+                        ScalingBlock::SocStructured { w, diag_reg } => {
                             // For SOC, H = P(w) (quadratic representation)
-                            // ds = -d_s - P(w)*dz
+                            // ds = -d_s - (P(w) + diag_reg*I)*dz
                             let dz_slice = &dz[offset..offset + dim];
                             let mut h_dz = vec![0.0; dim];
                             crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
                             for i in 0..dim {
-                                ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
+                                ds[offset + i] =
+                                    -d_s_comb[offset + i] - h_dz[i] - diag_reg * dz_slice[i];
                             }
                         }
                         _ => {
@@ -745,7 +876,7 @@ pub fn predictor_corrector_step(
             && settings.centrality_beta > 0.0
         {
             for _ in 0..settings.line_search_max_iters {
-                if centrality_ok_nonneg_trial(
+                if centrality_ok_trial(
                     state,
                     &ds,
                     &dz,
@@ -754,12 +885,19 @@ pub fn predictor_corrector_step(
                     cones,
                     settings.centrality_beta,
                     settings.centrality_gamma,
+                    settings.soc_centrality_beta,
+                    settings.soc_centrality_gamma,
                     barrier_degree,
                     alpha,
+                    settings.enable_soc_centrality,
+                    settings.soc_centrality_use_upper,
+                    settings.soc_centrality_use_jordan,
+                    settings.soc_centrality_mu_threshold,
                 ) {
                     break;
                 }
                 alpha *= 0.5;
+                line_search_backtracks += 1;
             }
         }
 
@@ -790,7 +928,10 @@ pub fn predictor_corrector_step(
                     .bump_static_reg(bump_reg)
                     .map_err(|e| format!("KKT reg bump failed: {}", e))?;
                 if changed && settings.verbose {
-                    eprintln!("bumped KKT static_reg to {:.2e} after alpha stall", bump_reg);
+                    eprintln!(
+                        "bumped KKT static_reg to {:.2e} after alpha stall",
+                        bump_reg
+                    );
                 }
             }
             sigma_eff = (sigma_eff + 0.2).min(0.999);
@@ -834,7 +975,7 @@ pub fn predictor_corrector_step(
             if cone.barrier_degree() == 0 {
                 // Zero cone: keep s = 0, but update z (dual is free)
                 for i in offset..offset + dim {
-                    state.s[i] = 0.0;  // Keep at 0
+                    state.s[i] = 0.0; // Keep at 0
                     state.z[i] += alpha * dz[i];
                 }
             } else {
@@ -856,9 +997,10 @@ pub fn predictor_corrector_step(
     // IMPORTANT: Use tau_old (pre-update) as per the Newton step formula
     state.kappa += alpha * dkappa;
 
-    // Safety clamp (should rarely trigger now with proper step size)
-    if state.kappa < 1e-12 {
-        state.kappa = 1e-12;
+    // Safety clamp - use very small floor to allow κ → 0 for infeasibility detection
+    // while preventing exact zero which could cause division issues.
+    if state.kappa < 1e-30 {
+        state.kappa = 1e-30;
     }
 
     // Update ξ = x/τ for next iteration's Schur complement
@@ -869,10 +1011,54 @@ pub fn predictor_corrector_step(
     // Compute new μ
     let mu_new = compute_mu(state, barrier_degree);
 
+    // DEBUG: Verify z stayed in cone
+    if settings.verbose {
+        let mut offset = 0;
+        for cone in cones {
+            let dim = cone.dim();
+            if dim == 0 {
+                continue;
+            }
+            let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+            if is_soc && dim >= 2 {
+                let z_block = &state.z[offset..offset + dim];
+                let dz_block = &dz[offset..offset + dim];
+                let t = z_block[0];
+                let x_norm = z_block[1..].iter().map(|xi| xi * xi).sum::<f64>().sqrt();
+                let eig_min = t - x_norm;
+                if eig_min < 0.0 {
+                    // Compute what z was before the step
+                    let z_pre: Vec<f64> = z_block
+                        .iter()
+                        .zip(dz_block.iter())
+                        .map(|(&zi, &dzi)| zi - alpha * dzi)
+                        .collect();
+                    let t_pre = z_pre[0];
+                    let x_norm_pre = z_pre[1..].iter().map(|xi| xi * xi).sum::<f64>().sqrt();
+                    let eig_min_pre = t_pre - x_norm_pre;
+
+                    // Compute step_to_boundary for this cone
+                    let alpha_boundary = cone.step_to_boundary_dual(&z_pre, dz_block);
+
+                    eprintln!("BUG: After step, z outside SOC!");
+                    eprintln!("  z_pre={:?}, eig_min_pre={:.6e}", z_pre, eig_min_pre);
+                    eprintln!("  dz={:?}", dz_block);
+                    eprintln!(
+                        "  alpha_used={:.6e}, alpha_boundary={:.6e}",
+                        alpha, alpha_boundary
+                    );
+                    eprintln!("  z_post={:?}, eig_min_post={:.6e}", z_block, eig_min);
+                }
+            }
+            offset += dim;
+        }
+    }
+
     Ok(StepResult {
         alpha,
         sigma: sigma_used,
         mu_new,
+        line_search_backtracks,
     })
 }
 
@@ -963,12 +1149,7 @@ fn compute_mu_aff(
 }
 
 /// Compute centering parameter σ using μ_aff when reliable.
-fn compute_centering_parameter(
-    alpha_aff: f64,
-    mu: f64,
-    mu_aff: f64,
-    barrier_degree: usize,
-) -> f64 {
+fn compute_centering_parameter(alpha_aff: f64, mu: f64, mu_aff: f64, barrier_degree: usize) -> f64 {
     // Special case: no barrier (only Zero cones)
     if barrier_degree == 0 {
         return 0.0;
@@ -1012,7 +1193,11 @@ mod tests {
             1.0,  // mu_aff ~ mu
             3,
         );
-        assert!(sigma > 0.9, "σ should be large for small affine step, got {}", sigma);
+        assert!(
+            sigma > 0.9,
+            "σ should be large for small affine step, got {}",
+            sigma
+        );
     }
 
     #[test]
@@ -1030,5 +1215,32 @@ mod tests {
         // Should be at most 2.0 (when s[0] + 2*(-0.5) = 0)
         assert!(alpha <= 2.0, "Step size should be limited by cone boundary");
         assert!(alpha > 0.0, "Step size should be positive");
+    }
+
+    #[test]
+    fn test_centrality_ok_soc_trial() {
+        let cones: Vec<Box<dyn ConeKernel>> = vec![Box::new(SocCone::new(3))];
+
+        let state = HsdeState {
+            x: vec![],
+            s: vec![1.0, 0.0, 0.0],
+            z: vec![1.0, 0.0, 0.0],
+            tau: 1.0,
+            kappa: 1.0,
+            xi: vec![],
+        };
+
+        let ds = vec![0.0; 3];
+        let dz = vec![0.0; 3];
+
+        let ok = centrality_ok_trial(
+            &state, &ds, &dz, 0.0, 0.0, &cones, 0.1, 10.0, 0.1, 10.0, 2, 1.0, true, true, true, 0.0,
+        );
+        assert!(ok, "SOC centrality should pass for loose bounds");
+
+        let not_ok = centrality_ok_trial(
+            &state, &ds, &dz, 0.0, 0.0, &cones, 0.9, 1.1, 0.9, 1.1, 2, 1.0, true, true, true, 0.0,
+        );
+        assert!(!not_ok, "SOC centrality should fail for tight bounds");
     }
 }

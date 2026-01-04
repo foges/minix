@@ -56,7 +56,7 @@ impl ConeKernel for NonNegCone {
     }
 
     fn barrier_degree(&self) -> usize {
-        self.dim  // ν = n for ℝ₊^n
+        self.dim // ν = n for ℝ₊^n
     }
 
     fn is_interior_primal(&self, s: &[f64]) -> bool {
@@ -282,10 +282,7 @@ mod tests {
         let s = vec![1.0, 2.0, 3.0];
 
         // Interior test should be the same for primal and dual
-        assert_eq!(
-            cone.is_interior_primal(&s),
-            cone.is_interior_dual(&s)
-        );
+        assert_eq!(cone.is_interior_primal(&s), cone.is_interior_dual(&s));
 
         // Step-to-boundary should be the same
         let ds = vec![-0.5, -1.0, -0.5];
