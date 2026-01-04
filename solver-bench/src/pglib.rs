@@ -382,16 +382,29 @@ fn parse_data_row(line: &str) -> Vec<f64> {
 
 /// Build SOCP relaxation of AC-OPF from MATPOWER case.
 ///
+/// This implements the Branch Flow Model (BFM) / DistFlow SOCP relaxation.
+///
 /// Variables (per unit):
 /// - v_i = squared voltage magnitude at bus i (n_bus)
 /// - p_g,i = active generation at gen i (n_gen)
 /// - q_g,i = reactive generation at gen i (n_gen)
-/// - p_ij = active power flow from i to j on branch (n_branch)
-/// - q_ij = reactive power flow from i to j on branch (n_branch)
+/// - pf_ij = active power flow from i on branch (n_branch)
+/// - qf_ij = reactive power flow from i on branch (n_branch)
+/// - pt_ij = active power flow to j on branch (n_branch)
+/// - qt_ij = reactive power flow to j on branch (n_branch)
 /// - l_ij = squared current magnitude on branch (n_branch)
 ///
-/// SOCP constraint for each branch:
-///   ||(2*p_ij, 2*q_ij, l_ij - v_i)||_2 <= l_ij + v_i
+/// Branch loss equations:
+///   pt_ij = -pf_ij + r_ij * l_ij  (active power loss)
+///   qt_ij = -qf_ij + x_ij * l_ij  (reactive power loss)
+///
+/// SOCP constraints for each branch:
+///   ||(2*pf, 2*qf, l - v_from)||_2 <= l + v_from  (from side)
+///   ||(2*pt, 2*qt, l - v_to)||_2 <= l + v_to      (to side)
+///
+/// Thermal limits (if rate_a > 0):
+///   ||(pf, qf)||_2 <= rate_a  (from side)
+///   ||(pt, qt)||_2 <= rate_a  (to side)
 pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
     let n_bus = case.buses.len();
     let n_gen = case.generators.iter().filter(|g| g.status).count();
@@ -401,10 +414,10 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
     let v_off = 0; // v_i: n_bus
     let pg_off = n_bus; // p_g: n_gen
     let qg_off = pg_off + n_gen; // q_g: n_gen
-    let pf_off = qg_off + n_gen; // p_ij (from): n_branch
-    let qf_off = pf_off + n_branch; // q_ij (from): n_branch
-    let pt_off = qf_off + n_branch; // p_ij (to): n_branch
-    let qt_off = pt_off + n_branch; // q_ij (to): n_branch
+    let pf_off = qg_off + n_gen; // pf_ij (from): n_branch
+    let qf_off = pf_off + n_branch; // qf_ij (from): n_branch
+    let pt_off = qf_off + n_branch; // pt_ij (to): n_branch
+    let qt_off = pt_off + n_branch; // qt_ij (to): n_branch
     let l_off = qt_off + n_branch; // l_ij: n_branch
 
     let n_vars = l_off + n_branch;
@@ -427,23 +440,35 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
         .enumerate()
         .collect();
 
-    // Constraints:
-    // 1. Power balance at each bus (2 * n_bus equality constraints)
-    // 2. Voltage magnitude bounds (2 * n_bus inequality constraints)
-    // 3. Generator output bounds (4 * n_gen inequality constraints)
-    // 4. Branch power flow limits (n_branch inequality constraints, if rate_a > 0)
-    // 5. SOCP relaxation (4 * n_branch for each SOC)
-
-    let n_eq = 2 * n_bus; // P and Q balance
-    let n_vbnd = 2 * n_bus; // vmin, vmax
-    let n_gbnd = 4 * n_gen; // pmin, pmax, qmin, qmax
-    let n_thermal = active_branches
+    // Count thermal limit constraints (branches with rate_a > 0)
+    let n_thermal_branches = active_branches
         .iter()
         .filter(|(_, b)| b.rate_a > 0.0)
         .count();
-    let n_soc = 4 * n_branch;
 
-    let total_m = n_eq + n_vbnd + n_gbnd + n_thermal + n_soc;
+    // Constraints:
+    // 1. Power balance at each bus (2 * n_bus equality constraints)
+    // 2. Branch loss equations (2 * n_branch equality constraints)
+    // 3. Voltage magnitude bounds (2 * n_bus inequality constraints)
+    // 4. Generator output bounds (4 * n_gen inequality constraints)
+    // 5. Current magnitude lower bounds (n_branch, l >= 0)
+    // 6. SOCP relaxation from side (4 * n_branch for each SOC)
+    // 7. SOCP relaxation to side (4 * n_branch for each SOC)
+    // 8. Thermal limits (3 * n_thermal_branches per side, 2 sides)
+
+    let n_power_balance = 2 * n_bus;
+    let n_loss_eq = 2 * n_branch;
+    let n_eq = n_power_balance + n_loss_eq;
+
+    let n_vbnd = 2 * n_bus; // vmin, vmax
+    let n_gbnd = 4 * n_gen; // pmin, pmax, qmin, qmax
+    let n_lbnd = n_branch; // l >= 0
+    let n_nonneg = n_vbnd + n_gbnd + n_lbnd;
+
+    let n_soc_flow = 4 * n_branch * 2; // from + to sides
+    let n_soc_thermal = 3 * n_thermal_branches * 2; // from + to sides
+
+    let total_m = n_eq + n_nonneg + n_soc_flow + n_soc_thermal;
 
     let mut triplets = Vec::new();
     let mut b_vec = vec![0.0; total_m];
@@ -463,10 +488,9 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
         if i < case.gencost.len() {
             let gc = &case.gencost[i];
             if gc.model == 2 && !gc.cost.is_empty() {
-                // Polynomial cost: last coefficient is linear term
-                // Cost is c[0]*p^n + c[1]*p^(n-1) + ... + c[n]
+                // Polynomial cost: c[0]*p^(n-1) + c[1]*p^(n-2) + ... + c[n-1]
                 // For quadratic (n=3): c[0]*p^2 + c[1]*p + c[2]
-                // Linear term is second-to-last for n=2, last for n=1
+                // Linear term is c[n-2] for n >= 2
                 let linear_coef = if gc.cost.len() >= 2 {
                     gc.cost[gc.cost.len() - 2] // Linear coefficient
                 } else if gc.cost.len() == 1 {
@@ -482,8 +506,8 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
 
     // =========================================================================
     // Power balance constraints (equality)
-    // P: sum(pg at bus i) - pd_i - sum(pf leaving i) + sum(pt entering i) = 0
-    // Q: sum(qg at bus i) - qd_i - sum(qf leaving i) + sum(qt entering i) = 0
+    // P: sum(pg at bus i) - pd_i - sum(pf leaving i) + sum(pt entering i) - Gs*v = 0
+    // Q: sum(qg at bus i) - qd_i - sum(qf leaving i) + sum(qt entering i) + Bs*v = 0
     // =========================================================================
     for (bus_i, bus) in case.buses.iter().enumerate() {
         let p_row = bus_i;
@@ -512,12 +536,12 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
             let to_i = *case.bus_idx.get(&branch.to_bus).unwrap();
 
             if from_i == bus_i {
-                // Power leaving this bus
+                // Power leaving this bus (from side)
                 triplets.push((p_row, pf_off + br_idx, -1.0));
                 triplets.push((q_row, qf_off + br_idx, -1.0));
             }
             if to_i == bus_i {
-                // Power entering this bus
+                // Power entering this bus (to side, note: pt is defined as power into "to" bus)
                 triplets.push((p_row, pt_off + br_idx, 1.0));
                 triplets.push((q_row, qt_off + br_idx, 1.0));
             }
@@ -526,6 +550,44 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
         // RHS: load demand (converted to per-unit)
         b_vec[p_row] = bus.pd / case.base_mva;
         b_vec[q_row] = bus.qd / case.base_mva;
+    }
+
+    // =========================================================================
+    // Branch loss equations (equality)
+    // pt = -pf + r * l  =>  pf + pt - r*l = 0
+    // qt = -qf + x * l  =>  qf + qt - x*l = 0
+    //
+    // Note: In the BFM model, power flows are defined so that:
+    // - pf is power leaving the "from" bus
+    // - pt is power entering the "to" bus (after losses)
+    // - The relationship pt = -pf + losses accounts for the direction convention
+    // =========================================================================
+    let loss_off = n_power_balance;
+    for (br_idx, branch) in &active_branches {
+        // Compute series impedance (handle transformers)
+        let tap = branch.tap;
+        let tap2 = tap * tap;
+
+        // For transformers, the series impedance is on the "to" side
+        // Effective impedance seen from "from" side: r/tap^2, x/tap^2
+        let r_pu = branch.r / tap2;
+        let x_pu = branch.x / tap2;
+
+        // Active power loss: pf + pt - r*l = 0
+        let p_loss_row = loss_off + 2 * br_idx;
+        triplets.push((p_loss_row, pf_off + br_idx, 1.0));
+        triplets.push((p_loss_row, pt_off + br_idx, 1.0));
+        triplets.push((p_loss_row, l_off + br_idx, -r_pu));
+        b_vec[p_loss_row] = 0.0;
+
+        // Reactive power loss: qf + qt - x*l = 0
+        // Note: This ignores line charging for simplicity.
+        // Full model would add (b/2)*(v_from + v_to) terms
+        let q_loss_row = loss_off + 2 * br_idx + 1;
+        triplets.push((q_loss_row, qf_off + br_idx, 1.0));
+        triplets.push((q_loss_row, qt_off + br_idx, 1.0));
+        triplets.push((q_loss_row, l_off + br_idx, -x_pu));
+        b_vec[q_loss_row] = 0.0;
     }
 
     // =========================================================================
@@ -582,27 +644,17 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
     }
 
     // =========================================================================
-    // Thermal limits: pf^2 + qf^2 <= rate_a^2
-    // This is an SOC constraint, but for simplicity we use a relaxed linear bound
-    // |pf| + |qf| <= rate_a (conservative approximation)
-    // Or we could add as separate SOC cones
-    // For now, skip this and rely on the main SOCP constraint
+    // Current magnitude lower bound: l >= 0
+    // -l + s = 0, s >= 0
     // =========================================================================
-    let thermal_off = gbnd_off + n_gbnd;
-    let mut thermal_idx = 0;
-    for (br_idx, branch) in &active_branches {
-        if branch.rate_a > 0.0 {
-            let rate = branch.rate_a / case.base_mva;
-            // |pf| <= rate (simplified - proper version needs SOC)
-            // pf + s = rate, s >= 0 => pf <= rate
-            triplets.push((thermal_off + thermal_idx, pf_off + br_idx, 1.0));
-            b_vec[thermal_off + thermal_idx] = rate;
-            thermal_idx += 1;
-        }
+    let lbnd_off = gbnd_off + n_gbnd;
+    for br_idx in 0..n_branch {
+        triplets.push((lbnd_off + br_idx, l_off + br_idx, -1.0));
+        b_vec[lbnd_off + br_idx] = 0.0;
     }
 
     // =========================================================================
-    // SOCP relaxation for each branch
+    // SOCP relaxation for each branch (from side)
     // ||(2*pf, 2*qf, l - v_from)||_2 <= l + v_from
     // Reformulated: (l + v, 2*pf, 2*qf, l - v) in SOC
     // s_0 = l + v => -l - v + s_0 = 0
@@ -610,10 +662,10 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
     // s_2 = 2*qf => -2*qf + s_2 = 0
     // s_3 = l - v => -l + v + s_3 = 0
     // =========================================================================
-    let soc_off = thermal_off + n_thermal;
+    let soc_from_off = n_eq + n_nonneg;
     for (br_idx, branch) in &active_branches {
         let from_i = *case.bus_idx.get(&branch.from_bus).unwrap();
-        let row_base = soc_off + 4 * br_idx;
+        let row_base = soc_from_off + 4 * br_idx;
 
         // s_0 = l + v_from
         triplets.push((row_base, l_off + br_idx, -1.0));
@@ -630,18 +682,119 @@ pub fn build_socp_relaxation(case: &MatpowerCase) -> Result<ProblemData> {
         triplets.push((row_base + 3, v_off + from_i, 1.0));
     }
 
+    // =========================================================================
+    // SOCP relaxation for each branch (to side)
+    // ||(2*pt, 2*qt, l - v_to)||_2 <= l + v_to
+    // Reformulated: (l + v, 2*pt, 2*qt, l - v) in SOC
+    // =========================================================================
+    let soc_to_off = soc_from_off + 4 * n_branch;
+    for (br_idx, branch) in &active_branches {
+        let to_i = *case.bus_idx.get(&branch.to_bus).unwrap();
+        let row_base = soc_to_off + 4 * br_idx;
+
+        // s_0 = l + v_to
+        triplets.push((row_base, l_off + br_idx, -1.0));
+        triplets.push((row_base, v_off + to_i, -1.0));
+
+        // s_1 = 2*pt
+        triplets.push((row_base + 1, pt_off + br_idx, -2.0));
+
+        // s_2 = 2*qt
+        triplets.push((row_base + 2, qt_off + br_idx, -2.0));
+
+        // s_3 = l - v_to
+        triplets.push((row_base + 3, l_off + br_idx, -1.0));
+        triplets.push((row_base + 3, v_off + to_i, 1.0));
+    }
+
+    // =========================================================================
+    // Thermal limits (SOC form): ||(pf, qf)||_2 <= rate_a
+    // Reformulated: (rate_a, pf, qf) in SOC(3)
+    // s_0 = rate_a => s_0 = rate_a (constant)
+    // s_1 = pf => -pf + s_1 = 0
+    // s_2 = qf => -qf + s_2 = 0
+    //
+    // Both from and to sides need thermal limits
+    // =========================================================================
+    let thermal_from_off = soc_to_off + 4 * n_branch;
+    let mut thermal_idx = 0;
+    let thermal_branch_indices: Vec<usize> = active_branches
+        .iter()
+        .filter(|(_, b)| b.rate_a > 0.0)
+        .map(|(idx, _)| *idx)
+        .collect();
+
+    for &br_idx in &thermal_branch_indices {
+        let branch = active_branches
+            .iter()
+            .find(|(i, _)| *i == br_idx)
+            .unwrap()
+            .1;
+        let rate = branch.rate_a / case.base_mva;
+        let row_base = thermal_from_off + 3 * thermal_idx;
+
+        // s_0 = rate_a (constant RHS)
+        b_vec[row_base] = -rate;
+
+        // s_1 = pf
+        triplets.push((row_base + 1, pf_off + br_idx, -1.0));
+
+        // s_2 = qf
+        triplets.push((row_base + 2, qf_off + br_idx, -1.0));
+
+        thermal_idx += 1;
+    }
+
+    // Thermal limits for "to" side
+    let thermal_to_off = thermal_from_off + 3 * n_thermal_branches;
+    let mut thermal_idx = 0;
+    for &br_idx in &thermal_branch_indices {
+        let branch = active_branches
+            .iter()
+            .find(|(i, _)| *i == br_idx)
+            .unwrap()
+            .1;
+        let rate = branch.rate_a / case.base_mva;
+        let row_base = thermal_to_off + 3 * thermal_idx;
+
+        // s_0 = rate_a (constant RHS)
+        b_vec[row_base] = -rate;
+
+        // s_1 = pt
+        triplets.push((row_base + 1, pt_off + br_idx, -1.0));
+
+        // s_2 = qt
+        triplets.push((row_base + 2, qt_off + br_idx, -1.0));
+
+        thermal_idx += 1;
+    }
+
     let a = sparse::from_triplets(total_m, n_vars, triplets);
 
     // Build cone specification
     let mut cones = vec![
         ConeSpec::Zero { dim: n_eq },
-        ConeSpec::NonNeg {
-            dim: n_vbnd + n_gbnd + n_thermal,
-        },
+        ConeSpec::NonNeg { dim: n_nonneg },
     ];
 
+    // Flow SOCP cones (from side)
     for _ in 0..n_branch {
         cones.push(ConeSpec::Soc { dim: 4 });
+    }
+
+    // Flow SOCP cones (to side)
+    for _ in 0..n_branch {
+        cones.push(ConeSpec::Soc { dim: 4 });
+    }
+
+    // Thermal limit cones (from side)
+    for _ in 0..n_thermal_branches {
+        cones.push(ConeSpec::Soc { dim: 3 });
+    }
+
+    // Thermal limit cones (to side)
+    for _ in 0..n_thermal_branches {
+        cones.push(ConeSpec::Soc { dim: 3 });
     }
 
     Ok(ProblemData {

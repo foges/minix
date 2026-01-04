@@ -18,7 +18,7 @@ use thiserror::Error;
 
 /// NT scaling errors
 #[derive(Error, Debug)]
-#[allow(missing_docs)] // Error variant fields are self-documenting
+#[allow(missing_docs)]  // Error variant fields are self-documenting
 pub enum NtScalingError {
     /// Point not in interior
     #[error("Point not in cone interior")]
@@ -56,7 +56,9 @@ pub fn nt_scaling_nonneg(
 
     // NT scaling for nonnegative orthant: H = diag(s/z)
     // This satisfies: H*z = s and H^{-1}*s = z.
-    let d: Vec<f64> = s.iter().zip(z.iter()).map(|(si, zi)| si / zi).collect();
+    let d: Vec<f64> = s.iter().zip(z.iter())
+        .map(|(si, zi)| si / zi)
+        .collect();
 
     Ok(ScalingBlock::Diagonal { d })
 }
@@ -325,9 +327,7 @@ pub fn compute_nt_scaling(
 
     // Fallback: simple diagonal scaling
     // H = diag(s / z) so that H*z = s
-    let d: Vec<f64> = s
-        .iter()
-        .zip(z.iter())
+    let d: Vec<f64> = s.iter().zip(z.iter())
         .map(|(si, zi)| si / zi.max(1e-14))
         .collect();
 

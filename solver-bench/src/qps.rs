@@ -242,6 +242,7 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
     let mut var_upper: HashMap<String, f64> = HashMap::new();
 
     let mut section = String::new();
+    let mut obj_sense = 1.0; // 1.0 = minimize (default), -1.0 = maximize
 
     for line_result in reader.lines() {
         let line = line_result?;
@@ -290,8 +291,10 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
         match section.as_str() {
             "OBJSENSE" => {
                 // Handle OBJSENSE MAX or MIN
-                if line.contains("MAX") {
-                    // Will negate objective later
+                if line.contains("MAX") || line.contains("MAXIMIZE") {
+                    obj_sense = -1.0; // Negate to convert max to min
+                } else if line.contains("MIN") || line.contains("MINIMIZE") {
+                    obj_sense = 1.0;
                 }
             }
             "ROWS" => {
@@ -491,7 +494,7 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
         name,
         n,
         m,
-        obj_sense: 1.0, // Minimize by default
+        obj_sense, // Use parsed value (1.0=min, -1.0=max)
         q,
         p_triplets,
         a_triplets,

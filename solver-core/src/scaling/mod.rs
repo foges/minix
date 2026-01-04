@@ -3,12 +3,12 @@
 //! This module implements scaling updates for symmetric cones (Nesterov-Todd)
 //! and nonsymmetric cones (BFGS primal-dual scaling).
 
-pub mod bfgs;
 pub mod nt;
+pub mod bfgs;
 
 /// Scaling block representation for the H matrix in the KKT system.
 #[derive(Debug, Clone)]
-#[allow(missing_docs)] // Enum variant fields are self-documenting
+#[allow(missing_docs)]  // Enum variant fields are self-documenting
 pub enum ScalingBlock {
     /// Zero cone (no scaling needed)
     Zero { dim: usize },
@@ -75,7 +75,8 @@ impl ScalingBlock {
             ScalingBlock::Dense3x3 { h } => {
                 // Solve 3×3 system (use direct formula or small LU)
                 // For now, use Cramer's rule (to be optimized)
-                let det = h[0] * (h[4] * h[8] - h[5] * h[7]) - h[1] * (h[3] * h[8] - h[5] * h[6])
+                let det = h[0] * (h[4] * h[8] - h[5] * h[7])
+                    - h[1] * (h[3] * h[8] - h[5] * h[6])
                     + h[2] * (h[3] * h[7] - h[4] * h[6]);
 
                 let inv_det = 1.0 / det;

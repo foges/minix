@@ -98,12 +98,7 @@ fn jordan_product(s: &[f64], other: &[f64], out: &mut [f64]) {
     let u = other[0];
 
     // out[0] = t*u + x^T v
-    out[0] = t * u
-        + s[1..]
-            .iter()
-            .zip(&other[1..])
-            .map(|(&si, &oi)| si * oi)
-            .sum::<f64>();
+    out[0] = t * u + s[1..].iter().zip(&other[1..]).map(|(&si, &oi)| si * oi).sum::<f64>();
 
     // out[1..] = t*v + u*x
     for i in 1..s.len() {
@@ -131,10 +126,7 @@ fn jordan_sqrt(s: &[f64], out: &mut [f64]) {
     let lambda1 = t + x_norm;
     let lambda2 = t - x_norm;
 
-    assert!(
-        lambda2 > 0.0,
-        "Cannot take square root of point not in interior"
-    );
+    assert!(lambda2 > 0.0, "Cannot take square root of point not in interior");
 
     let sqrt_lambda1 = lambda1.sqrt();
     let sqrt_lambda2 = lambda2.sqrt();
@@ -201,7 +193,7 @@ impl ConeKernel for SocCone {
     }
 
     fn barrier_degree(&self) -> usize {
-        2 // SOC always has barrier degree 2
+        2  // SOC always has barrier degree 2
     }
 
     fn is_interior_primal(&self, s: &[f64]) -> bool {
@@ -245,11 +237,7 @@ impl ConeKernel for SocCone {
 
         let x_norm_sq: f64 = s[1..].iter().map(|&xi| xi * xi).sum();
         let dx_norm_sq: f64 = ds[1..].iter().map(|&dxi| dxi * dxi).sum();
-        let x_dot_dx: f64 = s[1..]
-            .iter()
-            .zip(&ds[1..])
-            .map(|(&xi, &dxi)| xi * dxi)
-            .sum();
+        let x_dot_dx: f64 = s[1..].iter().zip(&ds[1..]).map(|(&xi, &dxi)| xi * dxi).sum();
 
         let a = dt * dt - dx_norm_sq;
         let b = 2.0 * (t * dt - x_dot_dx);
@@ -373,7 +361,7 @@ impl ConeKernel for SocCone {
         let v_t = v[0];
         let x_dot_v: f64 = s[1..].iter().zip(&v[1..]).map(|(&xi, &vi)| xi * vi).sum();
 
-        let a = t * v_t - x_dot_v; // = [[t], [-x]]^T * v
+        let a = t * v_t - x_dot_v;  // = [[t], [-x]]^T * v
 
         // out_t = (2/u) * (-v_t) + (4/u²) * a * t
         out[0] = (-2.0 / u) * v_t + (4.0 / (u * u)) * t * a;

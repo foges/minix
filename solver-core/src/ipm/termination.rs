@@ -43,7 +43,7 @@ impl Default for TerminationCriteria {
         Self {
             tol_feas: 1e-8,
             tol_gap: 1e-8,
-            tol_gap_rel: 1e-3, // 0.1% relative gap tolerance
+            tol_gap_rel: 1e-3,  // 0.1% relative gap tolerance
             tol_infeas: 1e-8,
             tau_min: 1e-8,
             max_iter: 200,
@@ -54,7 +54,9 @@ impl Default for TerminationCriteria {
 
 #[inline]
 fn inf_norm(v: &[f64]) -> f64 {
-    v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max)
+    v.iter()
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max)
 }
 
 #[inline]
@@ -399,10 +401,10 @@ mod tests {
         let state = HsdeState {
             x: vec![0.5, 0.5],
             s: vec![0.0],
-            z: vec![-1.0], // Fixed: was 1.0, should be -1.0 for strong duality
+            z: vec![-1.0],  // Fixed: was 1.0, should be -1.0 for strong duality
             tau: 1.0,
-            kappa: 1e-10,       // Near-complementarity (was 0.0)
-            xi: vec![0.5, 0.5], // ξ = x/τ
+            kappa: 1e-10,   // Near-complementarity (was 0.0)
+            xi: vec![0.5, 0.5],  // ξ = x/τ
         };
 
         let criteria = TerminationCriteria::default();
@@ -457,7 +459,7 @@ mod tests {
             z: vec![1.0], // z > 0
             tau: 1e-10,   // τ → 0
             kappa: 1.0,
-            xi: vec![0.0], // ξ = x/τ (but x=0 anyway)
+            xi: vec![0.0],  // ξ = x/τ (but x=0 anyway)
         };
 
         let criteria = TerminationCriteria::default();

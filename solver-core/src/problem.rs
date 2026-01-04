@@ -36,7 +36,7 @@ pub type SparseCsc = sprs::CsMatI<f64, usize>;
 /// - b: m
 /// - s, z: m (partitioned by cones)
 #[derive(Clone)]
-#[allow(non_snake_case)] // P and A are standard mathematical notation
+#[allow(non_snake_case)]  // P and A are standard mathematical notation
 pub struct ProblemData {
     /// Quadratic cost matrix P (n × n, PSD, upper triangle in CSC).
     /// If None, this is a linear program.
@@ -65,7 +65,7 @@ pub struct ProblemData {
 ///
 /// Each cone type corresponds to a block in the Cartesian product K = K₁ × K₂ × ... × Kₙ.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)] // Enum variant fields are self-documenting
+#[allow(missing_docs)]  // Enum variant fields are self-documenting
 pub enum ConeSpec {
     /// Zero cone: {0}^dim (equality constraints).
     /// No barrier, treated specially in KKT system.
@@ -211,7 +211,7 @@ impl Default for SolverSettings {
             ruiz_iters: 10,
             static_reg: 1e-9,
             dynamic_reg_min_pivot: 1e-7,
-            threads: 0, // Auto-detect
+            threads: 0,  // Auto-detect
             kkt_refine_iters: 1,
             mcc_iters: 0,
             centrality_beta: 0.1,
@@ -358,20 +358,23 @@ impl ProblemData {
             if p.rows() != n || p.cols() != n {
                 return Err(format!(
                     "P has shape {}×{}, expected {}×{}",
-                    p.rows(),
-                    p.cols(),
-                    n,
-                    n
+                    p.rows(), p.cols(), n, n
                 ));
             }
         }
 
         // Check A dimensions
         if self.A.rows() != m {
-            return Err(format!("A has {} rows, expected {}", self.A.rows(), m));
+            return Err(format!(
+                "A has {} rows, expected {}",
+                self.A.rows(), m
+            ));
         }
         if self.A.cols() != n {
-            return Err(format!("A has {} cols, expected {}", self.A.cols(), n));
+            return Err(format!(
+                "A has {} cols, expected {}",
+                self.A.cols(), n
+            ));
         }
 
         // Check b dimension
@@ -418,8 +421,7 @@ impl ProblemData {
             if int_types.len() != n {
                 return Err(format!(
                     "Integrality vector has length {}, expected {}",
-                    int_types.len(),
-                    n
+                    int_types.len(), n
                 ));
             }
         }
@@ -510,9 +512,7 @@ impl ProblemData {
         // Add NonNeg cone for bounds
         let mut cones_new = self.cones.clone();
         if num_lb + num_ub > 0 {
-            cones_new.push(ConeSpec::NonNeg {
-                dim: num_lb + num_ub,
-            });
+            cones_new.push(ConeSpec::NonNeg { dim: num_lb + num_ub });
         }
 
         ProblemData {
@@ -534,7 +534,7 @@ impl ConeSpec {
             ConeSpec::Zero { dim } => *dim,
             ConeSpec::NonNeg { dim } => *dim,
             ConeSpec::Soc { dim } => *dim,
-            ConeSpec::Psd { n } => n * (n + 1) / 2, // svec dimension
+            ConeSpec::Psd { n } => n * (n + 1) / 2,  // svec dimension
             ConeSpec::Exp { count } => 3 * count,
             ConeSpec::Pow { cones } => 3 * cones.len(),
         }
@@ -545,7 +545,7 @@ impl ConeSpec {
         match self {
             ConeSpec::Zero { .. } => 0,
             ConeSpec::NonNeg { dim } => *dim,
-            ConeSpec::Soc { .. } => 2, // SOC always has degree 2
+            ConeSpec::Soc { .. } => 2,  // SOC always has degree 2
             ConeSpec::Psd { n } => *n,
             ConeSpec::Exp { count } => 3 * count,
             ConeSpec::Pow { cones } => 3 * cones.len(),
@@ -567,7 +567,10 @@ impl ConeSpec {
             }
             ConeSpec::Soc { dim } => {
                 if *dim < 2 {
-                    return Err(format!("SOC cone must have dimension >= 2, got {}", dim));
+                    return Err(format!(
+                        "SOC cone must have dimension >= 2, got {}",
+                        dim
+                    ));
                 }
             }
             ConeSpec::Psd { n } => {
@@ -607,13 +610,10 @@ mod tests {
         assert_eq!(ConeSpec::Zero { dim: 5 }.dim(), 5);
         assert_eq!(ConeSpec::NonNeg { dim: 10 }.dim(), 10);
         assert_eq!(ConeSpec::Soc { dim: 7 }.dim(), 7);
-        assert_eq!(ConeSpec::Psd { n: 3 }.dim(), 6); // 3*4/2
+        assert_eq!(ConeSpec::Psd { n: 3 }.dim(), 6);  // 3*4/2
         assert_eq!(ConeSpec::Exp { count: 2 }.dim(), 6);
         assert_eq!(
-            ConeSpec::Pow {
-                cones: vec![Pow3D { alpha: 0.5 }, Pow3D { alpha: 0.3 }]
-            }
-            .dim(),
+            ConeSpec::Pow { cones: vec![Pow3D { alpha: 0.5 }, Pow3D { alpha: 0.3 }] }.dim(),
             6
         );
     }
@@ -635,29 +635,13 @@ mod tests {
         assert!(ConeSpec::Soc { dim: 2 }.validate().is_ok());
         assert!(ConeSpec::Psd { n: 2 }.validate().is_ok());
         assert!(ConeSpec::Exp { count: 1 }.validate().is_ok());
-        assert!(ConeSpec::Pow {
-            cones: vec![Pow3D { alpha: 0.5 }]
-        }
-        .validate()
-        .is_ok());
+        assert!(ConeSpec::Pow { cones: vec![Pow3D { alpha: 0.5 }] }.validate().is_ok());
 
         // Invalid cones
         assert!(ConeSpec::Zero { dim: 0 }.validate().is_err());
         assert!(ConeSpec::Soc { dim: 1 }.validate().is_err());
-        assert!(ConeSpec::Pow {
-            cones: vec![Pow3D { alpha: 0.0 }]
-        }
-        .validate()
-        .is_err());
-        assert!(ConeSpec::Pow {
-            cones: vec![Pow3D { alpha: 1.0 }]
-        }
-        .validate()
-        .is_err());
-        assert!(ConeSpec::Pow {
-            cones: vec![Pow3D { alpha: 1.5 }]
-        }
-        .validate()
-        .is_err());
+        assert!(ConeSpec::Pow { cones: vec![Pow3D { alpha: 0.0 }] }.validate().is_err());
+        assert!(ConeSpec::Pow { cones: vec![Pow3D { alpha: 1.0 }] }.validate().is_err());
+        assert!(ConeSpec::Pow { cones: vec![Pow3D { alpha: 1.5 }] }.validate().is_err());
     }
 }

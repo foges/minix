@@ -100,10 +100,7 @@ impl QdldlSolver {
     /// * `static_reg` - Static diagonal regularization (added to all diagonal entries)
     /// * `dynamic_reg_min_pivot` - Minimum pivot threshold for dynamic regularization
     pub fn new(n: usize, static_reg: f64, dynamic_reg_min_pivot: f64) -> Self {
-        assert!(
-            static_reg >= 0.0,
-            "Static regularization must be non-negative"
-        );
+        assert!(static_reg >= 0.0, "Static regularization must be non-negative");
         assert!(
             dynamic_reg_min_pivot > 0.0,
             "Dynamic regularization threshold must be positive"
@@ -169,7 +166,14 @@ impl QdldlSolver {
         let mut etree = vec![None; self.n];
 
         // Compute elimination tree
-        let result = ldl::etree(self.n, a_p, a_i, &mut work, &mut l_nz, &mut etree);
+        let result = ldl::etree(
+            self.n,
+            a_p,
+            a_i,
+            &mut work,
+            &mut l_nz,
+            &mut etree,
+        );
 
         match result {
             Ok(_) => {
@@ -456,9 +460,6 @@ mod tests {
         // Verify solution by checking residual
         // Compute A*x - b and check it's small
         // (We won't check exact values due to quasi-definiteness)
-        assert!(
-            x.iter().all(|&xi| xi.is_finite()),
-            "Solution has non-finite values"
-        );
+        assert!(x.iter().all(|&xi| xi.is_finite()), "Solution has non-finite values");
     }
 }

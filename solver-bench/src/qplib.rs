@@ -134,6 +134,8 @@ pub fn parse_lp<P: AsRef<std::path::Path>>(path: P) -> Result<QpsProblem> {
     let mut a_triplets: Vec<(usize, usize, f64)> = Vec::new();
     let mut con_lower: Vec<f64> = Vec::new();
     let mut con_upper: Vec<f64> = Vec::new();
+    let mut var_lower_map: HashMap<String, f64> = HashMap::new();
+    let mut var_upper_map: HashMap<String, f64> = HashMap::new();
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     #[allow(dead_code)]
@@ -239,16 +241,55 @@ pub fn parse_lp<P: AsRef<std::path::Path>>(path: P) -> Result<QpsProblem> {
                 }
             }
             Section::Bounds => {
-                // Parse bound like "0 <= x1 <= 10" or "x2 free"
-                // Will be processed after we know all variables
+                // Parse bounds like "0 <= x1 <= 10", "x2 free", "x3 >= 0"
+                let trimmed_upper = trimmed.to_uppercase();
+
+                if trimmed_upper.contains("FREE") {
+                    // "x free" format
+                    let var_name = trimmed.split_whitespace().next().unwrap_or("").to_string();
+                    if !var_name.is_empty() {
+                        var_lower_map.insert(var_name.clone(), f64::NEG_INFINITY);
+                        var_upper_map.insert(var_name, f64::INFINITY);
+                    }
+                } else if let Some((lb, var, ub)) = parse_double_bound(trimmed) {
+                    // "lb <= x <= ub" format
+                    var_lower_map.insert(var.clone(), lb);
+                    var_upper_map.insert(var, ub);
+                } else if let Some((var, bound, is_lower)) = parse_single_bound(trimmed) {
+                    // "x >= lb" or "x <= ub" format
+                    if is_lower {
+                        var_lower_map.insert(var, bound);
+                    } else {
+                        var_upper_map.insert(var, bound);
+                    }
+                }
             }
             _ => {}
         }
     }
 
-    // Initialize variable bounds (defaults to [0, +inf))
-    let var_lower = vec![0.0; n];
-    let var_upper = vec![f64::INFINITY; n];
+    // Build variable bounds using parsed values (defaults to [0, +inf))
+    // First, build reverse map from index to name
+    let mut idx_to_name: Vec<String> = vec![String::new(); n];
+    for (name, &idx) in &var_map {
+        if idx < n {
+            idx_to_name[idx] = name.clone();
+        }
+    }
+
+    let var_lower: Vec<f64> = (0..n)
+        .map(|i| {
+            let name = &idx_to_name[i];
+            var_lower_map.get(name).copied().unwrap_or(0.0)
+        })
+        .collect();
+
+    let var_upper: Vec<f64> = (0..n)
+        .map(|i| {
+            let name = &idx_to_name[i];
+            var_upper_map.get(name).copied().unwrap_or(f64::INFINITY)
+        })
+        .collect();
 
     // Build linear cost vector
     let mut q = vec![0.0; n];
@@ -298,12 +339,15 @@ enum ConstraintBound {
     Eq(f64),
 }
 
-/// Parse objective terms (simplified - handles basic linear terms).
+/// Parse objective terms (handles linear and quadratic terms).
+///
+/// LP format quadratic terms appear as: `[ x1^2 + 2 x1*x2 + x2^2 ]/2`
+/// The `/2` accounts for the 1/2 factor in 0.5 x'Px.
 fn parse_objective_terms(
     line: &str,
     get_var: &mut impl FnMut(&str) -> usize,
     q_coeffs: &mut HashMap<usize, f64>,
-    _p_triplets: &mut Vec<(usize, usize, f64)>,
+    p_triplets: &mut Vec<(usize, usize, f64)>,
 ) -> Result<()> {
     // Skip objective name if present (e.g., "obj:")
     let expr = if let Some(colon_pos) = line.find(':') {
@@ -312,13 +356,114 @@ fn parse_objective_terms(
         line
     };
 
-    // Parse linear terms
+    // Check for quadratic terms in brackets: [ ... ]/2
+    if let Some(bracket_start) = expr.find('[') {
+        if let Some(bracket_end) = expr.find(']') {
+            let quad_part = &expr[bracket_start + 1..bracket_end];
+            // Check for /2 after bracket (standard CPLEX format)
+            let has_half = expr[bracket_end..].contains("/2");
+            let scale = if has_half { 1.0 } else { 2.0 }; // If /2 is present, coeffs are already doubled
+
+            // Parse quadratic terms
+            parse_quadratic_expr(quad_part, get_var, p_triplets, scale);
+
+            // Parse linear part (before bracket)
+            let linear_part = &expr[..bracket_start];
+            for (var_name, coef) in parse_linear_expr(linear_part) {
+                let var_idx = get_var(&var_name);
+                *q_coeffs.entry(var_idx).or_insert(0.0) += coef;
+            }
+
+            // Parse linear part after bracket (if any)
+            if let Some(end_pos) = expr[bracket_end..].find(char::is_alphabetic) {
+                let after_bracket = &expr[bracket_end + end_pos..];
+                for (var_name, coef) in parse_linear_expr(after_bracket) {
+                    let var_idx = get_var(&var_name);
+                    *q_coeffs.entry(var_idx).or_insert(0.0) += coef;
+                }
+            }
+
+            return Ok(());
+        }
+    }
+
+    // No quadratic terms, parse as pure linear
     for (var_name, coef) in parse_linear_expr(expr) {
         let var_idx = get_var(&var_name);
         *q_coeffs.entry(var_idx).or_insert(0.0) += coef;
     }
 
     Ok(())
+}
+
+/// Parse quadratic expression like "x1^2 + 2 x1*x2 + x2^2"
+fn parse_quadratic_expr(
+    expr: &str,
+    get_var: &mut impl FnMut(&str) -> usize,
+    p_triplets: &mut Vec<(usize, usize, f64)>,
+    scale: f64,
+) {
+    let mut sign = 1.0;
+    let mut coef: Option<f64> = None;
+
+    let tokens: Vec<&str> = expr.split_whitespace().collect();
+    let mut i = 0;
+
+    while i < tokens.len() {
+        let token = tokens[i];
+
+        if token == "+" {
+            sign = 1.0;
+            i += 1;
+            continue;
+        } else if token == "-" {
+            sign = -1.0;
+            i += 1;
+            continue;
+        }
+
+        // Check for coefficient
+        if let Ok(val) = token.parse::<f64>() {
+            coef = Some(sign * val);
+            sign = 1.0;
+            i += 1;
+            continue;
+        }
+
+        // Check for quadratic term: x^2 or x*y
+        if token.contains('^') {
+            // x^2 term
+            let var = token.split('^').next().unwrap_or("");
+            if !var.is_empty() {
+                let var_idx = get_var(var);
+                let c = coef.unwrap_or(sign) * scale;
+                p_triplets.push((var_idx, var_idx, c));
+            }
+            coef = None;
+            sign = 1.0;
+        } else if token.contains('*') {
+            // x*y term
+            let parts: Vec<&str> = token.split('*').collect();
+            if parts.len() == 2 {
+                let var1_idx = get_var(parts[0]);
+                let var2_idx = get_var(parts[1]);
+                let c = coef.unwrap_or(sign) * scale;
+                // Store upper triangle
+                let (row, col) = if var1_idx <= var2_idx {
+                    (var1_idx, var2_idx)
+                } else {
+                    (var2_idx, var1_idx)
+                };
+                // For off-diagonal, x*y appears with coefficient that's already the full P_ij
+                // (since P is symmetric, we only store upper triangle)
+                p_triplets.push((row, col, c));
+            }
+            coef = None;
+            sign = 1.0;
+        }
+
+        i += 1;
+    }
 }
 
 /// Parse a constraint line, returning (name, expression, bound).
@@ -348,6 +493,42 @@ fn parse_constraint_line(line: &str) -> Option<(String, String, ConstraintBound)
     } else {
         None
     }
+}
+
+/// Parse a double bound like "0 <= x <= 10" -> (0.0, "x", 10.0)
+fn parse_double_bound(line: &str) -> Option<(f64, String, f64)> {
+    // Look for pattern: lb <= var <= ub
+    let parts: Vec<&str> = line.split("<=").collect();
+    if parts.len() == 3 {
+        let lb: f64 = parts[0].trim().parse().ok()?;
+        let var = parts[1].trim().to_string();
+        let ub: f64 = parts[2].trim().parse().ok()?;
+        return Some((lb, var, ub));
+    }
+    // Try >= pattern: ub >= var >= lb
+    let parts: Vec<&str> = line.split(">=").collect();
+    if parts.len() == 3 {
+        let ub: f64 = parts[0].trim().parse().ok()?;
+        let var = parts[1].trim().to_string();
+        let lb: f64 = parts[2].trim().parse().ok()?;
+        return Some((lb, var, ub));
+    }
+    None
+}
+
+/// Parse a single bound like "x >= 0" or "x <= 10" -> (var, bound, is_lower)
+fn parse_single_bound(line: &str) -> Option<(String, f64, bool)> {
+    if let Some(pos) = line.find(">=") {
+        let var = line[..pos].trim().to_string();
+        let bound: f64 = line[pos + 2..].trim().parse().ok()?;
+        return Some((var, bound, true)); // lower bound
+    }
+    if let Some(pos) = line.find("<=") {
+        let var = line[..pos].trim().to_string();
+        let bound: f64 = line[pos + 2..].trim().parse().ok()?;
+        return Some((var, bound, false)); // upper bound
+    }
+    None
 }
 
 /// Parse a linear expression into (variable_name, coefficient) pairs.
