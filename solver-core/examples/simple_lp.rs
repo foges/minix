@@ -7,8 +7,8 @@
 //!
 //! Optimal solution: x1 = 0.5, x2 = 0.5, objective = 1.0
 
+use solver_core::{solve, ProblemData, ConeSpec, SolverSettings};
 use solver_core::linalg::sparse;
-use solver_core::{solve, ConeSpec, ProblemData, SolverSettings};
 
 fn main() {
     println!("Minix Solver - Simple LP Example");
@@ -34,22 +34,21 @@ fn main() {
     //     [ 0  -1]        [0]
 
     let prob = ProblemData {
-        P: None,           // No quadratic term (LP)
-        q: vec![1.0, 1.0], // Objective: x1 + x2
+        P: None,  // No quadratic term (LP)
+        q: vec![1.0, 1.0],  // Objective: x1 + x2
         A: sparse::from_triplets(
             3,
             2,
             vec![
-                (0, 0, 1.0),
-                (0, 1, 1.0),  // Row 0: x1 + x2
-                (1, 0, -1.0), // Row 1: -x1
-                (2, 1, -1.0), // Row 2: -x2
+                (0, 0, 1.0), (0, 1, 1.0),   // Row 0: x1 + x2
+                (1, 0, -1.0),                // Row 1: -x1
+                (2, 1, -1.0),                // Row 2: -x2
             ],
         ),
         b: vec![1.0, 0.0, 0.0],
         cones: vec![
-            ConeSpec::Zero { dim: 1 },   // s1 = 0 (equality constraint)
-            ConeSpec::NonNeg { dim: 2 }, // s2, s3 >= 0 (variable bounds)
+            ConeSpec::Zero { dim: 1 },    // s1 = 0 (equality constraint)
+            ConeSpec::NonNeg { dim: 2 },  // s2, s3 >= 0 (variable bounds)
         ],
         var_bounds: None,
         integrality: None,
@@ -58,7 +57,7 @@ fn main() {
     // Solver settings
     let settings = SolverSettings {
         verbose: true,
-        max_iter: 100, // Converges in ~91 iterations with default tolerances
+        max_iter: 100,  // Converges in ~91 iterations with default tolerances
         tol_feas: 1e-7,
         tol_gap: 1e-7,
         ..Default::default()
@@ -78,20 +77,12 @@ fn main() {
 
             // Verify constraint
             let sum = result.x[0] + result.x[1];
-            println!(
-                "\nConstraint verification: x1 + x2 = {:.6} (should be 1.0)",
-                sum
-            );
+            println!("\nConstraint verification: x1 + x2 = {:.6} (should be 1.0)", sum);
 
             // Compute gap
-            let qtx = result.x[0] + result.x[1]; // q = [1, 1]
-            let btz = result.z[0]; // b = [1, 0, 0]
-            println!(
-                "Gap: q'x + b'z = {:.6} + {:.6} = {:.6}",
-                qtx,
-                btz,
-                qtx + btz
-            );
+            let qtx = result.x[0] + result.x[1];  // q = [1, 1]
+            let btz = result.z[0];  // b = [1, 0, 0]
+            println!("Gap: q'x + b'z = {:.6} + {:.6} = {:.6}", qtx, btz, qtx + btz);
         }
         Err(e) => {
             eprintln!("Solver failed: {}", e);

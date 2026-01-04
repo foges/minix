@@ -70,18 +70,8 @@ impl HsdeState {
     /// The scaling is chosen to reduce initial residuals and improve convergence.
     pub fn initialize_with_prob(&mut self, cones: &[Box<dyn ConeKernel>], prob: &ProblemData) {
         // Compute scaling factors based on problem data
-        let b_norm = prob
-            .b
-            .iter()
-            .map(|x| x.abs())
-            .fold(0.0_f64, f64::max)
-            .max(1.0);
-        let q_norm = prob
-            .q
-            .iter()
-            .map(|x| x.abs())
-            .fold(0.0_f64, f64::max)
-            .max(1.0);
+        let b_norm = prob.b.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
+        let q_norm = prob.q.iter().map(|x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
 
         // Compute A norm (max absolute entry)
         let a_norm = {
@@ -244,7 +234,11 @@ impl HsdeResiduals {
 /// * `prob` - Problem data
 /// * `state` - Current HSDE state
 /// * `residuals` - Output residuals
-pub fn compute_residuals(prob: &ProblemData, state: &HsdeState, residuals: &mut HsdeResiduals) {
+pub fn compute_residuals(
+    prob: &ProblemData,
+    state: &HsdeState,
+    residuals: &mut HsdeResiduals,
+) {
     let n = prob.num_vars();
     let m = prob.num_constraints();
 
@@ -327,18 +321,8 @@ pub fn compute_residuals(prob: &ProblemData, state: &HsdeState, residuals: &mut 
         }
     }
 
-    let qtx: f64 = prob
-        .q
-        .iter()
-        .zip(state.x.iter())
-        .map(|(qi, xi)| qi * xi)
-        .sum();
-    let btz: f64 = prob
-        .b
-        .iter()
-        .zip(state.z.iter())
-        .map(|(bi, zi)| bi * zi)
-        .sum();
+    let qtx: f64 = prob.q.iter().zip(state.x.iter()).map(|(qi, xi)| qi * xi).sum();
+    let btz: f64 = prob.b.iter().zip(state.z.iter()).map(|(bi, zi)| bi * zi).sum();
 
     residuals.r_tau = xpx / state.tau + qtx + btz + state.kappa;
 }
@@ -352,12 +336,7 @@ pub fn compute_residuals(prob: &ProblemData, state: &HsdeState, residuals: &mut 
 /// HSDE barrier parameter:
 /// μ = (⟨s, z⟩ + τκ) / (ν + 1)
 pub fn compute_mu(state: &HsdeState, barrier_degree: usize) -> f64 {
-    let sz: f64 = state
-        .s
-        .iter()
-        .zip(state.z.iter())
-        .map(|(si, zi)| si * zi)
-        .sum();
+    let sz: f64 = state.s.iter().zip(state.z.iter()).map(|(si, zi)| si * zi).sum();
     let tau_kappa = state.tau * state.kappa;
 
     if barrier_degree == 0 {

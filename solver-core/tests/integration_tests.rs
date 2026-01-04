@@ -3,8 +3,8 @@
 //! These tests validate that the full IPM pipeline works correctly
 //! on various problem types.
 
+use solver_core::{solve, ProblemData, ConeSpec, SolverSettings, SolveStatus};
 use solver_core::linalg::sparse;
-use solver_core::{solve, ConeSpec, ProblemData, SolveStatus, SolverSettings};
 
 #[test]
 fn test_simple_lp() {
@@ -22,10 +22,9 @@ fn test_simple_lp() {
 
     // A is 3x2: [equality, bound x1, bound x2]
     let a_triplets = vec![
-        (0, 0, 1.0),
-        (0, 1, 1.0),  // x1 + x2 = 1
-        (1, 0, -1.0), // -x1 + s_1 = 0
-        (2, 1, -1.0), // -x2 + s_2 = 0
+        (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 = 1
+        (1, 0, -1.0),              // -x1 + s_1 = 0
+        (2, 1, -1.0),              // -x2 + s_2 = 0
     ];
 
     let prob = ProblemData {
@@ -34,8 +33,8 @@ fn test_simple_lp() {
         A: sparse::from_triplets(3, 2, a_triplets),
         b: vec![1.0, 0.0, 0.0],
         cones: vec![
-            ConeSpec::Zero { dim: 1 },   // equality constraint
-            ConeSpec::NonNeg { dim: 2 }, // bounds x >= 0
+            ConeSpec::Zero { dim: 1 },    // equality constraint
+            ConeSpec::NonNeg { dim: 2 },  // bounds x >= 0
         ],
         var_bounds: None,
         integrality: None,
@@ -88,10 +87,9 @@ fn test_lp_with_inequality() {
 
     // A is 3x2: rows are [inequality, bound x1, bound x2]
     let a_triplets = vec![
-        (0, 0, 1.0),
-        (0, 1, 1.0),  // x1 + x2 + s_ineq = 1
-        (1, 0, -1.0), // -x1 + s_x1 = 0
-        (2, 1, -1.0), // -x2 + s_x2 = 0
+        (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 + s_ineq = 1
+        (1, 0, -1.0),              // -x1 + s_x1 = 0
+        (2, 1, -1.0),              // -x2 + s_x2 = 0
     ];
 
     let prob = ProblemData {
@@ -99,7 +97,7 @@ fn test_lp_with_inequality() {
         q: vec![-1.0, -1.0],
         A: sparse::from_triplets(3, 2, a_triplets),
         b: vec![1.0, 0.0, 0.0],
-        cones: vec![ConeSpec::NonNeg { dim: 3 }], // All slacks are nonnegative
+        cones: vec![ConeSpec::NonNeg { dim: 3 }],  // All slacks are nonnegative
         var_bounds: None,
         integrality: None,
     };
@@ -147,16 +145,15 @@ fn test_simple_qp() {
     //   -x2 + s_2 = 0, s_2 >= 0       (bound x2 >= 0)
 
     let p_triplets = vec![
-        (0, 0, 1.0), // P[0,0] = 1
-        (1, 1, 1.0), // P[1,1] = 1
+        (0, 0, 1.0),  // P[0,0] = 1
+        (1, 1, 1.0),  // P[1,1] = 1
     ];
 
     // A is 3x2: [equality, bound x1, bound x2]
     let a_triplets = vec![
-        (0, 0, 1.0),
-        (0, 1, 1.0),  // x1 + x2 = 1
-        (1, 0, -1.0), // -x1 + s_1 = 0
-        (2, 1, -1.0), // -x2 + s_2 = 0
+        (0, 0, 1.0), (0, 1, 1.0),  // x1 + x2 = 1
+        (1, 0, -1.0),              // -x1 + s_1 = 0
+        (2, 1, -1.0),              // -x2 + s_2 = 0
     ];
 
     let prob = ProblemData {
@@ -165,8 +162,8 @@ fn test_simple_qp() {
         A: sparse::from_triplets(3, 2, a_triplets),
         b: vec![1.0, 0.0, 0.0],
         cones: vec![
-            ConeSpec::Zero { dim: 1 },   // equality constraint
-            ConeSpec::NonNeg { dim: 2 }, // bounds x >= 0
+            ConeSpec::Zero { dim: 1 },    // equality constraint
+            ConeSpec::NonNeg { dim: 2 },  // bounds x >= 0
         ],
         var_bounds: None,
         integrality: None,
@@ -195,17 +192,9 @@ fn test_simple_qp() {
     // Check constraint is satisfied (approximately)
     if result.status == SolveStatus::Optimal {
         let sum = result.x[0] + result.x[1];
-        assert!(
-            (sum - 1.0).abs() < 0.1,
-            "Constraint not satisfied: x1 + x2 = {}",
-            sum
-        );
+        assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: x1 + x2 = {}", sum);
         // Optimal is x = [0.5, 0.5], obj = 1.25
-        assert!(
-            (result.obj_val - 1.25).abs() < 0.1,
-            "Objective value unexpected: {}",
-            result.obj_val
-        );
+        assert!((result.obj_val - 1.25).abs() < 0.1, "Objective value unexpected: {}", result.obj_val);
     }
 }
 
@@ -273,15 +262,15 @@ fn test_small_soc() {
 
     let prob = ProblemData {
         P: None,
-        q: vec![1.0, 0.0, 0.0], // min t
+        q: vec![1.0, 0.0, 0.0],  // min t
         A: sparse::from_triplets(
             4,
             3,
             vec![
                 (0, 0, -1.0), // -t + s1 = -1
-                (1, 0, -1.0), // -t + s2 = 0, so s2 = t (SOC t-component)
-                (2, 1, -1.0), // -x1 + s3 = 0, so s3 = x1 (SOC x1-component)
-                (3, 2, -1.0), // -x2 + s4 = 0, so s4 = x2 (SOC x2-component)
+                (1, 0, 1.0),  // t + s2 = 0 (SOC constraint, first component)
+                (2, 1, 1.0),  // x1 + s3 = 0 (SOC constraint, x-component)
+                (3, 2, 1.0),  // x2 + s4 = 0 (SOC constraint, x-component)
             ],
         ),
         b: vec![-1.0, 0.0, 0.0, 0.0],
@@ -312,16 +301,8 @@ fn test_small_soc() {
 
     // Check that solution is approximately correct (t ≈ 1, obj ≈ 1)
     if result.status == SolveStatus::Optimal {
-        assert!(
-            (result.x[0] - 1.0).abs() < 0.2,
-            "Expected t ≈ 1, got {}",
-            result.x[0]
-        );
-        assert!(
-            (result.obj_val - 1.0).abs() < 0.2,
-            "Expected obj ≈ 1, got {}",
-            result.obj_val
-        );
+        assert!((result.x[0] - 1.0).abs() < 0.2, "Expected t ≈ 1, got {}", result.x[0]);
+        assert!((result.obj_val - 1.0).abs() < 0.2, "Expected obj ≈ 1, got {}", result.obj_val);
     }
 }
 
@@ -331,7 +312,11 @@ fn test_psd_not_implemented() {
     let prob = ProblemData {
         P: None,
         q: vec![1.0, 1.0, 1.0],
-        A: sparse::from_triplets(3, 3, vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)]),
+        A: sparse::from_triplets(
+            3,
+            3,
+            vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)],
+        ),
         b: vec![1.0, 1.0, 1.0],
         cones: vec![ConeSpec::Psd { n: 2 }],
         var_bounds: None,
@@ -352,9 +337,13 @@ fn test_exp_not_implemented() {
     let prob = ProblemData {
         P: None,
         q: vec![1.0, 1.0, 1.0],
-        A: sparse::from_triplets(3, 3, vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)]),
+        A: sparse::from_triplets(
+            3,
+            3,
+            vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)],
+        ),
         b: vec![1.0, 1.0, 1.0],
-        cones: vec![ConeSpec::Exp { count: 1 }], // Exp cone has dimension 3
+        cones: vec![ConeSpec::Exp { count: 1 }],  // Exp cone has dimension 3
         var_bounds: None,
         integrality: None,
     };

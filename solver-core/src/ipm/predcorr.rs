@@ -5,8 +5,18 @@
 //! 2. **Combined step**: Solve with Mehrotra correction (adds centering)
 //!
 //! This implementation follows §7 of the design doc.
+//!
+//! ## Performance Optimizations
+//!
+//! This module uses a pre-allocated workspace to eliminate per-iteration
+//! memory allocations. Key optimizations:
+//! - All direction vectors (dx, dz, ds) are reused across iterations
+//! - SOC-specific buffers are sized to max cone dimension
+//! - Line search uses cached trial vectors instead of allocating
+//! - Jordan algebra operations use workspace temporaries
 
 use super::hsde::{compute_mu, HsdeResiduals, HsdeState};
+use super::workspace::{ConeType, PredCorrWorkspace};
 use crate::cones::{ConeKernel, NonNegCone, SocCone};
 use crate::linalg::kkt::KktSolver;
 use crate::problem::{ProblemData, SolverSettings};
@@ -29,18 +39,35 @@ pub struct StepResult {
     pub line_search_backtracks: u64,
 }
 
+/// Inline dot product - avoids iterator overhead in hot paths.
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut sum = 0.0;
+    for i in 0..a.len() {
+        sum += a[i] * b[i];
+    }
+    sum
+}
+
+/// Compute both SOC eigenvalues in one pass (avoids duplicate norm computation).
+#[inline]
+fn soc_eigs(v: &[f64]) -> (f64, f64) {
+    let t = v[0];
+    let mut norm_sq = 0.0;
+    for i in 1..v.len() {
+        norm_sq += v[i] * v[i];
+    }
+    let norm = norm_sq.sqrt();
+    (t - norm, t + norm) // (min_eig, max_eig)
+}
+
+#[inline]
 fn soc_min_eig(v: &[f64]) -> f64 {
-    let t = v[0];
-    let x_norm = v[1..].iter().map(|&xi| xi * xi).sum::<f64>().sqrt();
-    t - x_norm
+    soc_eigs(v).0
 }
 
-fn soc_max_eig(v: &[f64]) -> f64 {
-    let t = v[0];
-    let x_norm = v[1..].iter().map(|&xi| xi * xi).sum::<f64>().sqrt();
-    t + x_norm
-}
-
+#[inline]
 fn soc_jordan_product(a: &[f64], b: &[f64], out: &mut [f64]) {
     out[0] = a[0] * b[0];
     for i in 1..a.len() {
@@ -142,6 +169,12 @@ fn clamp_complementarity_nonneg(
     Some(delta_w)
 }
 
+/// Check centrality condition for trial step.
+///
+/// Uses pre-allocated workspace buffers to avoid allocations in line search.
+/// The workspace buffers (cent_s_trial, cent_z_trial, cent_w) are sized to
+/// max_soc_dim and reused across line search iterations.
+#[inline]
 fn centrality_ok_trial(
     state: &HsdeState,
     ds: &[f64],
@@ -159,6 +192,10 @@ fn centrality_ok_trial(
     soc_use_upper: bool,
     soc_use_jordan: bool,
     soc_mu_threshold: f64,
+    // Workspace buffers (pre-allocated, reused across line search iterations)
+    s_trial_buf: &mut [f64],
+    z_trial_buf: &mut [f64],
+    w_buf: &mut [f64],
 ) -> bool {
     if barrier_degree == 0 {
         return true;
@@ -170,6 +207,7 @@ fn centrality_ok_trial(
         return false;
     }
 
+    // Compute s·z in a single pass (avoid iterator chain allocation)
     let mut s_dot_z = 0.0;
     for i in 0..state.s.len() {
         let s_i = state.s[i] + alpha * ds[i];
@@ -182,8 +220,6 @@ fn centrality_ok_trial(
         return false;
     }
 
-    let mut has_nonneg = false;
-    let mut has_soc = false;
     let mut offset = 0;
     for cone in cones {
         let dim = cone.dim();
@@ -193,8 +229,9 @@ fn centrality_ok_trial(
 
         let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
         let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+
         if is_nonneg {
-            has_nonneg = true;
+            // NonNeg centrality: check each component
             for i in 0..dim {
                 let idx = offset + i;
                 let s_i = state.s[idx] + alpha * ds[idx];
@@ -210,24 +247,23 @@ fn centrality_ok_trial(
                 continue;
             }
 
-            has_soc = true;
             let s_block = &state.s[offset..offset + dim];
             let z_block = &state.z[offset..offset + dim];
             let ds_block = &ds[offset..offset + dim];
             let dz_block = &dz[offset..offset + dim];
 
-            let mut s_trial = vec![0.0; dim];
-            let mut z_trial = vec![0.0; dim];
+            // Use workspace buffers instead of allocating
+            let s_trial = &mut s_trial_buf[..dim];
+            let z_trial = &mut z_trial_buf[..dim];
             for i in 0..dim {
                 s_trial[i] = s_block[i] + alpha * ds_block[i];
                 z_trial[i] = z_block[i] + alpha * dz_block[i];
             }
 
             if soc_use_jordan {
-                let mut w = vec![0.0; dim];
-                soc_jordan_product(&s_trial, &z_trial, &mut w);
-                let w_min = soc_min_eig(&w);
-                let w_max = soc_max_eig(&w);
+                let w = &mut w_buf[..dim];
+                soc_jordan_product(s_trial, z_trial, w);
+                let (w_min, w_max) = soc_eigs(w);
 
                 if w_min < soc_beta * mu_trial {
                     return false;
@@ -236,10 +272,8 @@ fn centrality_ok_trial(
                     return false;
                 }
             } else {
-                let s_min = soc_min_eig(&s_trial);
-                let z_min = soc_min_eig(&z_trial);
-                let s_max = soc_max_eig(&s_trial);
-                let z_max = soc_max_eig(&z_trial);
+                let (s_min, s_max) = soc_eigs(s_trial);
+                let (z_min, z_max) = soc_eigs(z_trial);
                 let lower = (soc_beta * mu_trial).sqrt();
 
                 if s_min < lower || z_min < lower {
@@ -254,10 +288,6 @@ fn centrality_ok_trial(
         offset += dim;
     }
 
-    if !has_nonneg && !has_soc {
-        return true;
-    }
-
     true
 }
 
@@ -268,6 +298,8 @@ fn centrality_ok_trial(
 /// - Adaptive centering parameter σ
 /// - Combined corrector step
 /// - Fraction-to-boundary step size selection
+///
+/// Uses pre-allocated workspace to eliminate per-iteration memory allocations.
 ///
 /// # Returns
 ///
@@ -282,6 +314,7 @@ pub fn predictor_corrector_step(
     mu: f64,
     barrier_degree: usize,
     settings: &SolverSettings,
+    ws: &mut PredCorrWorkspace,
 ) -> Result<StepResult, String> {
     let n = prob.num_vars();
     let m = prob.num_constraints();
@@ -431,27 +464,32 @@ pub fn predictor_corrector_step(
     //
     // The complementarity equation H Δz + Δs = -d_s gives:
     //   Δs = -d_s - H Δz = -s - H*dz  (for affine step where d_s = s)
-    let mut dx_aff = vec![0.0; n];
-    let mut dz_aff = vec![0.0; m];
+
+    // Use workspace buffers instead of allocating
+    let dx_aff = &mut ws.dx_aff[..];
+    let dz_aff = &mut ws.dz_aff[..];
+    dx_aff.fill(0.0);
+    dz_aff.fill(0.0);
     let dtau_aff;
 
-    // Affine RHS:
+    // Affine RHS: build directly into workspace buffers (avoid iterator allocations)
     //   rhs_x = -r_x (Newton step to reduce dual residual)
     //   rhs_z = s - r_z (combining -r_z from primal + s from complementarity)
-    let rhs_x_aff: Vec<f64> = residuals.r_x.iter().map(|&r| -r).collect();
-    let rhs_z_aff: Vec<f64> = state
-        .s
-        .iter()
-        .zip(residuals.r_z.iter())
-        .map(|(si, ri)| si - ri)
-        .collect();
+    let rhs_x_aff = &mut ws.rhs_x_aff[..];
+    let rhs_z_aff = &mut ws.rhs_z_aff[..];
+    for i in 0..n {
+        rhs_x_aff[i] = -residuals.r_x[i];
+    }
+    for i in 0..m {
+        rhs_z_aff[i] = state.s[i] - residuals.r_z[i];
+    }
 
     kkt.solve_refined(
         &factor,
-        &rhs_x_aff,
-        &rhs_z_aff,
-        &mut dx_aff,
-        &mut dz_aff,
+        rhs_x_aff,
+        rhs_z_aff,
+        dx_aff,
+        dz_aff,
         settings.kkt_refine_iters,
     );
 
@@ -459,16 +497,19 @@ pub fn predictor_corrector_step(
     // This replaces the old heuristic dtau = -(q'dx + b'dz)
 
     // First, compute mul_p_xi = P*ξ (if P exists)
-    let mut mul_p_xi = vec![0.0; n];
+    // Use workspace buffer instead of allocating
+    let mul_p_xi = &mut ws.mul_p_xi[..];
+    mul_p_xi.fill(0.0);
     if let Some(ref p) = prob.P {
         // P is symmetric upper triangle, do symmetric matvec
+        // Optimization: process non-diagonal entries with single branch
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
+                let xi_col = state.xi[col];
                 for (row, &val) in col_view.iter() {
-                    if row == col {
-                        mul_p_xi[row] += val * state.xi[col];
-                    } else {
-                        mul_p_xi[row] += val * state.xi[col];
+                    let contribution = val * xi_col;
+                    mul_p_xi[row] += contribution;
+                    if row != col {
                         mul_p_xi[col] += val * state.xi[row];
                     }
                 }
@@ -476,17 +517,18 @@ pub fn predictor_corrector_step(
         }
     }
 
-    // Compute mul_p_xi_q = 2*P*ξ + q
-    let mul_p_xi_q: Vec<f64> = mul_p_xi
-        .iter()
-        .zip(prob.q.iter())
-        .map(|(pxi, qi)| 2.0 * pxi + qi)
-        .collect();
+    // Compute mul_p_xi_q = 2*P*ξ + q (use workspace buffer)
+    let mul_p_xi_q = &mut ws.mul_p_xi_q[..];
+    for i in 0..n {
+        mul_p_xi_q[i] = 2.0 * mul_p_xi[i] + prob.q[i];
+    }
 
     // Second solve for Schur complement: K [Δx₂, Δz₂] = [-q, b]
     // (design doc §5.4.1)
-    let mut dx2 = vec![0.0; n];
-    let mut dz2 = vec![0.0; m];
+    let dx2 = &mut ws.dx2[..];
+    let dz2 = &mut ws.dz2[..];
+    dx2.fill(0.0);
+    dz2.fill(0.0);
     let rhs_x2 = neg_q;
     let rhs_z2 = &prob.b;
 
@@ -494,8 +536,8 @@ pub fn predictor_corrector_step(
         &factor,
         rhs_x2,
         rhs_z2,
-        &mut dx2,
-        &mut dz2,
+        dx2,
+        dz2,
         settings.kkt_refine_iters,
     );
 
@@ -512,29 +554,20 @@ pub fn predictor_corrector_step(
     // d_kappa for affine step (design doc §7.1): d_kappa = κ * τ
     let d_kappa = state.kappa * state.tau;
 
-    let dot_mul_p_xi_q_dx1: f64 = mul_p_xi_q
-        .iter()
-        .zip(dx_aff.iter())
-        .map(|(a, b)| a * b)
-        .sum();
-    let dot_b_dz1: f64 = prob.b.iter().zip(dz_aff.iter()).map(|(a, b)| a * b).sum();
+    let dot_mul_p_xi_q_dx1 = dot(mul_p_xi_q, dx_aff);
+    let dot_b_dz1 = dot(&prob.b, dz_aff);
     let numerator = d_tau - d_kappa / state.tau + dot_mul_p_xi_q_dx1 + dot_b_dz1;
 
-    let dot_xi_mul_p_xi: f64 = state
-        .xi
-        .iter()
-        .zip(mul_p_xi.iter())
-        .map(|(a, b)| a * b)
-        .sum();
-    let dot_mul_p_xi_q_dx2: f64 = mul_p_xi_q.iter().zip(dx2.iter()).map(|(a, b)| a * b).sum();
-    let dot_b_dz2: f64 = prob.b.iter().zip(dz2.iter()).map(|(a, b)| a * b).sum();
+    let dot_xi_mul_p_xi = dot(&state.xi, mul_p_xi);
+    let dot_mul_p_xi_q_dx2 = dot(mul_p_xi_q, dx2);
+    let dot_b_dz2 = dot(&prob.b, dz2);
     let denominator = state.kappa / state.tau + dot_xi_mul_p_xi - dot_mul_p_xi_q_dx2 - dot_b_dz2;
 
     let denom_scale = (state.kappa / state.tau).abs().max(dot_xi_mul_p_xi.abs());
     dtau_aff = compute_dtau(numerator, denominator, state.tau, denom_scale)
         .map_err(|e| format!("affine dtau failed: {}", e))?;
 
-    apply_tau_direction(&mut dx_aff, &mut dz_aff, dtau_aff, &dx2, &dz2);
+    apply_tau_direction(dx_aff, dz_aff, dtau_aff, dx2, dz2);
 
     let dkappa_aff = -(d_kappa + state.kappa * dtau_aff) / state.tau;
 
@@ -546,7 +579,9 @@ pub fn predictor_corrector_step(
     //   Δs = -d_s - H Δz
     // For affine step, d_s = s, so:
     //   ds_aff = -s - H*dz_aff
-    let mut ds_aff = vec![0.0; m];
+    // Use workspace buffer instead of allocating
+    let ds_aff = &mut ws.ds_aff[..];
+    ds_aff.fill(0.0);
     let mut offset = 0;
     for (cone_idx, cone) in cones.iter().enumerate() {
         let dim = cone.dim();
@@ -571,9 +606,10 @@ pub fn predictor_corrector_step(
                 ScalingBlock::SocStructured { w, diag_reg } => {
                     // For SOC, H = P(w) (quadratic representation)
                     // ds = -s - (P(w) + diag_reg*I)*dz
+                    // Use workspace buffer instead of allocating
                     let dz_slice = &dz_aff[offset..offset + dim];
-                    let mut h_dz = vec![0.0; dim];
-                    crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
+                    let h_dz = &mut ws.soc_h_dz[..dim];
+                    crate::scaling::nt::quad_rep_apply(w, dz_slice, h_dz);
                     for i in 0..dim {
                         ds_aff[offset + i] =
                             -state.s[offset + i] - h_dz[i] - diag_reg * dz_slice[i];
@@ -628,10 +664,14 @@ pub fn predictor_corrector_step(
     //   rhs_x = d_x
     //   rhs_z = d_s - d_z
     //
-    let mut dx = vec![0.0; n];
-    let mut dz = vec![0.0; m];
-    let mut ds = vec![0.0; m];
-    let mut d_s_comb = vec![0.0; m];
+    // Use workspace buffers instead of allocating
+    let dx = &mut ws.dx[..];
+    let dz = &mut ws.dz[..];
+    let ds = &mut ws.ds[..];
+    let d_s_comb = &mut ws.d_s_comb[..];
+    dx.fill(0.0);
+    dz.fill(0.0);
+    ds.fill(0.0);
     let mut dtau = 0.0;
     let mut dkappa = 0.0;
 
@@ -657,8 +697,11 @@ pub fn predictor_corrector_step(
 
         let d_kappa_corr = state.kappa * state.tau + dkappa_aff * dtau_aff - target_mu;
 
-        // Build RHS for combined step
-        let rhs_x_comb: Vec<f64> = residuals.r_x.iter().map(|&r| -feas_weight * r).collect();
+        // Build RHS for combined step (use workspace buffers)
+        let rhs_x_comb = &mut ws.rhs_x_comb[..];
+        for i in 0..n {
+            rhs_x_comb[i] = -feas_weight * residuals.r_x[i];
+        }
 
         let mut mcc_delta: Option<Vec<f64>> = None;
         for corr_iter in 0..=settings.mcc_iters {
@@ -676,55 +719,55 @@ pub fn predictor_corrector_step(
                     continue;
                 }
 
-                let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
-                let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+                // Use cached cone types to avoid runtime type checks
+                let cone_type = ws.cone_types[cone_idx];
 
-                if is_soc {
+                if cone_type == ConeType::Soc {
                     if let ScalingBlock::SocStructured { w, .. } = &scaling[cone_idx] {
                         let z_slice = &state.z[offset..offset + dim];
                         let ds_aff_slice = &ds_aff[offset..offset + dim];
                         let dz_aff_slice = &dz_aff[offset..offset + dim];
 
-                        // Build W = P(w^{1/2}) and W^{-1} = P(w^{-1/2})
-                        let mut w_half = vec![0.0; dim];
-                        nt::jordan_sqrt_apply(w, &mut w_half);
+                        // Use workspace buffers instead of allocating (critical for performance)
+                        // All SOC buffers are sized to max_soc_dim
+                        let w_half = &mut ws.soc_w_half[..dim];
+                        let w_half_inv = &mut ws.soc_w_half_inv[..dim];
+                        let lambda = &mut ws.soc_lambda[..dim];
+                        let w_inv_ds = &mut ws.soc_w_inv_ds[..dim];
+                        let w_dz = &mut ws.soc_w_dz[..dim];
+                        let eta = &mut ws.soc_eta[..dim];
+                        let lambda_sq = &mut ws.soc_lambda_sq[..dim];
+                        let v = &mut ws.soc_v[..dim];
+                        let u = &mut ws.soc_u[..dim];
+                        let d_s_block = &mut ws.soc_d_s_block[..dim];
 
-                        let mut w_half_inv = vec![0.0; dim];
-                        nt::jordan_inv_apply(&w_half, &mut w_half_inv);
+                        // Build W = P(w^{1/2}) and W^{-1} = P(w^{-1/2})
+                        nt::jordan_sqrt_apply(w, w_half);
+                        nt::jordan_inv_apply(w_half, w_half_inv);
 
                         // λ = W z
-                        let mut lambda = vec![0.0; dim];
-                        nt::quad_rep_apply(&w_half, z_slice, &mut lambda);
+                        nt::quad_rep_apply(w_half, z_slice, lambda);
 
                         // η = (W^{-1} ds_aff) ∘ (W dz_aff)
-                        let mut w_inv_ds = vec![0.0; dim];
-                        nt::quad_rep_apply(&w_half_inv, ds_aff_slice, &mut w_inv_ds);
-
-                        let mut w_dz = vec![0.0; dim];
-                        nt::quad_rep_apply(&w_half, dz_aff_slice, &mut w_dz);
-
-                        let mut eta = vec![0.0; dim];
-                        nt::jordan_product_apply(&w_inv_ds, &w_dz, &mut eta);
+                        nt::quad_rep_apply(w_half_inv, ds_aff_slice, w_inv_ds);
+                        nt::quad_rep_apply(w_half, dz_aff_slice, w_dz);
+                        nt::jordan_product_apply(w_inv_ds, w_dz, eta);
 
                         // v = λ∘λ + η - σμ e, with e = (1, 0, ..., 0)
-                        let mut lambda_sq = vec![0.0; dim];
-                        nt::jordan_product_apply(&lambda, &lambda, &mut lambda_sq);
+                        nt::jordan_product_apply(lambda, lambda, lambda_sq);
 
-                        let mut v = vec![0.0; dim];
                         v[0] = lambda_sq[0] + eta[0] - target_mu;
                         for i in 1..dim {
                             v[i] = lambda_sq[i] + eta[i];
                         }
 
                         // u solves λ ∘ u = v
-                        let mut u = vec![0.0; dim];
-                        nt::jordan_solve_apply(&lambda, &v, &mut u);
+                        nt::jordan_solve_apply(lambda, v, u);
 
                         // d_s = W^T u (W is self-adjoint for SOC)
-                        let mut d_s_block = vec![0.0; dim];
-                        nt::quad_rep_apply(&w_half, &u, &mut d_s_block);
+                        nt::quad_rep_apply(w_half, u, d_s_block);
 
-                        d_s_comb[offset..offset + dim].copy_from_slice(&d_s_block);
+                        d_s_comb[offset..offset + dim].copy_from_slice(d_s_block);
                     } else {
                         // Fallback: use diagonal correction if scaling block isn't SOC
                         for i in offset..offset + dim {
@@ -737,7 +780,7 @@ pub fn predictor_corrector_step(
                     for i in offset..offset + dim {
                         let z_i = state.z[i].max(1e-14);
                         let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
-                        let delta = if is_nonneg {
+                        let delta = if cone_type == ConeType::NonNeg {
                             mcc_delta.as_ref().map_or(0.0, |d| d[i])
                         } else {
                             0.0
@@ -750,19 +793,18 @@ pub fn predictor_corrector_step(
                 let _ = cone_idx;
             }
 
-            // rhs_z = d_s - d_z (weighted feasibility residual)
-            let rhs_z_comb: Vec<f64> = d_s_comb
-                .iter()
-                .zip(residuals.r_z.iter())
-                .map(|(ds_i, rz_i)| ds_i - feas_weight * rz_i)
-                .collect();
+            // rhs_z = d_s - d_z (weighted feasibility residual) - use workspace buffer
+            let rhs_z_comb = &mut ws.rhs_z_comb[..];
+            for i in 0..m {
+                rhs_z_comb[i] = d_s_comb[i] - feas_weight * residuals.r_z[i];
+            }
 
             kkt.solve_refined(
                 &factor,
-                &rhs_x_comb,
-                &rhs_z_comb,
-                &mut dx,
-                &mut dz,
+                rhs_x_comb,
+                rhs_z_comb,
+                dx,
+                dz,
                 refine_iters,
             );
 
@@ -774,15 +816,15 @@ pub fn predictor_corrector_step(
             // Schur complement numerator: d_tau - d_kappa/τ + (2Pξ+q)ᵀΔx + bᵀΔz
             let d_tau_corr = feas_weight * residuals.r_tau;
 
-            let dot_mul_p_xi_q_dx: f64 = mul_p_xi_q.iter().zip(dx.iter()).map(|(a, b)| a * b).sum();
-            let dot_b_dz: f64 = prob.b.iter().zip(dz.iter()).map(|(a, b)| a * b).sum();
+            let dot_mul_p_xi_q_dx = dot(mul_p_xi_q, dx);
+            let dot_b_dz = dot(&prob.b, dz);
             let numerator_corr =
                 d_tau_corr - d_kappa_corr / state.tau + dot_mul_p_xi_q_dx + dot_b_dz;
 
             dtau = compute_dtau(numerator_corr, denominator, state.tau, denom_scale)
                 .map_err(|e| format!("corrector dtau failed: {}", e))?;
 
-            apply_tau_direction(&mut dx, &mut dz, dtau, &dx2, &dz2);
+            apply_tau_direction(dx, dz, dtau, dx2, dz2);
 
             // Compute ds from complementarity equation (design doc §5.4):
             //   Δs = -d_s - H Δz
@@ -810,9 +852,10 @@ pub fn predictor_corrector_step(
                         ScalingBlock::SocStructured { w, diag_reg } => {
                             // For SOC, H = P(w) (quadratic representation)
                             // ds = -d_s - (P(w) + diag_reg*I)*dz
+                            // Use workspace buffer instead of allocating
                             let dz_slice = &dz[offset..offset + dim];
-                            let mut h_dz = vec![0.0; dim];
-                            crate::scaling::nt::quad_rep_apply(w, dz_slice, &mut h_dz);
+                            let h_dz = &mut ws.soc_h_dz[..dim];
+                            crate::scaling::nt::quad_rep_apply(w, dz_slice, h_dz);
                             for i in 0..dim {
                                 ds[offset + i] =
                                     -d_s_comb[offset + i] - h_dz[i] - diag_reg * dz_slice[i];
@@ -876,10 +919,11 @@ pub fn predictor_corrector_step(
             && settings.centrality_beta > 0.0
         {
             for _ in 0..settings.line_search_max_iters {
+                // Use workspace buffers for centrality check (eliminates allocations in loop)
                 if centrality_ok_trial(
                     state,
-                    &ds,
-                    &dz,
+                    ds,
+                    dz,
                     dtau,
                     dkappa,
                     cones,
@@ -893,6 +937,9 @@ pub fn predictor_corrector_step(
                     settings.soc_centrality_use_upper,
                     settings.soc_centrality_use_jordan,
                     settings.soc_centrality_mu_threshold,
+                    &mut ws.cent_s_trial,
+                    &mut ws.cent_z_trial,
+                    &mut ws.cent_w,
                 ) {
                     break;
                 }
@@ -1233,13 +1280,20 @@ mod tests {
         let ds = vec![0.0; 3];
         let dz = vec![0.0; 3];
 
+        // Workspace buffers for centrality check
+        let mut s_trial = vec![0.0; 3];
+        let mut z_trial = vec![0.0; 3];
+        let mut w_buf = vec![0.0; 3];
+
         let ok = centrality_ok_trial(
             &state, &ds, &dz, 0.0, 0.0, &cones, 0.1, 10.0, 0.1, 10.0, 2, 1.0, true, true, true, 0.0,
+            &mut s_trial, &mut z_trial, &mut w_buf,
         );
         assert!(ok, "SOC centrality should pass for loose bounds");
 
         let not_ok = centrality_ok_trial(
             &state, &ds, &dz, 0.0, 0.0, &cones, 0.9, 1.1, 0.9, 1.1, 2, 1.0, true, true, true, 0.0,
+            &mut s_trial, &mut z_trial, &mut w_buf,
         );
         assert!(!not_ok, "SOC centrality should fail for tight bounds");
     }

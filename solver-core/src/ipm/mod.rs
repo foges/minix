@@ -5,6 +5,7 @@
 pub mod hsde;
 pub mod predcorr;
 pub mod termination;
+pub mod workspace;
 
 use crate::cones::{ConeKernel, NonNegCone, SocCone, ZeroCone};
 use crate::linalg::kkt::KktSolver;
@@ -14,6 +15,7 @@ use crate::scaling::ScalingBlock;
 use hsde::{compute_mu, compute_residuals, HsdeResiduals, HsdeState};
 use predcorr::predictor_corrector_step;
 use termination::{check_termination, TerminationCriteria};
+use workspace::PredCorrWorkspace;
 
 /// Main IPM solver.
 ///
@@ -125,6 +127,9 @@ pub fn solve_ipm(
         return Err(format!("KKT symbolic factorization failed: {}", e).into());
     }
 
+    // Pre-allocate workspace for predictor-corrector (eliminates per-iteration allocations)
+    let mut workspace = PredCorrWorkspace::new(n, m, &cones);
+
     // Termination criteria
     let criteria = TerminationCriteria {
         tol_feas: settings.tol_feas,
@@ -191,6 +196,7 @@ pub fn solve_ipm(
             mu,
             barrier_degree,
             settings,
+            &mut workspace,
         ) {
             Ok(result) => {
                 consecutive_failures = 0; // Reset on success

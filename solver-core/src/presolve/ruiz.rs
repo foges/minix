@@ -41,8 +41,7 @@ impl RuizScaling {
     /// Unscale the primal solution x.
     /// x_original = diag(col_scale) * x_scaled
     pub fn unscale_x(&self, x_scaled: &[f64]) -> Vec<f64> {
-        x_scaled
-            .iter()
+        x_scaled.iter()
             .zip(self.col_scale.iter())
             .map(|(&xi, &ci)| ci * xi)
             .collect()
@@ -52,8 +51,7 @@ impl RuizScaling {
     /// Given A_scaled = R * A * C and b_scaled = R * b,
     /// the scaled slack is s_scaled = R * s, so s_original = s_scaled / R
     pub fn unscale_s(&self, s_scaled: &[f64]) -> Vec<f64> {
-        s_scaled
-            .iter()
+        s_scaled.iter()
             .zip(self.row_scale.iter())
             .map(|(&si, &ri)| si / ri)
             .collect()
@@ -63,8 +61,7 @@ impl RuizScaling {
     /// Given the dual equation scales as A^T z → C * A^T * R * z_scaled,
     /// we have z_original = cost_scale * R * z_scaled
     pub fn unscale_z(&self, z_scaled: &[f64]) -> Vec<f64> {
-        z_scaled
-            .iter()
+        z_scaled.iter()
             .zip(self.row_scale.iter())
             .map(|(&zi, &ri)| self.cost_scale * ri * zi)
             .collect()
@@ -99,13 +96,7 @@ pub fn equilibrate(
     b: &[f64],
     iters: usize,
     cones: &[ConeSpec],
-) -> (
-    SparseCsc,
-    Option<SparseSymmetricCsc>,
-    Vec<f64>,
-    Vec<f64>,
-    RuizScaling,
-) {
+) -> (SparseCsc, Option<SparseSymmetricCsc>, Vec<f64>, Vec<f64>, RuizScaling) {
     let m = A.rows();
     let n = A.cols();
 
@@ -150,12 +141,10 @@ pub fn equilibrate(
         }
 
         // Compute scaling factors: d = 1/sqrt(norm), avoiding division by zero
-        let mut d_row: Vec<f64> = row_norms
-            .iter()
+        let mut d_row: Vec<f64> = row_norms.iter()
             .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
             .collect();
-        let d_col: Vec<f64> = col_norms
-            .iter()
+        let d_col: Vec<f64> = col_norms.iter()
             .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
             .collect();
 
@@ -183,10 +172,7 @@ pub fn equilibrate(
 
                 let uniform_block = matches!(
                     cone,
-                    ConeSpec::Soc { .. }
-                        | ConeSpec::Psd { .. }
-                        | ConeSpec::Exp { .. }
-                        | ConeSpec::Pow { .. }
+                    ConeSpec::Soc { .. } | ConeSpec::Psd { .. } | ConeSpec::Exp { .. } | ConeSpec::Pow { .. }
                 );
 
                 if uniform_block {
@@ -194,11 +180,7 @@ pub fn equilibrate(
                     for i in offset..offset + dim {
                         block_norm = block_norm.max(row_norms[i]);
                     }
-                    let block_scale = if block_norm > 1e-12 {
-                        1.0 / block_norm.sqrt()
-                    } else {
-                        1.0
-                    };
+                    let block_scale = if block_norm > 1e-12 { 1.0 / block_norm.sqrt() } else { 1.0 };
                     for i in offset..offset + dim {
                         d_row[i] = block_scale;
                     }
@@ -226,15 +208,13 @@ pub fn equilibrate(
     }
 
     // Scale q: q_scaled = diag(col_scale) * q
-    let q_scaled: Vec<f64> = q
-        .iter()
+    let q_scaled: Vec<f64> = q.iter()
         .zip(col_scale.iter())
         .map(|(&qi, &ci)| ci * qi)
         .collect();
 
     // Scale b: b_scaled = diag(row_scale) * b
-    let b_scaled: Vec<f64> = b
-        .iter()
+    let b_scaled: Vec<f64> = b.iter()
         .zip(row_scale.iter())
         .map(|(&bi, &ri)| ri * bi)
         .collect();
@@ -248,11 +228,7 @@ pub fn equilibrate(
         0.0
     };
     let max_cost_norm = q_norm.max(p_norm);
-    let cost_scale = if max_cost_norm > 1e-12 {
-        max_cost_norm
-    } else {
-        1.0
-    };
+    let cost_scale = if max_cost_norm > 1e-12 { max_cost_norm } else { 1.0 };
 
     // Apply cost scaling
     let q_scaled: Vec<f64> = q_scaled.iter().map(|&qi| qi / cost_scale).collect();
@@ -331,11 +307,10 @@ mod tests {
 
     #[test]
     fn test_equilibrate_no_iters() {
-        let A = sparse::from_triplets(
-            2,
-            3,
-            vec![(0, 0, 1.0), (0, 1, 2.0), (1, 1, 3.0), (1, 2, 4.0)],
-        );
+        let A = sparse::from_triplets(2, 3, vec![
+            (0, 0, 1.0), (0, 1, 2.0),
+            (1, 1, 3.0), (1, 2, 4.0),
+        ]);
         let q = vec![1.0, 2.0, 3.0];
         let b = vec![5.0, 6.0];
 
@@ -353,16 +328,14 @@ mod tests {
     #[test]
     fn test_equilibrate_balances_norms() {
         // Matrix with very different row/column magnitudes
-        let A = sparse::from_triplets(
-            2,
-            2,
-            vec![(0, 0, 1000.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 0.001)],
-        );
+        let A = sparse::from_triplets(2, 2, vec![
+            (0, 0, 1000.0), (0, 1, 1.0),
+            (1, 0, 1.0), (1, 1, 0.001),
+        ]);
         let q = vec![1.0, 1.0];
         let b = vec![1.0, 1.0];
 
-        let (A_scaled, _, _, _, _) =
-            equilibrate(&A, None, &q, &b, 10, &[ConeSpec::NonNeg { dim: 2 }]);
+        let (A_scaled, _, _, _, _) = equilibrate(&A, None, &q, &b, 10, &[ConeSpec::NonNeg { dim: 2 }]);
 
         // After equilibration, row and column norms should be more balanced
         let mut row_norms = vec![0.0_f64; 2];
@@ -376,94 +349,69 @@ mod tests {
         let row_ratio = row_norms[0].max(row_norms[1]) / row_norms[0].min(row_norms[1]);
         let col_ratio = col_norms[0].max(col_norms[1]) / col_norms[0].min(col_norms[1]);
 
-        assert!(
-            row_ratio < 100.0,
-            "Row ratio should be balanced: {}",
-            row_ratio
-        );
-        assert!(
-            col_ratio < 100.0,
-            "Col ratio should be balanced: {}",
-            col_ratio
-        );
+        assert!(row_ratio < 100.0, "Row ratio should be balanced: {}", row_ratio);
+        assert!(col_ratio < 100.0, "Col ratio should be balanced: {}", col_ratio);
     }
 
     #[test]
     fn test_unscale_roundtrip() {
-        let A = sparse::from_triplets(
-            2,
-            3,
-            vec![(0, 0, 100.0), (0, 1, 0.01), (1, 1, 10.0), (1, 2, 0.1)],
-        );
+        let A = sparse::from_triplets(2, 3, vec![
+            (0, 0, 100.0), (0, 1, 0.01),
+            (1, 1, 10.0), (1, 2, 0.1),
+        ]);
         let q = vec![1.0, 2.0, 3.0];
         let b = vec![5.0, 6.0];
 
-        let (_, _, _, _, scaling) =
-            equilibrate(&A, None, &q, &b, 5, &[ConeSpec::NonNeg { dim: 2 }]);
+        let (_, _, _, _, scaling) = equilibrate(&A, None, &q, &b, 5, &[ConeSpec::NonNeg { dim: 2 }]);
 
         // Test x roundtrip: x_scaled = x / C, unscale gives x = C * x_scaled
         let x_orig = vec![1.0, 2.0, 3.0];
-        let x_scaled: Vec<f64> = x_orig
-            .iter()
+        let x_scaled: Vec<f64> = x_orig.iter()
             .zip(scaling.col_scale.iter())
             .map(|(&xi, &ci)| xi / ci)
             .collect();
         let x_unscaled = scaling.unscale_x(&x_scaled);
         for i in 0..3 {
-            assert!(
-                (x_orig[i] - x_unscaled[i]).abs() < 1e-10,
-                "x roundtrip failed at {}: {} vs {}",
-                i,
-                x_orig[i],
-                x_unscaled[i]
-            );
+            assert!((x_orig[i] - x_unscaled[i]).abs() < 1e-10,
+                "x roundtrip failed at {}: {} vs {}", i, x_orig[i], x_unscaled[i]);
         }
 
         // Test s roundtrip: s_scaled = R * s, unscale gives s = s_scaled / R
         let s_orig = vec![1.0, 2.0];
-        let s_scaled: Vec<f64> = s_orig
-            .iter()
+        let s_scaled: Vec<f64> = s_orig.iter()
             .zip(scaling.row_scale.iter())
             .map(|(&si, &ri)| ri * si)
             .collect();
         let s_unscaled = scaling.unscale_s(&s_scaled);
         for i in 0..2 {
-            assert!(
-                (s_orig[i] - s_unscaled[i]).abs() < 1e-10,
-                "s roundtrip failed at {}: {} vs {}",
-                i,
-                s_orig[i],
-                s_unscaled[i]
-            );
+            assert!((s_orig[i] - s_unscaled[i]).abs() < 1e-10,
+                "s roundtrip failed at {}: {} vs {}", i, s_orig[i], s_unscaled[i]);
         }
 
         // Test z roundtrip: z_scaled = z / (cost_scale * R), unscale gives z = cost_scale * R * z_scaled
         let z_orig = vec![1.0, 2.0];
-        let z_scaled: Vec<f64> = z_orig
-            .iter()
+        let z_scaled: Vec<f64> = z_orig.iter()
             .zip(scaling.row_scale.iter())
             .map(|(&zi, &ri)| zi / (scaling.cost_scale * ri))
             .collect();
         let z_unscaled = scaling.unscale_z(&z_scaled);
         for i in 0..2 {
-            assert!(
-                (z_orig[i] - z_unscaled[i]).abs() < 1e-10,
-                "z roundtrip failed at {}: {} vs {}",
-                i,
-                z_orig[i],
-                z_unscaled[i]
-            );
+            assert!((z_orig[i] - z_unscaled[i]).abs() < 1e-10,
+                "z roundtrip failed at {}: {} vs {}", i, z_orig[i], z_unscaled[i]);
         }
     }
 
     #[test]
     fn test_equilibrate_with_p() {
-        let A = sparse::from_triplets(
-            2,
-            2,
-            vec![(0, 0, 1.0), (0, 1, 2.0), (1, 0, 3.0), (1, 1, 4.0)],
-        );
-        let P = sparse::from_triplets(2, 2, vec![(0, 0, 100.0), (0, 1, 10.0), (1, 1, 1.0)]);
+        let A = sparse::from_triplets(2, 2, vec![
+            (0, 0, 1.0), (0, 1, 2.0),
+            (1, 0, 3.0), (1, 1, 4.0),
+        ]);
+        let P = sparse::from_triplets(2, 2, vec![
+            (0, 0, 100.0),
+            (0, 1, 10.0),
+            (1, 1, 1.0),
+        ]);
         let q = vec![1.0, 2.0];
         let b = vec![5.0, 6.0];
 

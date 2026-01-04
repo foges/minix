@@ -110,11 +110,7 @@ pub fn spmv_transpose(a: &SparseCsc, x: &[f64], y: &mut [f64], alpha: f64, beta:
 
 /// Stack two sparse matrices vertically: [A; B]
 pub fn vstack(a: &SparseCsc, b: &SparseCsc) -> SparseCsc {
-    assert_eq!(
-        a.cols(),
-        b.cols(),
-        "Matrices must have same number of columns"
-    );
+    assert_eq!(a.cols(), b.cols(), "Matrices must have same number of columns");
 
     let nrows = a.rows() + b.rows();
     let ncols = a.cols();
@@ -162,7 +158,11 @@ mod tests {
 
     #[test]
     fn test_from_triplets() {
-        let triplets = vec![(0, 0, 1.0), (1, 1, 2.0), (0, 1, 3.0)];
+        let triplets = vec![
+            (0, 0, 1.0),
+            (1, 1, 2.0),
+            (0, 1, 3.0),
+        ];
         let mat = from_triplets(2, 2, triplets);
 
         assert_eq!(mat.rows(), 2);
@@ -199,7 +199,10 @@ mod tests {
     #[test]
     fn test_spmv() {
         // 2x2 matrix: [[1, 2], [3, 4]]
-        let triplets = vec![(0, 0, 1.0), (0, 1, 2.0), (1, 0, 3.0), (1, 1, 4.0)];
+        let triplets = vec![
+            (0, 0, 1.0), (0, 1, 2.0),
+            (1, 0, 3.0), (1, 1, 4.0),
+        ];
         let mat = from_triplets(2, 2, triplets);
 
         let x = vec![1.0, 2.0];
