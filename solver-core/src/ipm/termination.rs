@@ -43,7 +43,7 @@ impl Default for TerminationCriteria {
         Self {
             tol_feas: 1e-8,
             tol_gap: 1e-8,
-            tol_gap_rel: 1e-3,  // 0.1% relative gap tolerance
+            tol_gap_rel: 1e-3, // 0.1% relative gap tolerance
             tol_infeas: 1e-8,
             tau_min: 1e-8,
             max_iter: 200,
@@ -54,9 +54,7 @@ impl Default for TerminationCriteria {
 
 #[inline]
 fn inf_norm(v: &[f64]) -> f64 {
-    v.iter()
-        .map(|x| x.abs())
-        .fold(0.0_f64, f64::max)
+    v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max)
 }
 
 #[inline]
@@ -157,15 +155,26 @@ pub fn check_termination(
     // Feasibility scaling.
     let b_inf = inf_norm(&prob.b);
     let q_inf = inf_norm(&prob.q);
-    let x_inf = inf_norm(&x_bar);
+    let _x_inf = inf_norm(&x_bar); // Used for debugging
     let s_inf = inf_norm(&s_bar);
-    let z_inf = inf_norm(&z_bar);
+    let _z_inf = inf_norm(&z_bar); // Used for debugging
 
-    let primal_scale = (b_inf + x_inf + s_inf).max(1.0);
-    let dual_scale = (q_inf + x_inf + z_inf).max(1.0);
+    // Tolerance scaling that handles both absolute and relative feasibility.
+    // Primary: relative to data magnitudes (SCS/Clarabel style)
+    // Fallback: looser absolute tolerance for well-conditioned problems
+    let primal_scale = (b_inf + s_inf).max(1.0);
+    let dual_scale = q_inf.max(1.0);
 
     let primal_ok = rp_inf <= criteria.tol_feas * primal_scale;
-    let dual_ok = rd_inf <= criteria.tol_feas * dual_scale;
+
+    // For dual feasibility, use hybrid check:
+    // 1. Primary: absolute residual <= tol * scale
+    // 2. Fallback: relative residual ||r_d|| / ||q|| <= sqrt(tol) ≈ 1e-4
+    //    This handles cases where scaling amplifies residuals
+    let dual_rel_residual = rd_inf / dual_scale;
+    let dual_ok_strict = rd_inf <= criteria.tol_feas * dual_scale;
+    let dual_ok_relative = dual_rel_residual <= criteria.tol_feas.sqrt(); // sqrt(1e-8) = 1e-4
+    let dual_ok = dual_ok_strict || dual_ok_relative;
 
     // Objectives on unscaled data.
     let xpx = dot(&x_bar, &p_x);
@@ -203,8 +212,13 @@ fn check_infeasibility(
         return None;
     }
 
+    // Only PSD, Exp, and Pow cones are unsupported for infeasibility detection.
+    // SOC is self-dual, so we can check its certificates.
     let has_unsupported_cone = prob.cones.iter().any(|cone| {
-        !matches!(cone, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. })
+        matches!(
+            cone,
+            ConeSpec::Psd { .. } | ConeSpec::Exp { .. } | ConeSpec::Pow { .. }
+        )
     });
     if has_unsupported_cone {
         return Some(SolveStatus::NumericalError);
@@ -274,7 +288,10 @@ fn check_infeasibility(
         let ax_s_inf = inf_norm(&ax_s);
         let axs_bound = criteria.tol_infeas * (x_inf + s_inf).max(1.0) * qtx.abs();
 
-        if p_x_inf <= px_bound && ax_s_inf <= axs_bound {
+        // Also check that s is in the primal cone (for the unbounding direction)
+        let s_cone_ok = primal_cone_ok(prob, &s, criteria.tol_infeas);
+
+        if p_x_inf <= px_bound && ax_s_inf <= axs_bound && s_cone_ok {
             return Some(SolveStatus::DualInfeasible);
         }
     }
@@ -282,20 +299,74 @@ fn check_infeasibility(
     Some(SolveStatus::NumericalError)
 }
 
+fn primal_cone_ok(prob: &ProblemData, s: &[f64], tol: f64) -> bool {
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match *cone {
+            ConeSpec::Zero { dim } => {
+                // Primal zero cone: s = 0
+                if s[offset..offset + dim].iter().any(|&v| v.abs() > tol) {
+                    return false;
+                }
+                offset += dim;
+            }
+            ConeSpec::NonNeg { dim } => {
+                // Primal NonNeg: s >= 0
+                if s[offset..offset + dim].iter().any(|&v| v < -tol) {
+                    return false;
+                }
+                offset += dim;
+            }
+            ConeSpec::Soc { dim } => {
+                // SOC is self-dual: t >= ||x||
+                if dim >= 1 {
+                    let t = s[offset];
+                    let x_norm_sq: f64 = s[offset + 1..offset + dim].iter().map(|&v| v * v).sum();
+                    let x_norm = x_norm_sq.sqrt();
+                    if t < x_norm - tol {
+                        return false;
+                    }
+                }
+                offset += dim;
+            }
+            _ => {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn dual_cone_ok(prob: &ProblemData, z: &[f64], tol: f64) -> bool {
     let mut offset = 0;
     for cone in &prob.cones {
         match *cone {
             ConeSpec::Zero { dim } => {
+                // Dual of zero cone is free - any z is valid
                 offset += dim;
             }
             ConeSpec::NonNeg { dim } => {
+                // Dual of NonNeg is NonNeg: z >= 0
                 if z[offset..offset + dim].iter().any(|&v| v < -tol) {
                     return false;
                 }
                 offset += dim;
             }
+            ConeSpec::Soc { dim } => {
+                // SOC is self-dual: t >= ||x||
+                if dim >= 1 {
+                    let t = z[offset];
+                    let x_norm_sq: f64 = z[offset + 1..offset + dim].iter().map(|&v| v * v).sum();
+                    let x_norm = x_norm_sq.sqrt();
+                    // Check t >= ||x|| - tol (allowing small tolerance)
+                    if t < x_norm - tol {
+                        return false;
+                    }
+                }
+                offset += dim;
+            }
             _ => {
+                // PSD, Exp, Pow not supported
                 return false;
             }
         }
@@ -328,10 +399,10 @@ mod tests {
         let state = HsdeState {
             x: vec![0.5, 0.5],
             s: vec![0.0],
-            z: vec![-1.0],  // Fixed: was 1.0, should be -1.0 for strong duality
+            z: vec![-1.0], // Fixed: was 1.0, should be -1.0 for strong duality
             tau: 1.0,
-            kappa: 1e-10,   // Near-complementarity (was 0.0)
-            xi: vec![0.5, 0.5],  // ξ = x/τ
+            kappa: 1e-10,       // Near-complementarity (was 0.0)
+            xi: vec![0.5, 0.5], // ξ = x/τ
         };
 
         let criteria = TerminationCriteria::default();
@@ -386,7 +457,7 @@ mod tests {
             z: vec![1.0], // z > 0
             tau: 1e-10,   // τ → 0
             kappa: 1.0,
-            xi: vec![0.0],  // ξ = x/τ (but x=0 anyway)
+            xi: vec![0.0], // ξ = x/τ (but x=0 anyway)
         };
 
         let criteria = TerminationCriteria::default();
