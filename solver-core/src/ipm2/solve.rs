@@ -265,7 +265,9 @@ pub fn solve_ipm2(
                 let gap_scale_abs = metrics.obj_p.abs().min(metrics.obj_d.abs()).max(1.0);
                 let gap_ok_abs = metrics.gap <= criteria.tol_gap * gap_scale_abs;
                 let gap_ok = gap_ok_abs || metrics.gap_rel <= criteria.tol_gap_rel;
-                let gap_close = metrics.gap_rel <= criteria.tol_gap_rel * 10.0;
+                // Try polish aggressively when gap is within 1000x of tolerance
+                // (we'll only accept it if the gap actually improves)
+                let gap_close = metrics.gap_rel <= criteria.tol_gap_rel * 1000.0;
 
                 if primal_ok && (gap_ok || gap_close) && !dual_ok && iter >= 10 {
                     // Extract unscaled solution for polish

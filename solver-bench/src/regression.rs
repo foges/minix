@@ -123,7 +123,7 @@ pub fn run_regression_suite(
     let mut results = Vec::new();
 
     // Comprehensive QPS problems (~2 min total)
-    // Excludes: BOYD2 (need >200 iters), LISWET1/10-12 (MaxIter),
+    // Excludes: LISWET1/10-12 (MaxIter),
     // CONT-200+ (too slow), CVXQP*_L (too slow), EXDATA/KSIP (too slow)
     let qps_cases = [
         // Tiny QPs (<5ms) - HS problems
@@ -146,8 +146,8 @@ pub fn run_regression_suite(
         "AUG2D", "AUG2DC", "AUG2DCQP", "AUG2DQP",
         // Very large QPs (<3s)
         "CONT-100", "CONT-101",
-        // BOYD1: dense portfolio QP (~93k vars, converges at ~30 iters with polish)
-        "BOYD1",
+        // BOYD portfolio QPs (~93k vars, converge via early polish)
+        "BOYD1", "BOYD2",
     ];
     for name in qps_cases {
         match load_local_problem(name) {
