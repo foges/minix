@@ -103,6 +103,10 @@ fn print_diagnostics(name: &str, prob: &ProblemData, res: &SolveResult) {
     let gap = (primal_obj - dual_obj).abs();
     let gap_scale = primal_obj.abs().max(dual_obj.abs()).max(1.0);
 
+    let rel_p = rp_inf / primal_scale;
+    let rel_d = rd_inf / dual_scale;
+    let tol_feas = 1e-8;
+
     println!("Diagnostics for {}:", name);
     println!(
         "  r_p_inf={:.3e} (scale {:.3e}), r_d_inf={:.3e} (scale {:.3e})",
@@ -110,9 +114,35 @@ fn print_diagnostics(name: &str, prob: &ProblemData, res: &SolveResult) {
     );
     println!(
         "  rel_p={:.3e}, rel_d={:.3e}",
-        rp_inf / primal_scale,
-        rd_inf / dual_scale
+        rel_p, rel_d
     );
+
+    // Print top violating rows for primal residual
+    let primal_ok = rel_p <= tol_feas;
+    if !primal_ok {
+        println!("  top |r_p| rows (signed):");
+        let mut idxs: Vec<usize> = (0..m).collect();
+        idxs.sort_by(|&i, &j| {
+            r_p[j].abs().partial_cmp(&r_p[i].abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in idxs.iter().take(5.min(m)) {
+            println!("    rp[{:>4}]={:+.3e}", idx, r_p[idx]);
+        }
+    }
+
+    // Print top violating components for dual residual
+    let dual_ok = rel_d <= tol_feas;
+    if !dual_ok {
+        println!("  top |r_d| components (signed):");
+        let mut idxs: Vec<usize> = (0..n).collect();
+        idxs.sort_by(|&i, &j| {
+            r_d[j].abs().partial_cmp(&r_d[i].abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in idxs.iter().take(5.min(n)) {
+            println!("    rd[{:>4}]={:+.3e}", idx, r_d[idx]);
+        }
+    }
+
     println!(
         "  gap={:.3e}, gap_rel={:.3e}, obj_p={:.3e}, obj_d={:.3e}",
         gap,

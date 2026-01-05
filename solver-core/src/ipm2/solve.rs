@@ -98,6 +98,15 @@ pub fn solve_ipm2(
         state.apply_warm_start(warm, &postsolve, &scaling, &cones);
     }
 
+    // In direct mode, fix tau=1 and kappa=0 (no homogeneous embedding)
+    if settings.direct_mode {
+        state.tau = 1.0;
+        state.kappa = 0.0;
+        if diag.enabled || settings.verbose {
+            eprintln!("direct mode: tau=1, kappa=0 (no homogeneous embedding)");
+        }
+    }
+
     // Initialize residuals
     let mut residuals = HsdeResiduals::new(n, m);
     let mut timers = PerfTimers::default();
@@ -194,6 +203,16 @@ pub fn solve_ipm2(
         step_settings.kkt_refine_iters = reg_state.refine_iters;
         step_settings.feas_weight_floor = settings.feas_weight_floor;
         step_settings.sigma_max = settings.sigma_max;
+
+        // σ anti-stall: when primal is stalling (rel_p not improving for several iterations
+        // when μ is already tiny), cap σ to prevent over-centering which preserves the stall
+        if stall.primal_stalling() && mu < 1e-10 {
+            step_settings.sigma_max = step_settings.sigma_max.min(0.5);
+            if diag.should_log(iter) {
+                eprintln!("primal anti-stall: capping sigma_max to 0.5");
+            }
+        }
+
         if matches!(solve_mode, SolveMode::StallRecovery) {
             step_settings.feas_weight_floor = 0.0;
             step_settings.sigma_max = 0.999;
@@ -380,21 +399,41 @@ pub fn solve_ipm2(
             );
         }
 
-        let proposed_mode = stall.update(step_result.alpha, mu, metrics.rel_d, settings.tol_feas);
+        let proposed_mode = stall.update(step_result.alpha, mu, metrics.rel_p, metrics.rel_d, settings.tol_feas);
 
-        // Adaptive refinement: when μ is small and dual residual is stagnating, increase refinement
-        // This helps problems with degenerate dual space converge more reliably.
-        if mu < 1e-6 && metrics.rel_d.is_finite() && prev_rel_d.is_finite() {
-            let improvement = prev_rel_d / metrics.rel_d.max(1e-15);
-            // If dual residual improved by less than 2x and we're still above tolerance, boost refinement
-            if improvement < 2.0 && metrics.rel_d > settings.tol_feas {
+        // Adaptive refinement: when μ is small and residuals are stagnating, increase refinement
+        // This helps problems with degenerate space converge more reliably.
+        if mu < 1e-6 {
+            let mut should_boost = false;
+
+            // Dual stall check
+            if metrics.rel_d.is_finite() && prev_rel_d.is_finite() {
+                let improvement = prev_rel_d / metrics.rel_d.max(1e-15);
+                // If dual residual improved by less than 2x and we're still above tolerance, boost refinement
+                if improvement < 2.0 && metrics.rel_d > settings.tol_feas {
+                    should_boost = true;
+                    if diag.should_log(iter) {
+                        eprintln!("adaptive refinement: dual stall (improvement={:.2}x)", improvement);
+                    }
+                } else if improvement > 10.0 {
+                    // Good progress - can reduce adaptive boost
+                    adaptive_refine_iters = adaptive_refine_iters.saturating_sub(1);
+                }
+            }
+
+            // Primal stall check: if primal is stalling, also boost refinement
+            if stall.primal_stalling() && metrics.rel_p > settings.tol_feas {
+                should_boost = true;
+                if diag.should_log(iter) {
+                    eprintln!("adaptive refinement: primal stall (rel_p={:.3e})", metrics.rel_p);
+                }
+            }
+
+            if should_boost {
                 adaptive_refine_iters = (adaptive_refine_iters + 1).min(reg_policy.max_refine_iters - settings.kkt_refine_iters);
                 if diag.should_log(iter) {
-                    eprintln!("adaptive refinement: boost to {} (improvement={:.2}x)", settings.kkt_refine_iters + adaptive_refine_iters, improvement);
+                    eprintln!("adaptive refinement: boost to {}", settings.kkt_refine_iters + adaptive_refine_iters);
                 }
-            } else if improvement > 10.0 {
-                // Good progress - can reduce adaptive boost
-                adaptive_refine_iters = adaptive_refine_iters.saturating_sub(1);
             }
         }
         prev_rel_d = metrics.rel_d;
