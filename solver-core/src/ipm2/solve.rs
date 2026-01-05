@@ -11,7 +11,7 @@ use crate::ipm::hsde::{HsdeResiduals, HsdeState, compute_mu, compute_residuals};
 use crate::ipm::termination::TerminationCriteria;
 use crate::ipm2::{
     DiagnosticsConfig, IpmWorkspace, PerfSection, PerfTimers, RegularizationPolicy, SolveMode,
-    StallDetector, compute_unscaled_metrics,
+    StallDetector, compute_unscaled_metrics, polish_nonneg_active_set,
 };
 use crate::ipm2::predcorr::predictor_corrector_step_in_place;
 use crate::linalg::kkt::KktSolver;
@@ -98,6 +98,9 @@ pub fn solve_ipm2(
     let mut residuals = HsdeResiduals::new(n, m);
     let mut timers = PerfTimers::default();
     let mut stall = StallDetector::default();
+    // Enter polish earlier on ill-conditioned instances: tie the trigger to the
+    // requested gap tolerance (more robust than an absolute μ threshold).
+    stall.polish_mu_thresh = (settings.tol_gap * 100.0).max(1e-12);
     let mut solve_mode = SolveMode::Normal;
     let mut reg_policy = RegularizationPolicy::default();
     reg_policy.static_reg = settings.static_reg.max(1e-8);
@@ -322,9 +325,119 @@ pub fn solve_ipm2(
     let s_unscaled = scaling.unscale_s(&s_scaled);
     let z_unscaled = scaling.unscale_z(&z_scaled);
 
-    let x = postsolve.recover_x(&x_unscaled);
-    let s = postsolve.recover_s(&s_unscaled, &x);
-    let z = postsolve.recover_z(&z_unscaled);
+    let mut x = postsolve.recover_x(&x_unscaled);
+    let mut s = postsolve.recover_s(&s_unscaled, &x);
+    let mut z = postsolve.recover_z(&z_unscaled);
+
+    // Recompute metrics on the recovered/original problem (with explicit bounds rows).
+    // This makes termination/reporting consistent with what the user sees.
+    let mut rp_orig = vec![0.0; orig_prob_bounds.num_constraints()];
+    let mut rd_orig = vec![0.0; orig_prob_bounds.num_vars()];
+    let mut px_orig = vec![0.0; orig_prob_bounds.num_vars()];
+    let mut final_metrics = compute_unscaled_metrics(
+        &orig_prob_bounds.A,
+        orig_prob_bounds.P.as_ref(),
+        &orig_prob_bounds.q,
+        &orig_prob_bounds.b,
+        &x,
+        &s,
+        &z,
+        &mut rp_orig,
+        &mut rd_orig,
+        &mut px_orig,
+    );
+
+    // Optional active-set polish (Zero + NonNeg only):
+    // If we are essentially optimal in primal + gap but still stuck on dual
+    // feasibility, run a one-shot crossover to recover high-quality multipliers.
+    if status == SolveStatus::MaxIters {
+        let primal_ok = final_metrics.rp_inf <= criteria.tol_feas * final_metrics.primal_scale;
+        let dual_ok = final_metrics.rd_inf <= criteria.tol_feas * final_metrics.dual_scale;
+        let gap_scale_abs = final_metrics.obj_p.abs().min(final_metrics.obj_d.abs()).max(1.0);
+        let gap_ok_abs = final_metrics.gap <= criteria.tol_gap * gap_scale_abs;
+        let gap_ok = gap_ok_abs || final_metrics.gap_rel <= criteria.tol_gap_rel;
+
+        if diag.enabled {
+            eprintln!(
+                "polish check: primal_ok={} dual_ok={} gap_ok={} (gap_ok_abs={}, gap={:.3e} vs limit={:.3e}, gap_rel={:.3e} vs tol={:.3e})",
+                primal_ok, dual_ok, gap_ok, gap_ok_abs,
+                final_metrics.gap, criteria.tol_gap * gap_scale_abs,
+                final_metrics.gap_rel, criteria.tol_gap_rel
+            );
+        }
+
+        if primal_ok && gap_ok && !dual_ok {
+            if diag.enabled {
+                eprintln!("attempting polish...");
+            }
+            if let Some(polished) = polish_nonneg_active_set(
+                &orig_prob_bounds,
+                &x,
+                &s,
+                &z,
+                settings,
+            ) {
+                // Evaluate polished solution before accepting
+                let mut rp_polish = vec![0.0; orig_prob_bounds.num_constraints()];
+                let mut rd_polish = vec![0.0; orig_prob_bounds.num_vars()];
+                let mut px_polish = vec![0.0; orig_prob_bounds.num_vars()];
+                let polish_metrics = compute_unscaled_metrics(
+                    &orig_prob_bounds.A,
+                    orig_prob_bounds.P.as_ref(),
+                    &orig_prob_bounds.q,
+                    &orig_prob_bounds.b,
+                    &polished.x,
+                    &polished.s,
+                    &polished.z,
+                    &mut rp_polish,
+                    &mut rd_polish,
+                    &mut px_polish,
+                );
+
+                if diag.enabled {
+                    eprintln!(
+                        "polish result: rp_inf={:.3e} rd_inf={:.3e} gap={:.3e} gap_rel={:.3e}",
+                        polish_metrics.rp_inf, polish_metrics.rd_inf, polish_metrics.gap, polish_metrics.gap_rel
+                    );
+                }
+
+                // Only accept polish if it's actually an improvement:
+                // - Primal relative residual should not get much worse
+                // - Dual should improve
+                // Compare relative residuals to be scale-independent
+                let primal_rel_before = final_metrics.rel_p;
+                let primal_rel_after = polish_metrics.rel_p;
+                let dual_rel_before = final_metrics.rel_d;
+                let dual_rel_after = polish_metrics.rel_d;
+
+                // Accept if primal stays within tolerance and dual improves significantly
+                let primal_ok_after = primal_rel_after <= criteria.tol_feas * 100.0;  // Allow some slack
+                let dual_improved = dual_rel_after < dual_rel_before * 0.1;  // Need 10x improvement
+
+                if primal_ok_after && dual_improved {
+                    if diag.enabled {
+                        eprintln!("polish: accepted (rel_d: {:.3e} -> {:.3e}, rel_p: {:.3e} -> {:.3e})",
+                            dual_rel_before, dual_rel_after, primal_rel_before, primal_rel_after);
+                    }
+                    x = polished.x;
+                    s = polished.s;
+                    z = polished.z;
+                    final_metrics = polish_metrics;
+
+                    if is_optimal(&final_metrics, &criteria) {
+                        if diag.enabled {
+                            eprintln!("polish: upgraded to Optimal");
+                        }
+                        status = SolveStatus::Optimal;
+                    }
+                } else if diag.enabled {
+                    eprintln!("polish: rejected (primal_ok={} [{:.3e} vs {:.3e}], dual_improved={} [{:.3e} vs {:.3e}])",
+                        primal_ok_after, primal_rel_after, criteria.tol_feas * 100.0,
+                        dual_improved, dual_rel_after, dual_rel_before * 0.1);
+                }
+            }
+        }
+    }
 
     // Compute objective value using ORIGINAL (unscaled) problem data
     let mut obj_val = 0.0;
@@ -350,11 +463,7 @@ pub fn solve_ipm2(
 
     let solve_time_ms = start.elapsed().as_millis() as u64;
 
-    let (primal_res, dual_res, gap) = if let Some(metrics) = last_metrics {
-        (metrics.rel_p, metrics.rel_d, metrics.gap_rel)
-    } else {
-        (0.0, 0.0, 0.0)
-    };
+    let (primal_res, dual_res, gap) = (final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
 
     Ok(SolveResult {
         status,

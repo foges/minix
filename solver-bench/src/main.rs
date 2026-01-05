@@ -27,7 +27,7 @@ enum Commands {
         #[arg(long, default_value = "200")]
         max_iter: usize,
         /// Solver backend to use
-        #[arg(long, value_enum, default_value = "ipm1")]
+        #[arg(long, value_enum, default_value = "ipm2")]
         solver: SolverChoice,
     },
     /// Run Maros-Meszaros QP benchmark suite
@@ -45,7 +45,7 @@ enum Commands {
         #[arg(long)]
         table: bool,
         /// Solver backend to use
-        #[arg(long, value_enum, default_value = "ipm1")]
+        #[arg(long, value_enum, default_value = "ipm2")]
         solver: SolverChoice,
     },
     /// Parse and show info about a QPS file
@@ -62,7 +62,7 @@ enum Commands {
         #[arg(long)]
         require_cache: bool,
         /// Solver backend to use
-        #[arg(long, value_enum, default_value = "ipm1")]
+        #[arg(long, value_enum, default_value = "ipm2")]
         solver: SolverChoice,
         /// Read performance baseline JSON and gate regressions
         #[arg(long)]

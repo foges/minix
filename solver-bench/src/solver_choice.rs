@@ -1,5 +1,6 @@
 use clap::ValueEnum;
-use solver_core::{solve, ProblemData, SolveResult, SolverSettings};
+use solver_core::{ProblemData, SolveResult, SolverSettings};
+use solver_core::ipm::solve_ipm;
 use solver_core::ipm2::solve_ipm2;
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -14,7 +15,7 @@ pub fn solve_with_choice(
     choice: SolverChoice,
 ) -> Result<SolveResult, Box<dyn std::error::Error>> {
     match choice {
-        SolverChoice::Ipm1 => solve(prob, settings),
+        SolverChoice::Ipm1 => solve_ipm(prob, settings),
         SolverChoice::Ipm2 => solve_ipm2(prob, settings),
     }
 }

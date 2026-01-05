@@ -103,5 +103,7 @@ pub fn solve(
     problem: &ProblemData,
     settings: &SolverSettings,
 ) -> Result<SolveResult, Box<dyn std::error::Error>> {
-    ipm::solve_ipm(problem, settings)
+    // ipm2 is the active development track. Keep ipm1 for A/B/regression,
+    // but route the default entry point to ipm2.
+    ipm2::solve_ipm2(problem, settings)
 }
