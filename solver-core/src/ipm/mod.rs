@@ -169,6 +169,7 @@ pub fn solve_ipm(
     let criteria = TerminationCriteria {
         tol_feas: settings.tol_feas,
         tol_gap: settings.tol_gap,
+        tol_gap_rel: settings.tol_gap,  // Use same tolerance for relative gap
         tol_infeas: settings.tol_infeas,
         max_iter: settings.max_iter,
         ..Default::default()
