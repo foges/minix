@@ -26,6 +26,10 @@ fn diagnostics_enabled() -> bool {
     })
 }
 
+fn all_finite(v: &[f64]) -> bool {
+    v.iter().all(|x| x.is_finite())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct NonNegStepDiag {
     min_s: f64,
@@ -561,8 +565,9 @@ fn nt_scaling_nonneg_in_place(s: &[f64], z: &[f64], d: &mut [f64]) -> Result<(),
         return Err(());
     }
 
+    // Clamp to numerically safe range (matches nt_scaling_nonneg in nt.rs)
     for i in 0..s.len() {
-        d[i] = s[i] / z[i];
+        d[i] = (s[i] / z[i]).clamp(1e-18, 1e18);
     }
 
     Ok(())
@@ -998,18 +1003,41 @@ pub fn predictor_corrector_step_in_place(
 
                         ws.d_s_comb[offset..offset + dim].copy_from_slice(d_s_block);
                     } else {
+                        // Fallback: diagonal correction with bounded Mehrotra term
                         for i in offset..offset + dim {
-                            let z_i = state.z[i].max(1e-14);
-                            let w_base = state.s[i] * state.z[i] + ws.ds_aff[i] * ws.dz_aff[i];
-                            ws.d_s_comb[i] = (w_base - target_mu) / z_i;
+                            let s_i = state.s[i];
+                            let z_i = state.z[i];
+                            let mu_i = s_i * z_i;
+                            let z_safe = z_i.max(1e-14);
+
+                            // Bound the Mehrotra correction to prevent numerical blow-up
+                            let ds_dz = ws.ds_aff[i] * ws.dz_aff[i];
+                            let correction_bound = mu_i.abs().max(target_mu * 0.1);
+                            let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
+
+                            let w_base = mu_i + ds_dz_bounded;
+                            ws.d_s_comb[i] = (w_base - target_mu) / z_safe;
                         }
                     }
                 } else {
+                    // Mehrotra correction for NonNeg cone
+                    // Use bounded correction to prevent numerical blow-up near boundaries
                     for i in offset..offset + dim {
-                        let z_i = state.z[i].max(1e-14);
-                        let w_base = state.s[i] * state.z[i] + ws.ds_aff[i] * ws.dz_aff[i];
+                        let s_i = state.s[i];
+                        let z_i = state.z[i];
+                        let mu_i = s_i * z_i;
+                        let z_safe = z_i.max(1e-14);
+
+                        // Mehrotra correction term with bounding
+                        let ds_dz = ws.ds_aff[i] * ws.dz_aff[i];
+                        let correction_bound = mu_i.abs().max(target_mu * 0.1);
+                        let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
+
+                        // MCC delta if present
                         let delta = if is_nonneg && has_mcc { ws.mcc_delta[i] } else { 0.0 };
-                        ws.d_s_comb[i] = (w_base - target_mu - delta) / z_i;
+
+                        let w_base = mu_i + ds_dz_bounded;
+                        ws.d_s_comb[i] = (w_base - target_mu - delta) / z_safe;
                     }
                 }
 
@@ -1319,9 +1347,9 @@ fn compute_step_size(
     fraction: f64,
 ) -> f64 {
     let mut alpha = f64::INFINITY;
-    let mut offset = 0;
+    let mut offset = 0usize;
 
-    for cone in cones {
+    for cone in cones.iter() {
         let dim = cone.dim();
         if dim == 0 {
             continue;
@@ -1332,14 +1360,29 @@ fn compute_step_size(
         let z_slice = &z[offset..offset + dim];
         let dz_slice = &dz[offset..offset + dim];
 
-        let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
-        if alpha_p > 0.0 && alpha_p < alpha {
-            alpha = alpha_p;
+        // Barrier-free cones (e.g., Zero) don't constrain step size.
+        if cone.barrier_degree() == 0 {
+            offset += dim;
+            continue;
         }
 
+        // Non-finite directions -> safest possible step is 0.0.
+        if !all_finite(ds_slice) || !all_finite(dz_slice) {
+            return 0.0;
+        }
+
+        let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
         let alpha_d = cone.step_to_boundary_dual(z_slice, dz_slice);
-        if alpha_d > 0.0 && alpha_d < alpha {
-            alpha = alpha_d;
+
+        if alpha_p.is_finite() {
+            alpha = alpha.min(alpha_p.max(0.0));
+        }
+        if alpha_d.is_finite() {
+            alpha = alpha.min(alpha_d.max(0.0));
+        }
+
+        if alpha == 0.0 {
+            break;
         }
 
         offset += dim;
