@@ -12,14 +12,17 @@ use super::kkt::KktSolver;
 use super::kkt_trait::KktSolverTrait;
 use super::normal_eqns::{NormalEqnsFactor, NormalEqnsSolver};
 use super::sparse::{SparseCsc, SparseSymmetricCsc};
-use crate::linalg::qdldl::QdldlFactorization;
 use crate::problem::ConeSpec;
 use crate::scaling::ScalingBlock;
+
+/// Type alias for the factor type used by the standard KKT solver.
+/// This varies depending on the backend (QDLDL vs SuiteSparse).
+pub type KktSolverFactor = <KktSolver as KktSolverTrait>::Factor;
 
 /// Unified factor token that wraps the underlying solver's factorization.
 pub enum UnifiedFactor {
     /// Factorization from standard augmented KKT solver (sparse LDL)
-    Standard(QdldlFactorization),
+    Standard(KktSolverFactor),
     /// Factorization from normal equations solver (dense Cholesky, stored in solver)
     NormalEqns(NormalEqnsFactor),
 }

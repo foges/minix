@@ -12,6 +12,10 @@ description = "Benchmarking CLI for minix solver"
 name = "solver-bench"
 path = "src/main.rs"
 
+[features]
+default = []
+suitesparse-ldl = ["solver-core/suitesparse-ldl"]
+
 [dependencies]
 solver-core = { path = "../solver-core" }
 clap.workspace = true
