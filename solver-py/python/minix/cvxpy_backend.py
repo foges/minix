@@ -78,6 +78,7 @@ class MINIX(ConicSolver):
     # Solver capabilities
     MIP_CAPABLE = False
     SUPPORTED_CONSTRAINTS = [Zero, NonNeg, SOC, PSD, ExpCone]  # PSD, EXP now supported
+    EXP_CONE_ORDER = [0, 1, 2]  # Standard exp cone ordering: (x, y, z) where y*exp(x/y) <= z
 
     def name(self) -> str:
         """Return the solver name."""
