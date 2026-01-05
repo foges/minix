@@ -150,6 +150,10 @@ pub fn solve_ipm2(
     let mut consecutive_failures = 0;
     const MAX_CONSECUTIVE_FAILURES: usize = 3;
 
+    // Adaptive refinement: track previous dual residual to detect stagnation
+    let mut prev_rel_d: f64 = f64::INFINITY;
+    let mut adaptive_refine_iters: usize = 0;
+
     let start = Instant::now();
     let mut early_polish_result: Option<(crate::ipm2::polish::PolishResult, crate::ipm2::UnscaledMetrics)> = None;
     // Use fixed regularization (like ipm1) instead of scaling-dependent regularization.
@@ -165,7 +169,8 @@ pub fn solve_ipm2(
         reg_state.static_reg_eff = reg_policy
             .effective_static_reg(reg_scale)
             .max(kkt.static_reg());
-        reg_state.refine_iters = settings.kkt_refine_iters;
+        // Base refinement from settings, plus adaptive boost for stagnation
+        reg_state.refine_iters = settings.kkt_refine_iters + adaptive_refine_iters;
         match solve_mode {
             SolveMode::Normal => {}
             SolveMode::StallRecovery => {
@@ -376,6 +381,24 @@ pub fn solve_ipm2(
         }
 
         let proposed_mode = stall.update(step_result.alpha, mu, metrics.rel_d, settings.tol_feas);
+
+        // Adaptive refinement: when μ is small and dual residual is stagnating, increase refinement
+        // This helps problems with degenerate dual space converge more reliably.
+        if mu < 1e-6 && metrics.rel_d.is_finite() && prev_rel_d.is_finite() {
+            let improvement = prev_rel_d / metrics.rel_d.max(1e-15);
+            // If dual residual improved by less than 2x and we're still above tolerance, boost refinement
+            if improvement < 2.0 && metrics.rel_d > settings.tol_feas {
+                adaptive_refine_iters = (adaptive_refine_iters + 1).min(reg_policy.max_refine_iters - settings.kkt_refine_iters);
+                if diag.should_log(iter) {
+                    eprintln!("adaptive refinement: boost to {} (improvement={:.2}x)", settings.kkt_refine_iters + adaptive_refine_iters, improvement);
+                }
+            } else if improvement > 10.0 {
+                // Good progress - can reduce adaptive boost
+                adaptive_refine_iters = adaptive_refine_iters.saturating_sub(1);
+            }
+        }
+        prev_rel_d = metrics.rel_d;
+
         let next_mode = if matches!(solve_mode, SolveMode::Polish) {
             SolveMode::Polish
         } else {
