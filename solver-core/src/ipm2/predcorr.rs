@@ -895,6 +895,7 @@ pub fn predictor_corrector_step_in_place(
         dkappa_aff,
         alpha_aff,
         barrier_degree,
+        cones,
     );
     let sigma_cap = settings.sigma_max.min(0.999);
     let sigma = compute_centering_parameter(alpha_aff, mu, mu_aff, barrier_degree).min(sigma_cap);
@@ -1351,6 +1352,11 @@ fn compute_step_size(
     }
 }
 
+/// Compute μ_aff = (s_aff · z_aff + τ_aff κ_aff) / (ν + 1) after affine step.
+///
+/// IMPORTANT: Only cones with barrier_degree > 0 (NonNeg, SOC) contribute.
+/// Zero cones (equalities) must be excluded or they can pollute μ_aff
+/// with large residual values, causing σ to saturate incorrectly.
 fn compute_mu_aff(
     state: &HsdeState,
     ds_aff: &[f64],
@@ -1359,6 +1365,7 @@ fn compute_mu_aff(
     dkappa_aff: f64,
     alpha_aff: f64,
     barrier_degree: usize,
+    cones: &[Box<dyn ConeKernel>],
 ) -> f64 {
     if barrier_degree == 0 {
         return 0.0;
@@ -1370,11 +1377,24 @@ fn compute_mu_aff(
         return f64::NAN;
     }
 
+    // Iterate by cone blocks, only including cones with barrier_degree > 0
     let mut s_dot_z = 0.0;
-    for i in 0..state.s.len() {
-        let s_i = state.s[i] + alpha_aff * ds_aff[i];
-        let z_i = state.z[i] + alpha_aff * dz_aff[i];
-        s_dot_z += s_i * z_i;
+    let mut offset = 0;
+    for cone in cones {
+        let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+
+        // Skip Zero cones (barrier_degree == 0) - they shouldn't contribute
+        if cone.barrier_degree() > 0 {
+            for i in offset..offset + dim {
+                let s_i = state.s[i] + alpha_aff * ds_aff[i];
+                let z_i = state.z[i] + alpha_aff * dz_aff[i];
+                s_dot_z += s_i * z_i;
+            }
+        }
+        offset += dim;
     }
 
     (s_dot_z + tau_aff * kappa_aff) / (barrier_degree as f64 + 1.0)
