@@ -981,23 +981,44 @@ pub fn predictor_corrector_step(
 
                         d_s_comb[offset..offset + dim].copy_from_slice(&d_s_block);
                     } else {
-                        // Fallback: use diagonal correction if scaling block isn't SOC
+                        // Fallback: diagonal correction with bounded Mehrotra term
                         for i in offset..offset + dim {
-                            let z_i = state.z[i].max(1e-14);
-                            let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
-                            d_s_comb[i] = (w_base - target_mu) / z_i;
+                            let s_i = state.s[i];
+                            let z_i = state.z[i];
+                            let mu_i = s_i * z_i;
+                            let z_safe = z_i.max(1e-14);
+
+                            let ds_dz = ds_aff[i] * dz_aff[i];
+                            let correction_bound = mu_i.abs().max(target_mu * 0.1);
+                            let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
+
+                            let w_base = mu_i + ds_dz_bounded;
+                            d_s_comb[i] = (w_base - target_mu) / z_safe;
                         }
                     }
                 } else {
+                    // Mehrotra correction for NonNeg cone
+                    // Use bounded correction to prevent numerical blow-up near boundaries
                     for i in offset..offset + dim {
-                        let z_i = state.z[i].max(1e-14);
-                        let w_base = state.s[i] * state.z[i] + ds_aff[i] * dz_aff[i];
+                        let s_i = state.s[i];
+                        let z_i = state.z[i];
+                        let mu_i = s_i * z_i;
+                        let z_safe = z_i.max(1e-14);
+
+                        // Mehrotra correction term with bounding
+                        let ds_dz = ds_aff[i] * dz_aff[i];
+                        let correction_bound = mu_i.abs().max(target_mu * 0.1);
+                        let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
+
+                        // MCC delta if present
                         let delta = if is_nonneg {
                             mcc_delta.as_ref().map_or(0.0, |d| d[i])
                         } else {
                             0.0
                         };
-                        d_s_comb[i] = (w_base - target_mu - delta) / z_i;
+
+                        let w_base = mu_i + ds_dz_bounded;
+                        d_s_comb[i] = (w_base - target_mu - delta) / z_safe;
                     }
                 }
 
