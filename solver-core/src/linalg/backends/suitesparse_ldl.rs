@@ -17,20 +17,28 @@ impl SuiteSparseLdlBackend {
         }
 
         let mut mat_reg = mat.clone();
+
+        // First, collect diagonal positions from immutable view
         let indptr = mat_reg.indptr();
         let col_ptr = indptr.raw_storage();
         let row_idx = mat_reg.indices();
-        let data = mat_reg.data_mut();
 
+        let mut diag_positions = Vec::with_capacity(self.n);
         for col in 0..self.n {
             let start = col_ptr[col];
             let end = col_ptr[col + 1];
             for idx in start..end {
                 if row_idx[idx] == col {
-                    data[idx] += self.static_reg;
+                    diag_positions.push(idx);
                     break;
                 }
             }
+        }
+
+        // Now mutate data
+        let data = mat_reg.data_mut();
+        for &idx in &diag_positions {
+            data[idx] += self.static_reg;
         }
 
         mat_reg
@@ -99,7 +107,8 @@ impl KktBackend for SuiteSparseLdlBackend {
 
     fn solve(&self, _factor: &Self::Factorization, rhs: &[f64], sol: &mut [f64]) {
         if let Some(numeric) = self.numeric.as_ref() {
-            let x = numeric.solve(rhs);
+            let rhs_vec: Vec<f64> = rhs.to_vec();
+            let x = numeric.solve(&rhs_vec);
             sol.copy_from_slice(&x);
         } else {
             sol.copy_from_slice(rhs);
