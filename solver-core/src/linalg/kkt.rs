@@ -680,7 +680,6 @@ impl ReducedScaling {
 
 struct SingletonElim {
     kept_rows: Vec<usize>,
-    row_map: Vec<Option<usize>>,
     singletons: Vec<SingletonRowInfo>,
     inv_h: Vec<f64>,
     diag_update_cols: Vec<usize>,
@@ -784,7 +783,6 @@ impl SingletonElim {
 
         Some(Self {
             kept_rows,
-            row_map,
             singletons,
             inv_h: vec![0.0; singleton_len],
             diag_update_cols,
@@ -890,6 +888,17 @@ impl<B: KktBackend> KktSolverImpl<B> {
         h_blocks: &[ScalingBlock],
     ) -> Self {
         let singleton = SingletonElim::build(a, h_blocks);
+        if let Some(ref se) = singleton {
+            if std::env::var("MINIX_DIAGNOSTICS").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "kkt presolve: singleton elimination enabled: m_full={} m_reduced={} eliminated={} diag_update_cols={}",
+                    m,
+                    se.kept_rows.len(),
+                    se.singletons.len(),
+                    se.diag_update_cols.len()
+                );
+            }
+        }
         if let Some(singleton) = singleton {
             let m_reduced = singleton.kept_rows.len();
             Self::new_internal(
