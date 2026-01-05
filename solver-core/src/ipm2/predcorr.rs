@@ -13,7 +13,8 @@ use crate::cones::{ConeKernel, NonNegCone, SocCone, ExpCone, PowCone, PsdCone};
 use crate::ipm::hsde::{compute_mu, HsdeResiduals, HsdeState};
 use crate::ipm2::{IpmWorkspace, PerfSection, PerfTimers};
 use crate::ipm2::workspace::SocScratch;
-use crate::linalg::kkt::KktSolver;
+use crate::linalg::kkt_trait::KktSolverTrait;
+use crate::linalg::unified_kkt::UnifiedKktSolver;
 use crate::problem::{ProblemData, SolverSettings};
 use crate::scaling::{ScalingBlock, nt, bfgs};
 
@@ -607,7 +608,7 @@ fn nt_scaling_soc_in_place(
 
 /// Allocation-free predictor-corrector step using workspace buffers.
 pub fn predictor_corrector_step_in_place(
-    kkt: &mut KktSolver,
+    kkt: &mut UnifiedKktSolver,
     prob: &ProblemData,
     neg_q: &[f64],
     state: &mut HsdeState,

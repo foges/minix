@@ -18,6 +18,7 @@
 //! for efficient predictor-corrector steps.
 
 use super::backend::{BackendError, KktBackend, QdldlBackend};
+use super::kkt_trait::KktSolverTrait;
 use super::sparse::{SparseCsc, SparseSymmetricCsc};
 use crate::scaling::ScalingBlock;
 use crate::scaling::nt::jordan_product_apply;
@@ -1846,6 +1847,82 @@ impl<B: KktBackend> KktSolverImpl<B> {
     /// Get the number of dynamic regularization bumps from the last factorization.
     pub fn dynamic_bumps(&self) -> u64 {
         self.backend.dynamic_bumps()
+    }
+}
+
+impl<B: KktBackend> KktSolverTrait for KktSolverImpl<B> {
+    type Factor = B::Factorization;
+
+    fn initialize(
+        &mut self,
+        p: Option<&SparseSymmetricCsc>,
+        a: &SparseCsc,
+        h_blocks: &[ScalingBlock],
+    ) -> Result<(), BackendError> {
+        KktSolverImpl::initialize(self, p, a, h_blocks)
+    }
+
+    fn update_numeric(
+        &mut self,
+        p: Option<&SparseSymmetricCsc>,
+        a: &SparseCsc,
+        h_blocks: &[ScalingBlock],
+    ) -> Result<(), BackendError> {
+        KktSolverImpl::update_numeric(self, p, a, h_blocks)
+    }
+
+    fn factorize(&mut self) -> Result<Self::Factor, BackendError> {
+        KktSolverImpl::factorize(self)
+    }
+
+    fn solve_refined(
+        &mut self,
+        factor: &Self::Factor,
+        rhs_x: &[f64],
+        rhs_z: &[f64],
+        sol_x: &mut [f64],
+        sol_z: &mut [f64],
+        refine_iters: usize,
+    ) {
+        KktSolverImpl::solve_refined(self, factor, rhs_x, rhs_z, sol_x, sol_z, refine_iters)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_two_rhs_refined_tagged(
+        &mut self,
+        factor: &Self::Factor,
+        rhs_x1: &[f64],
+        rhs_z1: &[f64],
+        rhs_x2: &[f64],
+        rhs_z2: &[f64],
+        sol_x1: &mut [f64],
+        sol_z1: &mut [f64],
+        sol_x2: &mut [f64],
+        sol_z2: &mut [f64],
+        refine_iters: usize,
+        tag1: &'static str,
+        tag2: &'static str,
+    ) {
+        KktSolverImpl::solve_two_rhs_refined_tagged(
+            self, factor, rhs_x1, rhs_z1, rhs_x2, rhs_z2,
+            sol_x1, sol_z1, sol_x2, sol_z2, refine_iters, tag1, tag2,
+        )
+    }
+
+    fn static_reg(&self) -> f64 {
+        KktSolverImpl::static_reg(self)
+    }
+
+    fn set_static_reg(&mut self, reg: f64) -> Result<(), BackendError> {
+        KktSolverImpl::set_static_reg(self, reg)
+    }
+
+    fn bump_static_reg(&mut self, min_reg: f64) -> Result<bool, BackendError> {
+        KktSolverImpl::bump_static_reg(self, min_reg)
+    }
+
+    fn dynamic_bumps(&self) -> u64 {
+        KktSolverImpl::dynamic_bumps(self)
     }
 }
 

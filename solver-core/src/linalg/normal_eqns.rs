@@ -19,8 +19,17 @@
 //!
 //! For KSIP with n=20, m=1000, this reduces from 1020×1020 to 20×20.
 
+use super::backend::BackendError;
+use super::kkt_trait::KktSolverTrait;
 use super::sparse::{SparseCsc, SparseSymmetricCsc};
+use crate::scaling::ScalingBlock;
 use nalgebra::{DMatrix, DVector, Cholesky};
+
+/// Marker type for normal equations factorization.
+///
+/// The actual Cholesky factor is stored inside the solver.
+#[derive(Debug, Clone)]
+pub struct NormalEqnsFactor;
 
 /// Normal equations KKT solver for tall problems.
 pub struct NormalEqnsSolver {
@@ -39,6 +48,9 @@ pub struct NormalEqnsSolver {
 
     /// Cached A as dense matrix
     a_dense: DMatrix<f64>,
+
+    /// Cached H diagonal values from last update_numeric
+    h_diag: Vec<f64>,
 
     /// Workspace for H^{-1} * v
     h_inv_work: Vec<f64>,
@@ -103,6 +115,7 @@ impl NormalEqnsSolver {
             schur,
             at_dense,
             a_dense,
+            h_diag: vec![0.0; m],
             h_inv_work: vec![0.0; m],
             at_v: DVector::zeros(n),
             a_v: DVector::zeros(m),
@@ -110,23 +123,31 @@ impl NormalEqnsSolver {
         }
     }
 
-    /// Check if normal equations are beneficial for these dimensions.
-    pub fn should_use(n: usize, m: usize) -> bool {
-        // Use normal equations when m > 5*n and n is small enough for dense ops
-        m > 5 * n && n <= 500
+    /// Extract H diagonal from scaling blocks.
+    fn extract_h_diag(h_blocks: &[ScalingBlock], h_diag: &mut [f64]) {
+        let mut offset = 0;
+        for block in h_blocks {
+            match block {
+                ScalingBlock::Zero { dim } => {
+                    for i in 0..*dim {
+                        h_diag[offset + i] = 0.0;
+                    }
+                    offset += dim;
+                }
+                ScalingBlock::Diagonal { d } => {
+                    h_diag[offset..offset + d.len()].copy_from_slice(d);
+                    offset += d.len();
+                }
+                _ => panic!("Normal equations only support Zero and Diagonal (NonNeg) cones"),
+            }
+        }
     }
 
-    /// Update H^{-1} diagonal and refactorize.
-    ///
-    /// `h_diag` contains the diagonal of H (scaling block values).
-    /// For Zero cone: h_diag[i] = 0 (will be treated as large, making H^{-1} ≈ 0)
-    /// For NonNeg cone: h_diag[i] = s[i]/z[i] (the NT scaling)
-    pub fn update_and_factor(&mut self, h_diag: &[f64]) -> Result<(), String> {
-        assert_eq!(h_diag.len(), self.m);
-
+    /// Build the Schur complement matrix from current h_diag.
+    fn build_schur(&mut self) {
         // Compute H^{-1} diagonal (with regularization)
         for i in 0..self.m {
-            let h_val = h_diag[i] + self.static_reg;
+            let h_val = self.h_diag[i] + self.static_reg;
             self.h_inv_work[i] = if h_val.abs() > 1e-14 {
                 1.0 / h_val
             } else {
@@ -153,6 +174,23 @@ impl NormalEqnsSolver {
                 }
             }
         }
+    }
+
+    /// Check if normal equations are beneficial for these dimensions.
+    pub fn should_use(n: usize, m: usize) -> bool {
+        // Use normal equations when m > 5*n and n is small enough for dense ops
+        m > 5 * n && n <= 500
+    }
+
+    /// Update H^{-1} diagonal and refactorize.
+    ///
+    /// `h_diag` contains the diagonal of H (scaling block values).
+    /// For Zero cone: h_diag[i] = 0 (will be treated as large, making H^{-1} ≈ 0)
+    /// For NonNeg cone: h_diag[i] = s[i]/z[i] (the NT scaling)
+    pub fn update_and_factor(&mut self, h_diag: &[f64]) -> Result<(), String> {
+        assert_eq!(h_diag.len(), self.m);
+        self.h_diag.copy_from_slice(h_diag);
+        self.build_schur();
 
         // Cholesky factorization
         self.chol = Cholesky::new(self.schur.clone());
@@ -164,6 +202,21 @@ impl NormalEqnsSolver {
         Ok(())
     }
 
+    /// Get current static regularization.
+    pub fn static_reg(&self) -> f64 {
+        self.static_reg
+    }
+
+    /// Set static regularization (requires rebuilding P diagonal).
+    pub fn set_static_reg(&mut self, reg: f64) {
+        // Adjust P diagonal: remove old reg, add new
+        let diff = reg - self.static_reg;
+        for i in 0..self.n {
+            self.p_dense[(i, i)] += diff;
+        }
+        self.static_reg = reg;
+    }
+
     /// Solve the system given RHS vectors.
     ///
     /// Solves:
@@ -173,7 +226,6 @@ impl NormalEqnsSolver {
     /// ```
     pub fn solve(
         &mut self,
-        h_diag: &[f64],
         rhs_x: &[f64],
         rhs_z: &[f64],
         sol_x: &mut [f64],
@@ -183,7 +235,7 @@ impl NormalEqnsSolver {
 
         // Compute H^{-1} * rhs_z
         for i in 0..self.m {
-            let h_val = h_diag[i] + self.static_reg;
+            let h_val = self.h_diag[i] + self.static_reg;
             self.h_inv_work[i] = if h_val.abs() > 1e-14 {
                 rhs_z[i] / h_val
             } else {
@@ -212,13 +264,125 @@ impl NormalEqnsSolver {
         self.a_v = &self.a_dense * &dx;
 
         for i in 0..self.m {
-            let h_val = h_diag[i] + self.static_reg;
+            let h_val = self.h_diag[i] + self.static_reg;
             sol_z[i] = if h_val.abs() > 1e-14 {
                 (rhs_z[i] + self.a_v[i]) / h_val
             } else {
                 0.0
             };
         }
+    }
+
+    /// Solve with old API that takes h_diag parameter (for backward compatibility).
+    #[allow(dead_code)]
+    pub fn solve_with_h_diag(
+        &mut self,
+        h_diag: &[f64],
+        rhs_x: &[f64],
+        rhs_z: &[f64],
+        sol_x: &mut [f64],
+        sol_z: &mut [f64],
+    ) {
+        self.h_diag.copy_from_slice(h_diag);
+        self.solve(rhs_x, rhs_z, sol_x, sol_z);
+    }
+}
+
+impl KktSolverTrait for NormalEqnsSolver {
+    type Factor = NormalEqnsFactor;
+
+    fn initialize(
+        &mut self,
+        _p: Option<&SparseSymmetricCsc>,
+        _a: &SparseCsc,
+        _h_blocks: &[ScalingBlock],
+    ) -> Result<(), BackendError> {
+        // For normal equations, initialization is done in the constructor.
+        // The sparsity pattern is converted to dense at construction time.
+        Ok(())
+    }
+
+    fn update_numeric(
+        &mut self,
+        _p: Option<&SparseSymmetricCsc>,
+        _a: &SparseCsc,
+        h_blocks: &[ScalingBlock],
+    ) -> Result<(), BackendError> {
+        // Extract h_diag from scaling blocks
+        Self::extract_h_diag(h_blocks, &mut self.h_diag);
+        // Build the Schur complement matrix
+        self.build_schur();
+        Ok(())
+    }
+
+    fn factorize(&mut self) -> Result<Self::Factor, BackendError> {
+        // Cholesky factorization
+        self.chol = Cholesky::new(self.schur.clone());
+
+        if self.chol.is_none() {
+            return Err(BackendError::Message(
+                "Normal equations Cholesky factorization failed".to_string(),
+            ));
+        }
+
+        Ok(NormalEqnsFactor)
+    }
+
+    fn solve_refined(
+        &mut self,
+        _factor: &Self::Factor,
+        rhs_x: &[f64],
+        rhs_z: &[f64],
+        sol_x: &mut [f64],
+        sol_z: &mut [f64],
+        _refine_iters: usize,
+    ) {
+        // For dense Cholesky, refinement is not typically needed
+        // (the factorization is quite stable).
+        self.solve(rhs_x, rhs_z, sol_x, sol_z);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_two_rhs_refined_tagged(
+        &mut self,
+        _factor: &Self::Factor,
+        rhs_x1: &[f64],
+        rhs_z1: &[f64],
+        rhs_x2: &[f64],
+        rhs_z2: &[f64],
+        sol_x1: &mut [f64],
+        sol_z1: &mut [f64],
+        sol_x2: &mut [f64],
+        sol_z2: &mut [f64],
+        _refine_iters: usize,
+        _tag1: &'static str,
+        _tag2: &'static str,
+    ) {
+        // For dense systems, just call solve twice - dense ops are fast
+        self.solve(rhs_x1, rhs_z1, sol_x1, sol_z1);
+        self.solve(rhs_x2, rhs_z2, sol_x2, sol_z2);
+    }
+
+    fn static_reg(&self) -> f64 {
+        self.static_reg
+    }
+
+    fn set_static_reg(&mut self, reg: f64) -> Result<(), BackendError> {
+        NormalEqnsSolver::set_static_reg(self, reg);
+        Ok(())
+    }
+
+    fn bump_static_reg(&mut self, min_reg: f64) -> Result<bool, BackendError> {
+        if min_reg > self.static_reg {
+            NormalEqnsSolver::set_static_reg(self, min_reg);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn dynamic_bumps(&self) -> u64 {
+        // Dense Cholesky doesn't need dynamic regularization bumps
+        0
     }
 }
 
@@ -254,7 +418,7 @@ mod tests {
         let mut sol_x = vec![0.0; n];
         let mut sol_z = vec![0.0; m];
 
-        solver.solve(&h_diag, &rhs_x, &rhs_z, &mut sol_x, &mut sol_z);
+        solver.solve(&rhs_x, &rhs_z, &mut sol_x, &mut sol_z);
 
         // Verify solution satisfies the original KKT system approximately
         // [εI    A^T] [dx]   [rhs_x]

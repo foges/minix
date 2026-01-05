@@ -75,7 +75,7 @@ fn normal_eqns_step(
     let mut rhs_z: Vec<f64> = (0..m).map(|i| state.s[i] - residuals.r_z[i]).collect();
 
     // Solve affine direction
-    solver.solve(h_diag, &rhs_x, &rhs_z, dx_aff, dz_aff);
+    solver.solve(&rhs_x, &rhs_z, dx_aff, dz_aff);
 
     // Compute ds_aff = -s - H * dz_aff for NonNeg cones
     offset = 0;
@@ -167,7 +167,7 @@ fn normal_eqns_step(
     }
 
     // Solve combined direction
-    solver.solve(h_diag, &rhs_x, &rhs_z, dx, dz);
+    solver.solve(&rhs_x, &rhs_z, dx, dz);
 
     // Compute ds from dz
     offset = 0;

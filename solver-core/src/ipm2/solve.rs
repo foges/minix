@@ -14,8 +14,8 @@ use crate::ipm2::{
     StallDetector, compute_unscaled_metrics, polish_nonneg_active_set,
 };
 use crate::ipm2::predcorr::predictor_corrector_step_in_place;
-use crate::linalg::kkt::KktSolver;
-use crate::linalg::unified_kkt::should_use_normal_equations;
+use crate::linalg::kkt_trait::KktSolverTrait;
+use crate::linalg::unified_kkt::UnifiedKktSolver;
 use crate::presolve::apply_presolve;
 use crate::presolve::ruiz::equilibrate;
 use crate::presolve::singleton::detect_singleton_rows;
@@ -67,25 +67,8 @@ pub fn solve_ipm2(
         integrality: prob.integrality.clone(),
     };
 
-    // Check if normal equations fast path should be used
-    // Currently disabled by default as it needs more testing. Enable with MINIX_NORMAL_EQNS=1
-    let use_normal_eqns = std::env::var("MINIX_NORMAL_EQNS")
-        .map(|v| v != "0")
-        .unwrap_or(false);
-    if use_normal_eqns && should_use_normal_equations(n, m, &scaled_prob.cones) {
-        eprintln!(
-            "Using normal equations solver (n={}, m={}, ratio={:.1}x)",
-            n, m, m as f64 / n as f64
-        );
-        return crate::ipm2::solve_normal::solve_normal_equations(
-            &orig_prob,
-            &scaled_prob,
-            settings,
-            &postsolve,
-            &scaling,
-            &orig_prob_bounds,
-        );
-    }
+    // Normal equations are now automatically used by UnifiedKktSolver
+    // when appropriate (m > 5n, n <= 500, Zero+NonNeg cones only).
 
     // ipm2 scaffolding
     let diag = DiagnosticsConfig::from_env();
@@ -132,13 +115,15 @@ pub fn solve_ipm2(
     let mut ws = IpmWorkspace::new(n, m, orig_n, orig_m);
     ws.init_cones(&cones);
 
-    let mut kkt = KktSolver::new_with_singleton_elimination(
+    let mut kkt = UnifiedKktSolver::new(
         n,
         m,
         reg_state.static_reg_eff,
         reg_policy.dynamic_min_pivot,
+        scaled_prob.P.as_ref(),
         &scaled_prob.A,
         &ws.scaling,
+        &scaled_prob.cones,
     );
 
     // Perform symbolic factorization once with initial scaling structure.
