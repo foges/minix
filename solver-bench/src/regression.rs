@@ -122,30 +122,43 @@ pub fn run_regression_suite(
 ) -> Vec<RegressionResult> {
     let mut results = Vec::new();
 
-    // Comprehensive QPS problems (~2 min total)
-    // Excludes: LISWET1/10-12 (MaxIter),
-    // CONT-200+ (too slow), CVXQP*_L (too slow), EXDATA/KSIP (too slow)
+    // Comprehensive QPS problems
+    // Excludes: LISWET1/7-12 (MaxIter), STCQP1/2/YAO (MaxIter),
+    // CONT-200+ (too slow), CVXQP*_L (too slow), EXDATA/KSIP (too slow),
+    // QSHIP* (MaxIter), Q* with NumericalError
     let qps_cases = [
-        // Tiny QPs (<5ms) - HS problems
+        // Tiny QPs (<1ms) - HS problems
         "HS21", "HS35", "HS35MOD", "HS51", "HS52", "HS53", "HS76", "HS118", "HS268",
+        // Tiny QPs (<1ms) - Other small
+        "TAME", "S268", "ZECEVIC2", "LOTSCHD", "QAFIRO",
         // Tiny QPs (<5ms) - CVXQP small
         "CVXQP1_S", "CVXQP2_S", "CVXQP3_S",
         // Tiny QPs (<10ms) - DUAL problems
         "DUAL1", "DUAL2", "DUAL3", "DUAL4",
         "DUALC1", "DUALC2", "DUALC5", "DUALC8",
+        // Tiny QPs (<10ms) - PRIMALC problems
+        "PRIMALC1", "PRIMALC2", "PRIMALC5", "PRIMALC8",
         // Tiny QPs (<10ms) - Other
-        "DPKLO1", "GOULDQP2", "GOULDQP3",
+        "DPKLO1", "GOULDQP2", "GOULDQP3", "VALUES",
+        "QPCBLEND", "QRECIPE", "QSHARE2B", "QPCBOEI2",
+        "QSCSD1", "QSCTAP1", "QSTANDAT",
         // Small QPs (<50ms)
         "AUG3D", "AUG3DC", "AUG3DCQP", "AUG3DQP",
         "DTOC3", "HUESTIS", "LASER",
+        "MOSARQP1", "MOSARQP2", "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4",
+        "HUES-MOD", "STADAT1", "QGROW7",
+        "QISRAEL", "QPCSTAIR", "QSEBA", "QSCSD6", "QSCTAP2", "QSCTAP3",
+        "QSIERRA",
         // Medium QPs (<150ms)
         "CVXQP1_M", "CVXQP2_M", "CVXQP3_M",
         "LISWET2", "LISWET3", "LISWET4", "LISWET5",
         "CONT-050",
-        // Large QPs (<250ms)
+        "STADAT2", "STADAT3", "QSTAIR", "QSCSD8",
+        // Large QPs (<500ms)
         "AUG2D", "AUG2DC", "AUG2DCQP", "AUG2DQP",
+        "UBH1", "QETAMACR", "LISWET6", "QGROW15", "QSHELL",
         // Very large QPs (<3s)
-        "CONT-100", "CONT-101",
+        "CONT-100", "CONT-101", "QGROW22",
         // BOYD portfolio QPs (~93k vars, converge via early polish)
         "BOYD1", "BOYD2",
     ];
