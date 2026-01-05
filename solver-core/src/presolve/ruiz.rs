@@ -17,6 +17,20 @@ use crate::linalg::sparse::{SparseCsc, SparseSymmetricCsc};
 use crate::problem::ConeSpec;
 use sprs::TriMat;
 
+const RUIZ_MIN_SCALING: f64 = 1e-4;
+const RUIZ_MAX_SCALING: f64 = 1e4;
+
+fn inv_sqrt_clamped(norm: f64) -> f64 {
+    if norm <= 0.0 || !norm.is_finite() {
+        return 1.0;
+    }
+    let s = 1.0 / norm.sqrt();
+    if !s.is_finite() {
+        return 1.0;
+    }
+    s.clamp(RUIZ_MIN_SCALING, RUIZ_MAX_SCALING)
+}
+
 /// Result of Ruiz equilibration containing scaled problem data and scaling factors.
 #[derive(Clone)]
 pub struct RuizScaling {
@@ -140,12 +154,12 @@ pub fn equilibrate(
             }
         }
 
-        // Compute scaling factors: d = 1/sqrt(norm), avoiding division by zero
+        // Compute scaling factors: d = 1/sqrt(norm), with clamping for stability
         let mut d_row: Vec<f64> = row_norms.iter()
-            .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
+            .map(|&norm| inv_sqrt_clamped(norm))
             .collect();
         let d_col: Vec<f64> = col_norms.iter()
-            .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
+            .map(|&norm| inv_sqrt_clamped(norm))
             .collect();
 
         // For non-separable cones (SOC/PSD/EXP/POW), enforce uniform row scaling
@@ -180,7 +194,7 @@ pub fn equilibrate(
                     for i in offset..offset + dim {
                         block_norm = block_norm.max(row_norms[i]);
                     }
-                    let block_scale = if block_norm > 1e-12 { 1.0 / block_norm.sqrt() } else { 1.0 };
+                    let block_scale = inv_sqrt_clamped(block_norm);
                     for i in offset..offset + dim {
                         d_row[i] = block_scale;
                     }
