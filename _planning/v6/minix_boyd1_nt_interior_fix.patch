@@ -1,0 +1,82 @@
+diff --git a/solver-core/src/cones/nonneg.rs b/solver-core/src/cones/nonneg.rs
+index 0000000..0000000 100644
+--- a/solver-core/src/cones/nonneg.rs
++++ b/solver-core/src/cones/nonneg.rs
+@@ -26,8 +26,17 @@ pub struct NonNegCone {
+ impl NonNegCone {
+     /// Create a new nonnegative cone of the given dimension.
+     pub fn new(dim: usize) -> Self {
+         assert!(dim > 0, "NonNeg cone must have positive dimension");
+         Self { dim }
+     }
+
+-    /// Interior tolerance: s_i > tol * max(1, ||s||_∞)
+-    const INTERIOR_TOL: f64 = 1e-12;
++    /// Interior tolerance for strict positivity checks.
++    ///
++    /// IMPORTANT: this must be **absolute**, not relative to ||s||_∞.
++    /// A relative threshold (e.g. 1e-12 * ||s||_∞) causes false "not interior"
++    /// when s/z has large dynamic range (common on large bound‑heavy QPs like BOYD1),
++    /// which in turn triggers NT-scaling fallback and can destabilize the IPM.
++    ///
++    /// 1e-300 is safely above f64 subnormal underflow while still treating all
++    /// practical positive values as interior.
++    const INTERIOR_TOL: f64 = 1e-300;
+ }
+
+ impl ConeKernel for NonNegCone {
+@@ -41,20 +50,14 @@ impl ConeKernel for NonNegCone {
+     fn is_interior_primal(&self, s: &[f64]) -> bool {
+         assert_eq!(s.len(), self.dim);
+
+-        // Check for NaN
+-        if s.iter().any(|&x| x.is_nan()) {
+-            return false;
+-        }
+-
+-        // Compute tolerance relative to ||s||_∞
+-        let s_max = s.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+-        let tol = Self::INTERIOR_TOL * s_max.max(1.0);
+-
+-        // All components must be > tol
+-        s.iter().all(|&x| x > tol)
++        // Strict interior for ℝ₊ⁿ: every component must be finite and strictly positive.
++        //
++        // NOTE: using a relative tolerance (based on ||s||_∞) breaks on problems with
++        // huge dynamic range: small-but-positive components get treated as "not interior",
++        // which destabilizes NT scaling and the KKT system.
++        s.iter().all(|&x| x.is_finite() && x > Self::INTERIOR_TOL)
+     }
+
+     fn is_interior_dual(&self, z: &[f64]) -> bool {
+         // NonNeg cone is self-dual
+         self.is_interior_primal(z)
+diff --git a/solver-core/src/ipm/predcorr.rs b/solver-core/src/ipm/predcorr.rs
+index 0000000..0000000 100644
+--- a/solver-core/src/ipm/predcorr.rs
++++ b/solver-core/src/ipm/predcorr.rs
+@@ -245,9 +245,21 @@ pub fn predictor_corrector_step(
+             // Fallback to diagonal scaling if NT scaling fails
+             // (should only happen if we're very close to the boundary).
+             let s = &state.s[offset..offset + dim];
+             let z = &state.z[offset..offset + dim];
+-            let d: Vec<f64> = s.iter()
+-                .zip(z.iter())
+-                .map(|(si, zi)| (si / zi).max(1e-8).sqrt())
+-                .collect();
++            // IMPORTANT: ScalingBlock::Diagonal represents H = S Z^{-1} for NonNeg.
++            // Using sqrt(s/z) here is incorrect and will break the condensed system.
++            // If we do fall back, use a clamped s/z.
++            let d: Vec<f64> = s.iter()
++                .zip(z.iter())
++                .map(|(si, zi)| {
++                    let ratio = si / zi;
++                    if ratio.is_finite() && ratio > 0.0 {
++                        ratio.clamp(1e-12, 1e12)
++                    } else {
++                        1.0
++                    }
++                })
++                .collect();
+             ScalingBlock::Diagonal { d }
+         });

@@ -1,0 +1,562 @@
+//! Experimental "ipm2" solver entry point.
+//!
+//! This is a parallel implementation track meant to be A/B tested against the
+//! existing `ipm` solver. It currently reuses the same HSDE and predictor-corrector
+//! kernels while wiring in the ipm2 scaffolding (workspace, diagnostics, timers).
+
+use std::time::Instant;
+
+use crate::cones::{ConeKernel, NonNegCone, SocCone, ZeroCone, ExpCone, PowCone, PsdCone};
+use crate::ipm::hsde::{HsdeResiduals, HsdeState, compute_mu, compute_residuals};
+use crate::ipm::termination::TerminationCriteria;
+use crate::ipm2::{
+    DiagnosticsConfig, IpmWorkspace, PerfSection, PerfTimers, RegularizationPolicy, SolveMode,
+    StallDetector, compute_unscaled_metrics,
+};
+use crate::ipm2::predcorr::predictor_corrector_step_in_place;
+use crate::linalg::kkt::KktSolver;
+use crate::presolve::apply_presolve;
+use crate::presolve::ruiz::equilibrate;
+use crate::presolve::singleton::detect_singleton_rows;
+use crate::postsolve::PostsolveMap;
+use crate::problem::{
+    ConeSpec, ProblemData, SolveInfo, SolveResult, SolveStatus, SolverSettings,
+};
+
+/// Main ipm2 solver entry point.
+pub fn solve_ipm2(
+    prob: &ProblemData,
+    settings: &SolverSettings,
+) -> Result<SolveResult, Box<dyn std::error::Error>> {
+    // Validate problem
+    prob.validate()?;
+
+    let orig_prob = prob.clone();
+    let orig_prob_bounds = orig_prob.with_bounds_as_constraints();
+    let presolved = apply_presolve(prob);
+    let prob = presolved.problem;
+    let postsolve = presolved.postsolve;
+
+    // Convert var_bounds to explicit constraints if present
+    let prob = prob.with_bounds_as_constraints();
+
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+    let orig_n = orig_prob.num_vars();
+    let orig_m = orig_prob_bounds.num_constraints();
+
+    // Apply Ruiz equilibration
+    let (a_scaled, p_scaled, q_scaled, b_scaled, scaling) = equilibrate(
+        &prob.A,
+        prob.P.as_ref(),
+        &prob.q,
+        &prob.b,
+        settings.ruiz_iters,
+        &prob.cones,
+    );
+
+    // Create scaled problem
+    let scaled_prob = ProblemData {
+        P: p_scaled,
+        q: q_scaled,
+        A: a_scaled,
+        b: b_scaled,
+        cones: prob.cones.clone(),
+        var_bounds: prob.var_bounds.clone(),
+        integrality: prob.integrality.clone(),
+    };
+
+    // ipm2 scaffolding
+    let diag = DiagnosticsConfig::from_env();
+
+    let singleton_partition = detect_singleton_rows(&scaled_prob.A);
+    if diag.enabled || settings.verbose {
+        eprintln!(
+            "presolve: singleton_rows={} non_singleton_rows={}",
+            singleton_partition.singleton_rows.len(),
+            singleton_partition.non_singleton_rows.len(),
+        );
+    }
+
+    // Precompute constant RHS used by the two-solve dtau strategy: rhs_x2 = -q.
+    let neg_q: Vec<f64> = scaled_prob.q.iter().map(|&v| -v).collect();
+
+    // Build cone kernels from cone specs
+    let cones = build_cones(&scaled_prob.cones)?;
+
+    // Compute total barrier degree
+    let barrier_degree: usize = cones.iter().map(|c| c.barrier_degree()).sum();
+
+    // Initialize HSDE state
+    let mut state = HsdeState::new(n, m);
+    state.initialize_with_prob(&cones, &scaled_prob);
+    if let Some(warm) = settings.warm_start.as_ref() {
+        state.apply_warm_start(warm, &postsolve, &scaling, &cones);
+    }
+
+    // Initialize residuals
+    let mut residuals = HsdeResiduals::new(n, m);
+    let mut timers = PerfTimers::default();
+    let mut stall = StallDetector::default();
+    let mut solve_mode = SolveMode::Normal;
+    let mut reg_policy = RegularizationPolicy::default();
+    reg_policy.static_reg = settings.static_reg.max(1e-8);
+    reg_policy.dynamic_min_pivot = settings.dynamic_reg_min_pivot;
+    reg_policy.polish_static_reg =
+        (reg_policy.static_reg * 0.01).max(reg_policy.static_reg_min);
+    let mut reg_state = reg_policy.init_state(1.0);
+    let mut ws = IpmWorkspace::new(n, m, orig_n, orig_m);
+    ws.init_cones(&cones);
+
+    let mut kkt = KktSolver::new_with_singleton_elimination(
+        n,
+        m,
+        reg_state.static_reg_eff,
+        reg_policy.dynamic_min_pivot,
+        &scaled_prob.A,
+        &ws.scaling,
+    );
+
+    // Perform symbolic factorization once with initial scaling structure.
+    if let Err(e) = kkt.initialize(scaled_prob.P.as_ref(), &scaled_prob.A, &ws.scaling) {
+        return Err(format!("KKT symbolic factorization failed: {}", e).into());
+    }
+
+    // Termination criteria
+    let criteria = TerminationCriteria {
+        tol_feas: settings.tol_feas,
+        tol_gap: settings.tol_gap,
+        tol_infeas: settings.tol_infeas,
+        max_iter: settings.max_iter,
+        ..Default::default()
+    };
+
+    // Initial barrier parameter
+    let mut mu = compute_mu(&state, barrier_degree);
+
+    let mut status = SolveStatus::NumericalError; // Will be overwritten
+    let mut iter = 0;
+    let mut consecutive_failures = 0;
+    const MAX_CONSECUTIVE_FAILURES: usize = 3;
+
+    let start = Instant::now();
+    let mut last_metrics = None;
+    let reg_scale = scaling.cost_scale;
+
+    while iter < settings.max_iter {
+        {
+            let _g = timers.scoped(PerfSection::Residuals);
+            compute_residuals(&scaled_prob, &state, &mut residuals);
+        }
+
+        reg_state.static_reg_eff = reg_policy
+            .effective_static_reg(reg_scale)
+            .max(kkt.static_reg());
+        reg_state.refine_iters = settings.kkt_refine_iters;
+        match solve_mode {
+            SolveMode::Normal => {}
+            SolveMode::StallRecovery => {
+                reg_state.refine_iters =
+                    (reg_state.refine_iters + 2).min(reg_policy.max_refine_iters);
+                reg_state.static_reg_eff = (reg_state.static_reg_eff * 10.0)
+                    .min(reg_policy.static_reg_max);
+            }
+            SolveMode::Polish => {
+                reg_policy.enter_polish(&mut reg_state);
+            }
+        }
+
+        if (kkt.static_reg() - reg_state.static_reg_eff).abs() > 0.0 {
+            kkt.set_static_reg(reg_state.static_reg_eff)
+                .map_err(|e| format!("KKT reg update failed: {}", e))?;
+        }
+
+        let mut step_settings = settings.clone();
+        step_settings.static_reg = reg_state.static_reg_eff;
+        step_settings.kkt_refine_iters = reg_state.refine_iters;
+        step_settings.feas_weight_floor = settings.feas_weight_floor;
+        step_settings.sigma_max = settings.sigma_max;
+        if matches!(solve_mode, SolveMode::StallRecovery) {
+            step_settings.feas_weight_floor = 0.0;
+            step_settings.sigma_max = 0.999;
+        }
+        if matches!(solve_mode, SolveMode::Polish) {
+            step_settings.feas_weight_floor = 0.0;
+            step_settings.sigma_max = step_settings.sigma_max.min(0.9);
+        }
+
+        let step_result = predictor_corrector_step_in_place(
+            &mut kkt,
+            &scaled_prob,
+            &neg_q,
+            &mut state,
+            &residuals,
+            &cones,
+            mu,
+            barrier_degree,
+            &step_settings,
+            &mut ws,
+            &mut timers,
+        );
+
+        let step_result = match step_result {
+            Ok(result) => {
+                consecutive_failures = 0;
+                result
+            }
+            Err(_e) => {
+                consecutive_failures += 1;
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    status = SolveStatus::NumericalError;
+                    break;
+                }
+
+                // Recovery: push state back to interior and retry
+                let recovery_margin = (mu * 0.1).clamp(1e-4, 1e4);
+                state.push_to_interior(&cones, recovery_margin);
+                mu = compute_mu(&state, barrier_degree);
+                iter += 1;
+                continue;
+            }
+        };
+
+        mu = step_result.mu_new;
+
+        if !mu.is_finite() || mu > 1e15 {
+            consecutive_failures += 1;
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                status = SolveStatus::NumericalError;
+                break;
+            }
+
+            state.push_to_interior(&cones, 1e-2);
+            mu = compute_mu(&state, barrier_degree);
+        }
+
+        let mut term_status = None;
+        let metrics = {
+            let _g = timers.scoped(PerfSection::Termination);
+            let metrics =
+                compute_metrics(&orig_prob_bounds, &postsolve, &scaling, &state, &mut ws);
+            if !metrics.rel_p.is_finite()
+                || !metrics.rel_d.is_finite()
+                || !metrics.gap_rel.is_finite()
+            {
+                term_status = Some(SolveStatus::NumericalError);
+            } else if is_optimal(&metrics, &criteria) {
+                term_status = Some(SolveStatus::Optimal);
+            } else if let Some(status) =
+                check_infeasibility_unscaled(&orig_prob_bounds, &criteria, &state, &mut ws)
+            {
+                term_status = Some(status);
+            }
+            metrics
+        };
+        last_metrics = Some(metrics);
+
+        if diag.should_log(iter) {
+            let min_s = state.s.iter().copied().fold(f64::INFINITY, f64::min);
+            let min_z = state.z.iter().copied().fold(f64::INFINITY, f64::min);
+            eprintln!(
+                "iter {:4} mu={:.3e} alpha={:.3e} alpha_sz={:.3e} min_s={:.3e} min_z={:.3e} sigma={:.3e} rel_p={:.3e} rel_d={:.3e} gap_rel={:.3e}",
+                iter,
+                mu,
+                step_result.alpha,
+                step_result.alpha_sz,
+                min_s,
+                min_z,
+                step_result.sigma,
+                metrics.rel_p,
+                metrics.rel_d,
+                metrics.gap_rel,
+            );
+        }
+
+        let proposed_mode = stall.update(step_result.alpha, mu, metrics.rel_d, settings.tol_feas);
+        let next_mode = if matches!(solve_mode, SolveMode::Polish) {
+            SolveMode::Polish
+        } else {
+            proposed_mode
+        };
+        if next_mode != solve_mode && diag.should_log(iter) {
+            eprintln!("mode -> {:?}", next_mode);
+        }
+        solve_mode = next_mode;
+
+        if let Some(term_status) = term_status {
+            status = term_status;
+            break;
+        }
+
+        reg_state.dynamic_bumps = kkt.dynamic_bumps();
+        reg_state.static_reg_eff = reg_state.static_reg_eff.max(kkt.static_reg());
+        iter += 1;
+    }
+
+    if iter >= settings.max_iter && status == SolveStatus::NumericalError {
+        status = SolveStatus::MaxIters;
+    }
+
+    // Extract solution in scaled space
+    let x_scaled: Vec<f64> = if state.tau > 1e-8 {
+        state.x.iter().map(|xi| xi / state.tau).collect()
+    } else {
+        vec![0.0; n]
+    };
+
+    let s_scaled: Vec<f64> = if state.tau > 1e-8 {
+        state.s.iter().map(|si| si / state.tau).collect()
+    } else {
+        vec![0.0; m]
+    };
+
+    let z_scaled: Vec<f64> = if state.tau > 1e-8 {
+        state.z.iter().map(|zi| zi / state.tau).collect()
+    } else {
+        vec![0.0; m]
+    };
+
+    // Unscale solution back to original coordinates
+    let x_unscaled = scaling.unscale_x(&x_scaled);
+    let s_unscaled = scaling.unscale_s(&s_scaled);
+    let z_unscaled = scaling.unscale_z(&z_scaled);
+
+    let x = postsolve.recover_x(&x_unscaled);
+    let s = postsolve.recover_s(&s_unscaled, &x);
+    let z = postsolve.recover_z(&z_unscaled);
+
+    // Compute objective value using ORIGINAL (unscaled) problem data
+    let mut obj_val = 0.0;
+    if let Some(ref p) = orig_prob.P {
+        let mut px = vec![0.0; orig_n];
+        for col in 0..orig_n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    px[row] += val * x[col];
+                    if row != col {
+                        px[col] += val * x[row];
+                    }
+                }
+            }
+        }
+        for i in 0..orig_n {
+            obj_val += 0.5 * x[i] * px[i];
+        }
+    }
+    for i in 0..orig_n {
+        obj_val += orig_prob.q[i] * x[i];
+    }
+
+    let solve_time_ms = start.elapsed().as_millis() as u64;
+
+    let (primal_res, dual_res, gap) = if let Some(metrics) = last_metrics {
+        (metrics.rel_p, metrics.rel_d, metrics.gap_rel)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+
+    Ok(SolveResult {
+        status,
+        x,
+        s,
+        z,
+        obj_val,
+        info: SolveInfo {
+            iters: iter,
+            solve_time_ms,
+            kkt_factor_time_ms: timers.factorization.as_millis() as u64,
+            kkt_solve_time_ms: timers.solve.as_millis() as u64,
+            cone_time_ms: timers.scaling.as_millis() as u64,
+            primal_res,
+            dual_res,
+            gap,
+            mu,
+            reg_static: reg_state.static_reg_eff,
+            reg_dynamic_bumps: reg_state.dynamic_bumps,
+        },
+    })
+}
+
+fn build_cones(specs: &[ConeSpec]) -> Result<Vec<Box<dyn ConeKernel>>, Box<dyn std::error::Error>> {
+    let mut cones: Vec<Box<dyn ConeKernel>> = Vec::new();
+
+    for spec in specs {
+        match spec {
+            ConeSpec::Zero { dim } => {
+                cones.push(Box::new(ZeroCone::new(*dim)));
+            }
+            ConeSpec::NonNeg { dim } => {
+                cones.push(Box::new(NonNegCone::new(*dim)));
+            }
+            ConeSpec::Soc { dim } => {
+                cones.push(Box::new(SocCone::new(*dim)));
+            }
+            ConeSpec::Psd { n } => {
+                cones.push(Box::new(PsdCone::new(*n)));
+            }
+            ConeSpec::Exp { count } => {
+                for _ in 0..*count {
+                    cones.push(Box::new(ExpCone::new(1)));
+                }
+            }
+            ConeSpec::Pow { cones: pow_cones } => {
+                for pow in pow_cones {
+                    cones.push(Box::new(PowCone::new(vec![pow.alpha])));
+                }
+            }
+        }
+    }
+
+    Ok(cones)
+}
+
+fn compute_metrics(
+    prob: &ProblemData,
+    postsolve: &PostsolveMap,
+    scaling: &crate::presolve::ruiz::RuizScaling,
+    state: &HsdeState,
+    ws: &mut IpmWorkspace,
+) -> crate::ipm2::UnscaledMetrics {
+    let inv_tau = if state.tau > 0.0 { 1.0 / state.tau } else { 0.0 };
+    if inv_tau == 0.0 {
+        ws.x_bar.fill(0.0);
+        ws.s_bar.fill(0.0);
+        ws.z_bar.fill(0.0);
+    } else {
+        for i in 0..ws.n {
+            ws.x_bar[i] = state.x[i] * inv_tau * scaling.col_scale[i];
+        }
+        for i in 0..ws.m {
+            ws.s_bar[i] = state.s[i] * inv_tau / scaling.row_scale[i];
+            ws.z_bar[i] = state.z[i] * inv_tau * scaling.row_scale[i] * scaling.cost_scale;
+        }
+    }
+
+    postsolve.recover_x_into(&ws.x_bar, &mut ws.x_full);
+    postsolve.recover_s_into(&ws.s_bar, &ws.x_full, &mut ws.s_full);
+    postsolve.recover_z_into(&ws.z_bar, &mut ws.z_full);
+
+    compute_unscaled_metrics(
+        &prob.A,
+        prob.P.as_ref(),
+        &prob.q,
+        &prob.b,
+        &ws.x_full,
+        &ws.s_full,
+        &ws.z_full,
+        &mut ws.r_p,
+        &mut ws.r_d,
+        &mut ws.p_x,
+    )
+}
+
+fn is_optimal(metrics: &crate::ipm2::UnscaledMetrics, criteria: &TerminationCriteria) -> bool {
+    let primal_ok = metrics.rp_inf <= criteria.tol_feas * metrics.primal_scale;
+    let dual_ok = metrics.rd_inf <= criteria.tol_feas * metrics.dual_scale;
+
+    let gap_scale_abs = metrics.obj_p.abs().min(metrics.obj_d.abs()).max(1.0);
+    let gap_ok_abs = metrics.gap <= criteria.tol_gap * gap_scale_abs;
+    let gap_ok = gap_ok_abs || metrics.gap_rel <= criteria.tol_gap_rel;
+
+    primal_ok && dual_ok && gap_ok
+}
+
+fn check_infeasibility_unscaled(
+    prob: &ProblemData,
+    criteria: &TerminationCriteria,
+    state: &HsdeState,
+    ws: &mut IpmWorkspace,
+) -> Option<SolveStatus> {
+    if state.tau > criteria.tau_min {
+        return None;
+    }
+
+    let has_unsupported_cone = prob.cones.iter().any(|cone| {
+        !matches!(
+            cone,
+            ConeSpec::Zero { .. }
+                | ConeSpec::NonNeg { .. }
+                | ConeSpec::Soc { .. }
+                | ConeSpec::Psd { .. }
+                | ConeSpec::Exp { .. }
+                | ConeSpec::Pow { .. }
+        )
+    });
+    if has_unsupported_cone {
+        return Some(SolveStatus::NumericalError);
+    }
+
+    let x = &ws.x_full;
+    let s = &ws.s_full;
+    let z = &ws.z_full;
+
+    let x_inf = inf_norm(x);
+    let s_inf = inf_norm(s);
+    let z_inf = inf_norm(z);
+
+    let btz = dot(&prob.b, z);
+    if btz < -criteria.tol_infeas {
+        let mut atz_inf = 0.0_f64;
+        for i in 0..prob.num_vars() {
+            let val = ws.r_d[i] - ws.p_x[i] - prob.q[i];
+            atz_inf = atz_inf.max(val.abs());
+        }
+        let bound = criteria.tol_infeas * (x_inf + z_inf).max(1.0) * btz.abs();
+        let z_cone_ok = dual_cone_ok(prob, z, criteria.tol_infeas);
+        if atz_inf <= bound && z_cone_ok {
+            return Some(SolveStatus::PrimalInfeasible);
+        }
+    }
+
+    let qtx = dot(&prob.q, x);
+    if qtx < -criteria.tol_infeas {
+        let p_x_inf = inf_norm(&ws.p_x);
+        let px_bound = criteria.tol_infeas * x_inf.max(1.0) * qtx.abs();
+
+        let mut ax_s_inf = 0.0_f64;
+        for i in 0..prob.num_constraints() {
+            let val = ws.r_p[i] + prob.b[i];
+            ax_s_inf = ax_s_inf.max(val.abs());
+        }
+        let axs_bound = criteria.tol_infeas * (x_inf + s_inf).max(1.0) * qtx.abs();
+
+        if p_x_inf <= px_bound && ax_s_inf <= axs_bound {
+            return Some(SolveStatus::DualInfeasible);
+        }
+    }
+
+    Some(SolveStatus::NumericalError)
+}
+
+#[inline]
+fn inf_norm(v: &[f64]) -> f64 {
+    v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max)
+}
+
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter().zip(b.iter()).map(|(ai, bi)| ai * bi).sum()
+}
+
+fn dual_cone_ok(prob: &ProblemData, z: &[f64], tol: f64) -> bool {
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match *cone {
+            ConeSpec::Zero { dim } => {
+                offset += dim;
+            }
+            ConeSpec::NonNeg { dim } => {
+                if z[offset..offset + dim].iter().any(|&v| v < -tol) {
+                    return false;
+                }
+                offset += dim;
+            }
+            _ => {
+                return false;
+            }
+        }
+    }
+    true
+}
