@@ -1301,36 +1301,6 @@ pub fn predictor_corrector_step_in_place(
     }
 
     // ======================================================================
-    // Step 6b: μ monotonicity safeguard
-    // ======================================================================
-    // Reject steps that would increase μ significantly. This prevents the
-    // pathological behavior seen in BOYD2 where μ increases during iterations.
-    // Only apply when μ is still relatively large (> 1e-6); at smaller μ,
-    // small fluctuations are expected and the problem is near convergence anyway.
-    let mu_increase_tol = 1.1; // Allow up to 10% increase (numerical tolerance)
-    let min_alpha_mu = 1e-4; // Don't backtrack below this
-    let max_mu_backtrack = 5;
-    let mu_safeguard_threshold = 1e-6; // Only enforce when μ is still large
-
-    if mu > mu_safeguard_threshold {
-        let mut mu_trial = compute_trial_mu(state, &ws.ds, &ws.dz, dtau, dkappa, alpha, barrier_degree, cones);
-        let mut mu_backtrack_count = 0;
-
-        while mu_trial > mu * mu_increase_tol && alpha > min_alpha_mu && mu_backtrack_count < max_mu_backtrack {
-            alpha *= 0.5;
-            mu_trial = compute_trial_mu(state, &ws.ds, &ws.dz, dtau, dkappa, alpha, barrier_degree, cones);
-            mu_backtrack_count += 1;
-        }
-
-        if diagnostics_enabled() && mu_backtrack_count > 0 {
-            eprintln!(
-                "mu safeguard: backtracked {} times, alpha={:.3e}, mu={:.3e}, mu_trial={:.3e}",
-                mu_backtrack_count, alpha, mu, mu_trial
-            );
-        }
-    }
-
-    // ======================================================================
     // Step 7: Update state
     // ======================================================================
     for i in 0..n {
@@ -1435,56 +1405,6 @@ fn compute_step_size(
     }
 }
 
-/// Compute trial μ after a proposed step, without modifying state.
-/// Note: This is a simplified μ estimate. For NonNeg cones, we check
-/// component-wise positivity. For other cones (SOC, PSD), we skip
-/// the strict interior check as it's complex and this is just a heuristic.
-fn compute_trial_mu(
-    state: &HsdeState,
-    ds: &[f64],
-    dz: &[f64],
-    dtau: f64,
-    dkappa: f64,
-    alpha: f64,
-    barrier_degree: usize,
-    cones: &[Box<dyn ConeKernel>],
-) -> f64 {
-    if barrier_degree == 0 {
-        return 0.0;
-    }
-
-    let tau_trial = state.tau + alpha * dtau;
-    let kappa_trial = state.kappa + alpha * dkappa;
-    if !tau_trial.is_finite() || !kappa_trial.is_finite() || tau_trial <= 0.0 || kappa_trial <= 0.0 {
-        return f64::INFINITY;
-    }
-
-    let mut s_dot_z = 0.0;
-    let mut offset = 0;
-    for cone in cones {
-        let dim = cone.dim();
-        if dim == 0 {
-            continue;
-        }
-        if cone.barrier_degree() > 0 {
-            let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
-            for i in offset..offset + dim {
-                let s_i = state.s[i] + alpha * ds[i];
-                let z_i = state.z[i] + alpha * dz[i];
-                // Only check strict positivity for NonNeg cones;
-                // SOC/PSD can have negative components in s[1:], z[1:]
-                if is_nonneg && (s_i <= 0.0 || z_i <= 0.0) {
-                    return f64::INFINITY;
-                }
-                s_dot_z += s_i * z_i;
-            }
-        }
-        offset += dim;
-    }
-
-    (s_dot_z + tau_trial * kappa_trial) / (barrier_degree as f64 + 1.0)
-}
-
 /// Compute μ_aff = (s_aff · z_aff + τ_aff κ_aff) / (ν + 1) after affine step.
 ///
 /// IMPORTANT: Only cones with barrier_degree > 0 (NonNeg, SOC) contribute.
@@ -1552,24 +1472,5 @@ fn compute_centering_parameter(
         (1.0 - alpha_aff).powi(3)
     };
 
-    // Aggressive σ capping: when the affine step makes little progress on μ reduction
-    // (ratio > 0.9), the standard Mehrotra formula gives σ ≈ 1 which causes stalling.
-    // Cap σ more aggressively in this regime to force progress toward optimality.
-    let mu_ratio = if mu_aff.is_finite() && mu_aff > 0.0 && mu.is_finite() && mu > 0.0 {
-        mu_aff / mu
-    } else {
-        1.0 - alpha_aff
-    };
-
-    let adaptive_cap = if mu_ratio > 0.95 {
-        // Very little progress: cap σ at 0.5 to force aggressive optimality reduction
-        0.5
-    } else if mu_ratio > 0.8 {
-        // Limited progress: cap σ at 0.7
-        0.7
-    } else {
-        sigma_max
-    };
-
-    sigma.max(sigma_min).min(adaptive_cap)
+    sigma.max(sigma_min).min(sigma_max)
 }
