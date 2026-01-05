@@ -122,9 +122,21 @@ pub fn run_regression_suite(
 ) -> Vec<RegressionResult> {
     let mut results = Vec::new();
 
-    // Note: BOYD1/BOYD2 are excluded because they need >200 iterations
-    // Use `maros-meszaros --problem BOYDx --max-iter 500` to test them
-    let qps_cases = ["DUAL2"];
+    // Fast, diverse QPS problems (~2 min total, <10s each)
+    // Excludes: BOYD1/BOYD2 (need >200 iters), CONT-200+ (too slow)
+    let qps_cases = [
+        // Tiny QPs (<5ms)
+        "CVXQP1_S", "CVXQP2_S", "CVXQP3_S",
+        "DUAL1", "DUAL2", "DUAL3",
+        "DPKLO1",
+        // Small QPs (<50ms)
+        "AUG3D", "AUG3DC", "AUG3DQP",
+        "DTOC3",
+        // Medium QPs (<250ms)
+        "CVXQP1_M", "CVXQP2_M",
+        "CONT-050",
+        "AUG2D",
+    ];
     for name in qps_cases {
         match load_local_problem(name) {
             Ok(qps) => {
