@@ -249,6 +249,14 @@ pub fn solve_ipm2(
             mu = compute_mu(&state, barrier_degree);
         }
 
+        // Keep HSDE scaling stable by normalizing τ when it drifts too far from 1.
+        // This helps DUAL/QGROW families that otherwise stall due to τ drift.
+        // Thresholds are intentionally wide; we just avoid extreme drift.
+        if state.normalize_tau_if_needed(0.2, 5.0) {
+            // Recompute mu after normalization (s,z,τ,κ all scaled)
+            mu = compute_mu(&state, barrier_degree);
+        }
+
         let mut term_status = None;
         let metrics = {
             let _g = timers.scoped(PerfSection::Termination);

@@ -255,6 +255,44 @@ impl HsdeState {
 
         self.push_to_interior(cones, 1e-6);
     }
+
+    /// Normalize τ (and κ) if τ drifts outside [lo, hi].
+    ///
+    /// HSDE embedding can cause τ to grow/shrink over iterations, which
+    /// leads to poor conditioning. This rescales all homogeneous coordinates
+    /// so that τ ≈ 1, maintaining the solution (x/τ, s/τ, z/τ).
+    ///
+    /// Returns true if normalization was applied.
+    pub fn normalize_tau_if_needed(&mut self, lo: f64, hi: f64) -> bool {
+        let tau = self.tau;
+        if !tau.is_finite() || tau <= 0.0 {
+            return false;
+        }
+        if tau >= lo && tau <= hi {
+            return false;
+        }
+
+        // Scale by 1/tau so that tau becomes 1.
+        // This keeps ξ = x/τ stable and prevents HSDE drift.
+        let scale = 1.0 / tau;
+
+        for v in &mut self.x {
+            *v *= scale;
+        }
+        for v in &mut self.z {
+            *v *= scale;
+        }
+        for v in &mut self.s {
+            *v *= scale;
+        }
+        // Note: ξ = x/τ stays unchanged since both x and τ are scaled by the same factor.
+        // After scaling: x_new/τ_new = (x_old * scale)/(τ_old * scale) = x_old/τ_old = ξ_old.
+
+        self.tau *= scale; // becomes 1
+        self.kappa *= scale; // maintain homogeneity
+
+        true
+    }
 }
 
 /// HSDE residuals.
