@@ -159,6 +159,8 @@ pub fn run_regression_suite(
         "UBH1", "QETAMACR", "LISWET6", "QGROW15", "QSHELL",
         // Very large QPs (<3s)
         "CONT-100", "CONT-101", "QGROW22",
+        // Tall LP (n=20, m=1001) - tests normal equations candidate
+        "KSIP",
         // BOYD portfolio QPs (~93k vars, converge via early polish)
         "BOYD1", "BOYD2",
     ];
