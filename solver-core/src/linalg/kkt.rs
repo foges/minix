@@ -21,6 +21,8 @@ use super::backend::{BackendError, KktBackend, QdldlBackend};
 use super::sparse::{SparseCsc, SparseSymmetricCsc};
 use crate::scaling::ScalingBlock;
 use crate::scaling::nt::jordan_product_apply;
+use crate::cones::psd::{mat_to_svec, svec_to_mat};
+use nalgebra::DMatrix;
 use sprs::TriMat;
 use sprs_suitesparse_camd::try_camd;
 use std::sync::OnceLock;
@@ -339,6 +341,45 @@ fn update_soc_block_in_place(
     }
 }
 
+fn apply_psd_scaling(
+    w: &DMatrix<f64>,
+    n: usize,
+    v: &[f64],
+    out: &mut [f64],
+) {
+    let v_mat = svec_to_mat(v, n);
+    let out_mat = w * v_mat * w;
+    mat_to_svec(&out_mat, out);
+}
+
+fn update_psd_block_in_place(
+    static_reg: f64,
+    n: usize,
+    w_factor: &[f64],
+    positions: &[usize],
+    data: &mut [f64],
+) {
+    let dim = n * (n + 1) / 2;
+    let w = DMatrix::<f64>::from_row_slice(n, n, w_factor);
+    let mut e = vec![0.0; dim];
+    let mut col = vec![0.0; dim];
+    let mut pos_idx = 0usize;
+
+    for col_idx in 0..dim {
+        e.fill(0.0);
+        e[col_idx] = 1.0;
+        apply_psd_scaling(&w, n, &e, &mut col);
+        for row_idx in 0..=col_idx {
+            let mut val = -col[row_idx];
+            if row_idx == col_idx {
+                val -= 2.0 * static_reg;
+            }
+            data[positions[pos_idx]] = val;
+            pos_idx += 1;
+        }
+    }
+}
+
 fn update_h_blocks_in_place(
     static_reg: f64,
     m: usize,
@@ -401,6 +442,10 @@ fn update_h_blocks_in_place(
             (ScalingBlock::SocStructured { w }, HBlockPositions::UpperTriangle { dim, positions }) => {
                 assert_eq!(*dim, block_dim);
                 update_soc_block_in_place(static_reg, soc_scratch, w, positions, data);
+            }
+            (ScalingBlock::PsdStructured { w_factor, n }, HBlockPositions::UpperTriangle { dim, positions }) => {
+                assert_eq!(*dim, block_dim);
+                update_psd_block_in_place(static_reg, *n, w_factor, positions, data);
             }
             _ => {
                 panic!("H block positions mismatch");
@@ -1080,7 +1125,28 @@ impl<B: KktBackend> KktSolverImpl<B> {
                     }
                 }
                 ScalingBlock::PsdStructured { .. } => {
-                    unimplemented!("PSD structured scaling not yet implemented in KKT assembly");
+                    let (n_psd, w_factor) = match h_block {
+                        ScalingBlock::PsdStructured { n, w_factor } => (*n, w_factor),
+                        _ => unreachable!(),
+                    };
+                    let dim = n_psd * (n_psd + 1) / 2;
+                    let w = DMatrix::<f64>::from_row_slice(n_psd, n_psd, w_factor);
+                    let mut e_i = vec![0.0; dim];
+                    let mut col_i = vec![0.0; dim];
+                    for i in 0..dim {
+                        e_i.fill(0.0);
+                        e_i[i] = 1.0;
+                        apply_psd_scaling(&w, n_psd, &e_i, &mut col_i);
+                        for j in 0..=i {
+                            let kkt_row = self.n + offset + j;
+                            let kkt_col = self.n + offset + i;
+                            let mut val = -col_i[j];
+                            if i == j {
+                                val -= 2.0 * self.static_reg;
+                            }
+                            add_triplet(kkt_row, kkt_col, val, &mut tri);
+                        }
+                    }
                 }
             }
 
@@ -1248,7 +1314,18 @@ impl<B: KktBackend> KktSolverImpl<B> {
                     });
                 }
                 ScalingBlock::PsdStructured { .. } => {
-                    unimplemented!("PSD structured scaling not yet implemented in KKT assembly");
+                    let mut block_positions = Vec::with_capacity(block_dim * (block_dim + 1) / 2);
+                    for col in 0..block_dim {
+                        let orig_col = self.n + offset + col;
+                        for row in 0..=col {
+                            let orig_row = self.n + offset + row;
+                            block_positions.push(self.find_kkt_position(kkt, orig_row, orig_col));
+                        }
+                    }
+                    positions.push(HBlockPositions::UpperTriangle {
+                        dim: block_dim,
+                        positions: block_positions,
+                    });
                 }
             }
 
@@ -1275,25 +1352,33 @@ impl<B: KktBackend> KktSolverImpl<B> {
         }
         self.fill_p_diag_base(p);
 
-        let (kkt_unpermuted, kkt) = {
-            let (a_use, h_use) = if let Some(singleton) = self.singleton.as_ref() {
-                (&singleton.reduced_a, singleton.reduced_scaling.blocks.as_slice())
-            } else {
-                (a, h_blocks)
-            };
-            let kkt_unpermuted = self.build_kkt_matrix_with_perm(None, p, a_use, h_use);
-            let kkt = self.build_kkt_matrix(p, a_use, h_use);
-            (kkt_unpermuted, kkt)
+        let (a_use, h_use) = if let Some(singleton) = self.singleton.as_ref() {
+            (&singleton.reduced_a, singleton.reduced_scaling.blocks.as_slice())
+        } else {
+            (a, h_blocks)
         };
+
+        // Step 1: Build unpermuted matrix for CAMD analysis
+        let kkt_unpermuted = self.build_kkt_matrix_with_perm(None, p, a_use, h_use);
+
+        // Step 2: Compute fill-reducing permutation
         let (perm, perm_inv) = self.compute_camd_perm(&kkt_unpermuted)?;
-        if perm.iter().enumerate().all(|(i, &pi)| i == pi) {
+
+        // Step 3: Build correct matrix and set permutation
+        let kkt = if perm.iter().enumerate().all(|(i, &pi)| i == pi) {
+            // Identity permutation - reuse unpermuted matrix (fast path)
             self.perm = None;
             self.perm_inv = None;
+            kkt_unpermuted
         } else {
+            // Non-identity permutation - must rebuild with permutation applied
+            // CRITICAL: Set perm_inv BEFORE calling build_kkt_matrix so it uses the permutation
             self.perm = Some(perm);
             self.perm_inv = Some(perm_inv);
-        }
+            self.build_kkt_matrix(p, a_use, h_use)
+        };
 
+        // Step 4: Symbolic factorization on the (possibly permuted) matrix
         self.backend.symbolic_factorization(&kkt)?;
         self.kkt_mat = Some(kkt);
         self.h_diag_positions = None;

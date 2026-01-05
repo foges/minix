@@ -209,10 +209,10 @@ impl Default for SolverSettings {
             tol_gap: 1e-8,
             tol_infeas: 1e-8,
             ruiz_iters: 10,
-            static_reg: 1e-9,
-            dynamic_reg_min_pivot: 1e-7,
+            static_reg: 1e-8,
+            dynamic_reg_min_pivot: 1e-13,
             threads: 0,  // Auto-detect
-            kkt_refine_iters: 1,
+            kkt_refine_iters: 2,
             feas_weight_floor: 0.05,
             mcc_iters: 0,
             centrality_beta: 0.1,

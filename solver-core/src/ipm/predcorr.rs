@@ -23,6 +23,122 @@ fn diagnostics_enabled() -> bool {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct NonNegStepDiag {
+    min_s: f64,
+    min_z: f64,
+    min_ratio: f64,
+    alpha_lim: f64,
+    alpha_lim_idx: usize,
+    alpha_lim_side: &'static str,
+}
+
+fn nonneg_step_diagnostics(
+    s: &[f64],
+    ds: &[f64],
+    z: &[f64],
+    dz: &[f64],
+    cones: &[Box<dyn ConeKernel>],
+) -> Option<NonNegStepDiag> {
+    let mut found = false;
+    let mut min_s = f64::INFINITY;
+    let mut min_z = f64::INFINITY;
+    let mut min_ratio = f64::INFINITY;
+    let mut alpha_lim = f64::INFINITY;
+    let mut alpha_lim_idx = usize::MAX;
+    let mut alpha_lim_side = "n/a";
+    let mut offset = 0usize;
+
+    for cone in cones {
+        let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+        if cone.barrier_degree() == 0 {
+            offset += dim;
+            continue;
+        }
+
+        if (cone.as_ref() as &dyn Any).is::<NonNegCone>() {
+            found = true;
+            for i in 0..dim {
+                let idx = offset + i;
+                let si = s[idx];
+                let zi = z[idx];
+                let dsi = ds[idx];
+                let dzi = dz[idx];
+
+                if si.is_finite() {
+                    if min_s.is_nan() {
+                        min_s = si;
+                    } else {
+                        min_s = min_s.min(si);
+                    }
+                } else {
+                    min_s = f64::NAN;
+                }
+
+                if zi.is_finite() {
+                    if min_z.is_nan() {
+                        min_z = zi;
+                    } else {
+                        min_z = min_z.min(zi);
+                    }
+                } else {
+                    min_z = f64::NAN;
+                }
+
+                if si.is_finite() && zi.is_finite() && zi > 0.0 {
+                    let ratio = si / zi;
+                    if ratio.is_finite() {
+                        min_ratio = min_ratio.min(ratio);
+                    }
+                }
+
+                if dsi.is_finite() && dsi < 0.0 && si.is_finite() {
+                    let alpha = -si / dsi;
+                    if alpha.is_finite() && alpha >= 0.0 && alpha < alpha_lim {
+                        alpha_lim = alpha;
+                        alpha_lim_idx = idx;
+                        alpha_lim_side = "s";
+                    }
+                }
+
+                if dzi.is_finite() && dzi < 0.0 && zi.is_finite() {
+                    let alpha = -zi / dzi;
+                    if alpha.is_finite() && alpha >= 0.0 && alpha < alpha_lim {
+                        alpha_lim = alpha;
+                        alpha_lim_idx = idx;
+                        alpha_lim_side = "z";
+                    }
+                }
+            }
+        }
+
+        offset += dim;
+    }
+
+    if !found {
+        return None;
+    }
+
+    if !min_ratio.is_finite() {
+        min_ratio = f64::NAN;
+    }
+    if !alpha_lim.is_finite() {
+        alpha_lim = f64::NAN;
+    }
+
+    Some(NonNegStepDiag {
+        min_s,
+        min_z,
+        min_ratio,
+        alpha_lim,
+        alpha_lim_idx,
+        alpha_lim_side,
+    })
+}
+
 fn min_slice(v: &[f64]) -> f64 {
     v.iter().copied().fold(f64::INFINITY, f64::min)
 }
@@ -119,6 +235,9 @@ fn check_state_interior_for_step(
 pub struct StepResult {
     /// Step size taken
     pub alpha: f64,
+
+    /// Step size limited by cone boundaries
+    pub alpha_sz: f64,
 
     /// Centering parameter used
     pub sigma: f64,
@@ -294,6 +413,134 @@ fn centrality_ok_nonneg_trial(
     true
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CentralityViolation {
+    idx: usize,
+    side: &'static str,
+    w: f64,
+    lower: f64,
+    upper: f64,
+    s_i: f64,
+    z_i: f64,
+    mu_trial: f64,
+    tau_trial: f64,
+    kappa_trial: f64,
+}
+
+fn centrality_nonneg_violation(
+    state: &HsdeState,
+    ds: &[f64],
+    dz: &[f64],
+    dtau: f64,
+    dkappa: f64,
+    cones: &[Box<dyn ConeKernel>],
+    beta: f64,
+    gamma: f64,
+    barrier_degree: usize,
+    alpha: f64,
+) -> Option<CentralityViolation> {
+    if barrier_degree == 0 {
+        return None;
+    }
+
+    let tau_trial = state.tau + alpha * dtau;
+    let kappa_trial = state.kappa + alpha * dkappa;
+    if tau_trial <= 0.0 || kappa_trial <= 0.0 {
+        return Some(CentralityViolation {
+            idx: usize::MAX,
+            side: "tau_kappa",
+            w: f64::NAN,
+            lower: f64::NAN,
+            upper: f64::NAN,
+            s_i: f64::NAN,
+            z_i: f64::NAN,
+            mu_trial: f64::NAN,
+            tau_trial,
+            kappa_trial,
+        });
+    }
+
+    let mut s_dot_z = 0.0;
+    for i in 0..state.s.len() {
+        let s_i = state.s[i] + alpha * ds[i];
+        let z_i = state.z[i] + alpha * dz[i];
+        s_dot_z += s_i * z_i;
+    }
+
+    let mu_trial = (s_dot_z + tau_trial * kappa_trial) / (barrier_degree as f64 + 1.0);
+    if mu_trial <= 0.0 {
+        return Some(CentralityViolation {
+            idx: usize::MAX,
+            side: "mu",
+            w: f64::NAN,
+            lower: f64::NAN,
+            upper: f64::NAN,
+            s_i: f64::NAN,
+            z_i: f64::NAN,
+            mu_trial,
+            tau_trial,
+            kappa_trial,
+        });
+    }
+
+    let lower = beta * mu_trial;
+    let upper = gamma * mu_trial;
+
+    let mut offset = 0;
+    for cone in cones {
+        let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+
+        if cone.barrier_degree() == 0 {
+            offset += dim;
+            continue;
+        }
+
+        if (cone.as_ref() as &dyn Any).is::<NonNegCone>() {
+            for i in 0..dim {
+                let idx = offset + i;
+                let s_i = state.s[idx] + alpha * ds[idx];
+                let z_i = state.z[idx] + alpha * dz[idx];
+                let w = s_i * z_i;
+                if w < lower {
+                    return Some(CentralityViolation {
+                        idx,
+                        side: "low",
+                        w,
+                        lower,
+                        upper,
+                        s_i,
+                        z_i,
+                        mu_trial,
+                        tau_trial,
+                        kappa_trial,
+                    });
+                }
+                if w > upper {
+                    return Some(CentralityViolation {
+                        idx,
+                        side: "high",
+                        w,
+                        lower,
+                        upper,
+                        s_i,
+                        z_i,
+                        mu_trial,
+                        tau_trial,
+                        kappa_trial,
+                    });
+                }
+            }
+        }
+
+        offset += dim;
+    }
+
+    None
+}
+
 /// Take a predictor-corrector step.
 ///
 /// Implements the Mehrotra predictor-corrector algorithm with:
@@ -330,10 +577,6 @@ pub fn predictor_corrector_step(
     let mut scaling: Vec<ScalingBlock> = Vec::new();
     let mut offset = 0;
 
-    // Track minimum s and z values for adaptive regularization
-    let mut s_min = f64::INFINITY;
-    let mut z_min = f64::INFINITY;
-
     for cone in cones {
         let dim = cone.dim();
         if dim == 0 {
@@ -351,40 +594,60 @@ pub fn predictor_corrector_step(
         let s = &state.s[offset..offset + dim];
         let z = &state.z[offset..offset + dim];
 
-        // Track minimum values for adaptive regularization (exclude zero cones)
-        for &si in s.iter() {
-            if si < s_min { s_min = si; }
-        }
-        for &zi in z.iter() {
-            if zi < z_min { z_min = zi; }
-        }
-
         // Compute NT scaling based on cone type
         let scale = match nt::compute_nt_scaling(s, z, cone.as_ref()) {
             Ok(scale) => scale,
             Err(e) => {
                 let s_block_min = min_slice(s);
                 let z_block_min = min_slice(z);
-                if diagnostics_enabled() {
-                    eprintln!(
-                        "nt scaling error: cone={}, offset={}, dim={}, s_min={:.3e}, z_min={:.3e}: {}",
+                if (cone.as_ref() as &dyn Any).is::<NonNegCone>() {
+                    if diagnostics_enabled() {
+                        eprintln!(
+                            "nt scaling fallback: cone={}, offset={}, dim={}, s_min={:.3e}, z_min={:.3e}: {}",
+                            cone_type_name(cone.as_ref()),
+                            offset,
+                            dim,
+                            s_block_min,
+                            z_block_min,
+                            e
+                        );
+                    }
+                    // ScalingBlock::Diagonal represents H = S Z^{-1} for NonNeg.
+                    let d: Vec<f64> = s
+                        .iter()
+                        .zip(z.iter())
+                        .map(|(si, zi)| {
+                            let ratio = si / zi;
+                            if ratio.is_finite() && ratio > 0.0 {
+                                ratio.clamp(1e-12, 1e12)
+                            } else {
+                                1.0
+                            }
+                        })
+                        .collect();
+                    ScalingBlock::Diagonal { d }
+                } else {
+                    if diagnostics_enabled() {
+                        eprintln!(
+                            "nt scaling error: cone={}, offset={}, dim={}, s_min={:.3e}, z_min={:.3e}: {}",
+                            cone_type_name(cone.as_ref()),
+                            offset,
+                            dim,
+                            s_block_min,
+                            z_block_min,
+                            e
+                        );
+                    }
+                    return Err(format!(
+                        "NT scaling failed for cone={} (offset={}, dim={}, s_min={:.3e}, z_min={:.3e}): {}",
                         cone_type_name(cone.as_ref()),
                         offset,
                         dim,
                         s_block_min,
                         z_block_min,
                         e
-                    );
+                    ));
                 }
-                return Err(format!(
-                    "NT scaling failed for cone={} (offset={}, dim={}, s_min={:.3e}, z_min={:.3e}): {}",
-                    cone_type_name(cone.as_ref()),
-                    offset,
-                    dim,
-                    s_block_min,
-                    z_block_min,
-                    e
-                ));
             }
         };
 
@@ -392,39 +655,6 @@ pub fn predictor_corrector_step(
         offset += dim;
     }
 
-    // Adaptive regularization: gently increase when near boundaries
-    // When min(s, z) < μ/100, the scaling can become ill-conditioned.
-    let conditioning_threshold = mu / 100.0;
-    let min_sz = s_min.min(z_min);
-    let needs_extra_reg = min_sz.is_finite() && min_sz < conditioning_threshold;
-    let base_reg = settings.static_reg.max(settings.dynamic_reg_min_pivot);
-    let extra_reg = if needs_extra_reg {
-        let denom = min_sz.max(1e-300);
-        let ratio = conditioning_threshold / denom;
-        let scale = ratio.sqrt().min(100.0);
-        (base_reg * scale).min(1e-4)
-    } else {
-        0.0
-    };
-
-    if settings.verbose && extra_reg > 0.0 {
-        eprintln!(
-            "extra_reg={:.2e} (s_min={:.2e}, z_min={:.2e}, mu={:.2e})",
-            extra_reg, s_min, z_min, mu
-        );
-    }
-
-    // Apply extra regularization by modifying the scaling
-    if extra_reg > 0.0 {
-        for block in scaling.iter_mut() {
-            if let ScalingBlock::Diagonal { d } = block {
-                for di in d.iter_mut() {
-                    // Add regularization to H directly (H_reg = H + extra_reg * I)
-                    *di += extra_reg;
-                }
-            }
-        }
-    }
     timings.cone += cone_start.elapsed();
 
     // ======================================================================
@@ -900,6 +1130,7 @@ pub fn predictor_corrector_step(
             && settings.centrality_gamma > settings.centrality_beta
             && settings.centrality_beta > 0.0
         {
+            let mut ls_reported = false;
             for _ in 0..settings.line_search_max_iters {
                 if centrality_ok_nonneg_trial(
                     state,
@@ -914,6 +1145,46 @@ pub fn predictor_corrector_step(
                     alpha,
                 ) {
                     break;
+                }
+                if diagnostics_enabled() && !ls_reported {
+                    if let Some(violation) = centrality_nonneg_violation(
+                        state,
+                        &ds,
+                        &dz,
+                        dtau,
+                        dkappa,
+                        cones,
+                        settings.centrality_beta,
+                        settings.centrality_gamma,
+                        barrier_degree,
+                        alpha,
+                    ) {
+                        let idx_str = if violation.idx == usize::MAX {
+                            "n/a".to_string()
+                        } else {
+                            violation.idx.to_string()
+                        };
+                        eprintln!(
+                            "centrality ls fail: alpha={:.3e} side={} idx={} w={:.3e} bounds=[{:.3e},{:.3e}] s={:.3e} z={:.3e} mu_trial={:.3e} tau_trial={:.3e} kappa_trial={:.3e}",
+                            alpha,
+                            violation.side,
+                            idx_str,
+                            violation.w,
+                            violation.lower,
+                            violation.upper,
+                            violation.s_i,
+                            violation.z_i,
+                            violation.mu_trial,
+                            violation.tau_trial,
+                            violation.kappa_trial
+                        );
+                    } else {
+                        eprintln!(
+                            "centrality ls fail: alpha={:.3e} (no nonneg violation found)",
+                            alpha
+                        );
+                    }
+                    ls_reported = true;
                 }
                 alpha *= 0.5;
             }
@@ -975,6 +1246,31 @@ pub fn predictor_corrector_step(
         );
     }
 
+    if diagnostics_enabled() {
+        if let Some(diag) = nonneg_step_diagnostics(&state.s, &ds, &state.z, &dz, cones) {
+            let lim_idx = if diag.alpha_lim_idx == usize::MAX {
+                "none".to_string()
+            } else {
+                diag.alpha_lim_idx.to_string()
+            };
+            let nonneg_limits = diag.alpha_lim.is_finite()
+                && alpha_sz.is_finite()
+                && (diag.alpha_lim - alpha_sz).abs() <= 1e-12 * alpha_sz.max(1.0);
+            eprintln!(
+                "nonneg diag: min_s={:.3e} min_z={:.3e} min_s_over_z={:.3e} alpha_nonneg={:.3e} lim_idx={} lim_side={} alpha_sz={:.3e} alpha={:.3e} nonneg_limits={}",
+                diag.min_s,
+                diag.min_z,
+                diag.min_ratio,
+                diag.alpha_lim,
+                lim_idx,
+                diag.alpha_lim_side,
+                alpha_sz,
+                alpha,
+                nonneg_limits
+            );
+        }
+    }
+
     // ======================================================================
     // Step 7: Update state
     // ======================================================================
@@ -1027,6 +1323,7 @@ pub fn predictor_corrector_step(
 
     Ok(StepResult {
         alpha,
+        alpha_sz,
         sigma: sigma_used,
         mu_new,
     })

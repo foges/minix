@@ -13,7 +13,11 @@
 //! - PSD: H = W with W V W where M = X^{1/2} Z X^{1/2}, W = X^{1/2} M^{-1/2} X^{1/2}
 
 use super::ScalingBlock;
-use crate::cones::{ConeKernel, NonNegCone, SocCone};
+use crate::cones::{ConeKernel, NonNegCone, SocCone, PsdCone, ExpCone, PowCone};
+use crate::scaling::bfgs;
+use crate::cones::psd::svec_to_mat;
+use nalgebra::DMatrix;
+use nalgebra::linalg::SymmetricEigen;
 use thiserror::Error;
 
 /// NT scaling errors
@@ -124,6 +128,61 @@ pub fn nt_scaling_soc(
     quad_rep_apply(&s_sqrt, &u_inv_sqrt, &mut w);
 
     Ok(ScalingBlock::SocStructured { w })
+}
+
+/// Compute NT scaling for PSD cone.
+pub fn nt_scaling_psd(
+    cone: &PsdCone,
+    s: &[f64],
+    z: &[f64],
+) -> Result<ScalingBlock, NtScalingError> {
+    if s.len() != cone.dim() || z.len() != cone.dim() {
+        return Err(NtScalingError::DimensionMismatch {
+            expected: cone.dim(),
+            actual: s.len(),
+        });
+    }
+
+    if !cone.is_interior_primal(s) || !cone.is_interior_dual(z) {
+        return Err(NtScalingError::NotInterior);
+    }
+
+    let n = cone.size();
+    let x = svec_to_mat(s, n);
+    let z_mat = svec_to_mat(z, n);
+
+    let eig_x = SymmetricEigen::new(x);
+    let min_eig_x = eig_x.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+    if min_eig_x <= 0.0 || !min_eig_x.is_finite() {
+        return Err(NtScalingError::NotInterior);
+    }
+
+    let sqrt_vals = eig_x.eigenvalues.map(|v| v.sqrt());
+    let x_sqrt = &eig_x.eigenvectors
+        * DMatrix::<f64>::from_diagonal(&sqrt_vals)
+        * eig_x.eigenvectors.transpose();
+
+    let m = &x_sqrt * &z_mat * &x_sqrt;
+    let eig_m = SymmetricEigen::new(m);
+    let min_eig_m = eig_m.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+    if min_eig_m <= 0.0 || !min_eig_m.is_finite() {
+        return Err(NtScalingError::NotInterior);
+    }
+
+    let inv_sqrt_vals = eig_m.eigenvalues.map(|v| 1.0 / v.sqrt());
+    let m_inv_sqrt = &eig_m.eigenvectors
+        * DMatrix::<f64>::from_diagonal(&inv_sqrt_vals)
+        * eig_m.eigenvectors.transpose();
+
+    let w = &x_sqrt * m_inv_sqrt * &x_sqrt;
+    let mut w_factor = Vec::with_capacity(n * n);
+    for i in 0..n {
+        for j in 0..n {
+            w_factor.push(w[(i, j)]);
+        }
+    }
+
+    Ok(ScalingBlock::PsdStructured { w_factor, n })
 }
 
 // ============================================================================
@@ -328,6 +387,20 @@ pub fn compute_nt_scaling(
 
     if let Some(soc_cone) = (cone as &dyn std::any::Any).downcast_ref::<SocCone>() {
         return nt_scaling_soc(soc_cone, s, z);
+    }
+
+    if let Some(psd_cone) = (cone as &dyn std::any::Any).downcast_ref::<PsdCone>() {
+        return nt_scaling_psd(psd_cone, s, z);
+    }
+
+    if let Some(_exp_cone) = (cone as &dyn std::any::Any).downcast_ref::<ExpCone>() {
+        return bfgs::bfgs_scaling_3d(s, z, cone)
+            .map_err(|_| NtScalingError::NotInterior);
+    }
+
+    if let Some(_pow_cone) = (cone as &dyn std::any::Any).downcast_ref::<PowCone>() {
+        return bfgs::bfgs_scaling_3d(s, z, cone)
+            .map_err(|_| NtScalingError::NotInterior);
     }
 
     // Fallback: simple diagonal scaling

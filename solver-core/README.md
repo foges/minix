@@ -137,6 +137,10 @@ solver-core/
 │   │   ├── predcorr.rs     # Predictor-corrector
 │   │   ├── termination.rs  # Termination criteria
 │   │   └── mod.rs          # Main solver loop
+│   ├── ipm2/               # Experimental solver path
+│   │   ├── predcorr.rs     # Predictor-corrector
+│   │   ├── solve.rs        # Main solver loop
+│   │   └── workspace.rs    # Allocation-free workspace
 │   └── lib.rs              # Public API
 └── tests/
     ├── cone_tests.rs       # Finite difference validation

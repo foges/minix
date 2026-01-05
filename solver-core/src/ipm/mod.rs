@@ -6,7 +6,7 @@ pub mod hsde;
 pub mod predcorr;
 pub mod termination;
 
-use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone};
+use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone, ExpCone, PowCone, PsdCone};
 use crate::linalg::kkt::KktSolver;
 use crate::presolve::apply_presolve;
 use crate::presolve::ruiz::equilibrate;
@@ -18,6 +18,20 @@ use hsde::{HsdeState, HsdeResiduals, compute_residuals, compute_mu};
 use predcorr::{predictor_corrector_step, StepTimings};
 use termination::{TerminationCriteria, check_termination};
 use std::time::Instant;
+use std::sync::OnceLock;
+
+fn diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MINIX_DIAGNOSTICS")
+            .map(|v| v != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn min_slice(v: &[f64]) -> f64 {
+    v.iter().copied().fold(f64::INFINITY, f64::min)
+}
 
 /// Main IPM solver.
 ///
@@ -107,14 +121,7 @@ pub fn solve_ipm(
     //   [A,  -(H)] [dz] = [rhs_z]
     // gives dx ≈ rhs_x/ε, which blows up for small ε.
     // Use a small ε floor for stability while preserving high-accuracy convergence.
-    let p_is_sparse = scaled_prob.P.as_ref().map_or(true, |p| {
-        p.nnz() < n / 2  // Less than 50% diagonal fill
-    });
-    let mut static_reg = if p_is_sparse {
-        settings.static_reg.max(1e-6)
-    } else {
-        settings.static_reg.max(1e-6)
-    };
+    let mut static_reg = settings.static_reg.max(1e-8);
 
     // Build initial scaling structure for KKT assembly.
     let initial_scaling: Vec<ScalingBlock> = cones.iter().map(|cone| {
@@ -124,6 +131,17 @@ pub fn solve_ipm(
         } else if (cone.as_ref() as &dyn std::any::Any).downcast_ref::<SocCone>().is_some() {
             // SOC creates a dense block in KKT
             ScalingBlock::SocStructured { w: vec![1.0; dim] }
+        } else if (cone.as_ref() as &dyn std::any::Any).downcast_ref::<ExpCone>().is_some()
+            || (cone.as_ref() as &dyn std::any::Any).downcast_ref::<PowCone>().is_some()
+        {
+            ScalingBlock::Dense3x3 { h: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] }
+        } else if let Some(psd) = (cone.as_ref() as &dyn std::any::Any).downcast_ref::<PsdCone>() {
+            let n = psd.size();
+            let mut w_factor = vec![0.0; n * n];
+            for i in 0..n {
+                w_factor[i * n + i] = 1.0;
+            }
+            ScalingBlock::PsdStructured { w_factor, n }
         } else {
             // NonNeg uses diagonal scaling
             ScalingBlock::Diagonal { d: vec![1.0; dim] }
@@ -263,6 +281,20 @@ pub fn solve_ipm(
             }
             state.push_to_interior(&cones, 1e-2);
             mu = compute_mu(&state, barrier_degree);
+        }
+
+        if diagnostics_enabled() {
+            let min_s = min_slice(&state.s);
+            let min_z = min_slice(&state.z);
+            eprintln!(
+                "iter {:4} alpha={:.3e} alpha_sz={:.3e} min_s={:.3e} min_z={:.3e} mu={:.3e}",
+                iter,
+                step_result.alpha,
+                step_result.alpha_sz,
+                min_s,
+                min_z,
+                mu
+            );
         }
 
         // Verbose output
@@ -436,14 +468,18 @@ fn build_cones(specs: &[ConeSpec]) -> Result<Vec<Box<dyn ConeKernel>>, Box<dyn s
             ConeSpec::Soc { dim } => {
                 cones.push(Box::new(SocCone::new(*dim)));
             }
-            ConeSpec::Psd { .. } => {
-                return Err("PSD cone not yet implemented".into());
+            ConeSpec::Psd { n } => {
+                cones.push(Box::new(PsdCone::new(*n)));
             }
-            ConeSpec::Exp { .. } => {
-                return Err("Exponential cone not yet implemented".into());
+            ConeSpec::Exp { count } => {
+                for _ in 0..*count {
+                    cones.push(Box::new(ExpCone::new(1)));
+                }
             }
-            ConeSpec::Pow { .. } => {
-                return Err("Power cone not yet implemented".into());
+            ConeSpec::Pow { cones: pow_cones } => {
+                for pow in pow_cones {
+                    cones.push(Box::new(PowCone::new(vec![pow.alpha])));
+                }
             }
         }
     }

@@ -3,7 +3,7 @@
 //! This module provides comprehensive testing for all cone implementations,
 //! including finite difference checking of gradients and Hessians.
 
-use solver_core::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone};
+use solver_core::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone, ExpCone, PowCone, PsdCone};
 
 /// Finite difference tolerance for gradient checking
 const FD_GRAD_TOL: f64 = 1e-6;
@@ -248,6 +248,73 @@ fn test_nonneg_hessian_random() {
 // ============================================================================
 // Zero Cone Tests (no derivatives to check)
 // ============================================================================
+
+#[test]
+fn test_exp_gradient_fd() {
+    let cone = ExpCone::new(1);
+    let mut s = vec![0.0; cone.dim()];
+    let mut z = vec![0.0; cone.dim()];
+    cone.unit_initialization(&mut s, &mut z);
+
+    assert!(cone.is_interior_primal(&s));
+    assert!(check_gradient(&cone, &s, FD_GRAD_TOL));
+}
+
+#[test]
+fn test_exp_hessian_fd() {
+    let cone = ExpCone::new(1);
+    let mut s = vec![0.0; cone.dim()];
+    let mut z = vec![0.0; cone.dim()];
+    cone.unit_initialization(&mut s, &mut z);
+    let v = vec![0.5, -0.3, 0.2];
+
+    assert!(cone.is_interior_primal(&s));
+    assert!(check_hessian(&cone, &s, &v, FD_HESS_TOL));
+}
+
+#[test]
+fn test_pow_gradient_fd() {
+    let cone = PowCone::new(vec![0.5]);
+    let mut s = vec![0.0; cone.dim()];
+    let mut z = vec![0.0; cone.dim()];
+    cone.unit_initialization(&mut s, &mut z);
+
+    assert!(cone.is_interior_primal(&s));
+    assert!(check_gradient(&cone, &s, FD_GRAD_TOL));
+}
+
+#[test]
+fn test_pow_hessian_fd() {
+    let cone = PowCone::new(vec![0.5]);
+    let mut s = vec![0.0; cone.dim()];
+    let mut z = vec![0.0; cone.dim()];
+    cone.unit_initialization(&mut s, &mut z);
+    let v = vec![0.2, -0.1, 0.4];
+
+    assert!(cone.is_interior_primal(&s));
+    assert!(check_hessian(&cone, &s, &v, FD_HESS_TOL));
+}
+
+#[test]
+fn test_psd_gradient_fd() {
+    let cone = PsdCone::new(2);
+    let sqrt2 = std::f64::consts::SQRT_2;
+    let s = vec![2.0, 0.1 * sqrt2, 1.5];
+
+    assert!(cone.is_interior_primal(&s));
+    assert!(check_gradient(&cone, &s, FD_GRAD_TOL));
+}
+
+#[test]
+fn test_psd_hessian_fd() {
+    let cone = PsdCone::new(2);
+    let sqrt2 = std::f64::consts::SQRT_2;
+    let s = vec![2.0, 0.1 * sqrt2, 1.5];
+    let v = vec![0.3, -0.2 * sqrt2, 0.4];
+
+    assert!(cone.is_interior_primal(&s));
+    assert!(check_hessian(&cone, &s, &v, FD_HESS_TOL));
+}
 
 #[test]
 fn test_zero_cone_properties() {

@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use solver_core::{ProblemData, SolveResult, SolveStatus, SolverSettings};
 
 use crate::solver_choice::{solve_with_choice, SolverChoice};
-
 use crate::qps::{parse_qps, QpsProblem};
 
 /// URL for Maros-Meszaros QPS files (from GitHub mirror)

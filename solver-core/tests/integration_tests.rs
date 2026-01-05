@@ -4,6 +4,7 @@
 //! on various problem types.
 
 use solver_core::{solve, ProblemData, ConeSpec, SolverSettings, SolveStatus};
+use solver_core::cones::{PsdCone, ExpCone};
 use solver_core::linalg::sparse;
 
 #[test]
@@ -307,52 +308,24 @@ fn test_small_soc() {
 }
 
 #[test]
-fn test_psd_not_implemented() {
-    // PSD cone of size n=2 has dimension n(n+1)/2 = 3
-    let prob = ProblemData {
-        P: None,
-        q: vec![1.0, 1.0, 1.0],
-        A: sparse::from_triplets(
-            3,
-            3,
-            vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)],
-        ),
-        b: vec![1.0, 1.0, 1.0],
-        cones: vec![ConeSpec::Psd { n: 2 }],
-        var_bounds: None,
-        integrality: None,
-    };
+fn test_psd_cone_basic() {
+    let cone = PsdCone::new(2);
+    let mut s = vec![0.0; cone.dim()];
+    let mut z = vec![0.0; cone.dim()];
+    cone.unit_initialization(&mut s, &mut z);
 
-    let settings = SolverSettings::default();
-    let result = solve(&prob, &settings);
-
-    // Should return an error about PSD not being implemented
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("PSD cone not yet implemented"));
+    assert!(cone.is_interior_primal(&s));
+    assert!(cone.is_interior_dual(&z));
 }
 
 #[test]
-fn test_exp_not_implemented() {
-    let prob = ProblemData {
-        P: None,
-        q: vec![1.0, 1.0, 1.0],
-        A: sparse::from_triplets(
-            3,
-            3,
-            vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)],
-        ),
-        b: vec![1.0, 1.0, 1.0],
-        cones: vec![ConeSpec::Exp { count: 1 }],  // Exp cone has dimension 3
-        var_bounds: None,
-        integrality: None,
-    };
+fn test_exp_cone_basic() {
+    let cone = ExpCone::new(1);
+    let mut s = vec![0.0; cone.dim()];
+    let mut z = vec![0.0; cone.dim()];
+    cone.unit_initialization(&mut s, &mut z);
 
-    let settings = SolverSettings::default();
-    let result = solve(&prob, &settings);
-
-    // Should return an error about Exp not being implemented
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Exponential cone not yet implemented"));
+    assert!(cone.is_interior_primal(&s));
+    assert!(cone.is_interior_dual(&z));
+    assert!(cone.barrier_value(&s).is_finite());
 }

@@ -204,7 +204,15 @@ fn check_infeasibility(
     }
 
     let has_unsupported_cone = prob.cones.iter().any(|cone| {
-        !matches!(cone, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. })
+        !matches!(
+            cone,
+            ConeSpec::Zero { .. }
+                | ConeSpec::NonNeg { .. }
+                | ConeSpec::Soc { .. }
+                | ConeSpec::Psd { .. }
+                | ConeSpec::Exp { .. }
+                | ConeSpec::Pow { .. }
+        )
     });
     if has_unsupported_cone {
         return Some(SolveStatus::NumericalError);
