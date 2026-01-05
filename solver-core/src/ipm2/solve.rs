@@ -370,9 +370,13 @@ pub fn solve_ipm2(
             );
         }
 
-        if primal_ok && gap_ok && !dual_ok {
+        // Attempt polish if primal is OK and dual is stuck
+        // Relax gap requirement: try polish even if gap is up to 10x tolerance
+        // (the active-set polish might fix both gap and dual simultaneously)
+        let gap_close = final_metrics.gap_rel <= criteria.tol_gap_rel * 10.0;
+        if primal_ok && (gap_ok || gap_close) && !dual_ok {
             if diag.enabled {
-                eprintln!("attempting polish...");
+                eprintln!("attempting polish (gap_ok={}, gap_close={})...", gap_ok, gap_close);
             }
             if let Some(polished) = polish_nonneg_active_set(
                 &orig_prob_bounds,
