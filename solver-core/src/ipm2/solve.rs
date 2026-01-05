@@ -187,7 +187,9 @@ pub fn solve_ipm2(
         }
         if matches!(solve_mode, SolveMode::Polish) {
             step_settings.feas_weight_floor = 0.0;
-            step_settings.sigma_max = step_settings.sigma_max.min(0.9);
+            // Don't cap σ aggressively - let it be computed naturally
+            // The 0.9 cap was causing stalls on large QPs like BOYD2
+            step_settings.sigma_max = 0.999;
         }
 
         let step_result = predictor_corrector_step_in_place(
