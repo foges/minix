@@ -7,3 +7,4 @@ pub mod kkt;
 pub mod backend;
 pub mod backends;
 pub mod qdldl;
+pub mod normal_eqns;
