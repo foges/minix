@@ -1,0 +1,152 @@
+--- a/solver-core/src/presolve/ruiz.rs
++++ b/solver-core/src/presolve/ruiz.rs
+@@ -17,6 +17,20 @@
+ use crate::problem::ConeSpec;
+ use sprs::TriMat;
+ 
++const RUIZ_MIN_SCALING: f64 = 1e-4;
++const RUIZ_MAX_SCALING: f64 = 1e4;
++
++fn inv_sqrt_clamped(norm: f64) -> f64 {
++    if norm <= 0.0 || !norm.is_finite() {
++        return 1.0;
++    }
++    let s = 1.0 / norm.sqrt();
++    if !s.is_finite() {
++        return 1.0;
++    }
++    s.clamp(RUIZ_MIN_SCALING, RUIZ_MAX_SCALING)
++}
++
+ /// Result of Ruiz equilibration containing scaled problem data and scaling factors.
+ #[derive(Clone)]
+ pub struct RuizScaling {
+@@ -142,10 +156,10 @@
+ 
+         // Compute scaling factors: d = 1/sqrt(norm), avoiding division by zero
+         let mut d_row: Vec<f64> = row_norms.iter()
+-            .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
++            .map(|&norm| inv_sqrt_clamped(norm))
+             .collect();
+         let d_col: Vec<f64> = col_norms.iter()
+-            .map(|&norm| if norm > 1e-12 { 1.0 / norm.sqrt() } else { 1.0 })
++            .map(|&norm| inv_sqrt_clamped(norm))
+             .collect();
+ 
+         // For non-separable cones (SOC/PSD/EXP/POW), enforce uniform row scaling
+@@ -180,7 +194,7 @@
+                     for i in offset..offset + dim {
+                         block_norm = block_norm.max(row_norms[i]);
+                     }
+-                    let block_scale = if block_norm > 1e-12 { 1.0 / block_norm.sqrt() } else { 1.0 };
++                    let block_scale = inv_sqrt_clamped(block_norm);
+                     for i in offset..offset + dim {
+                         d_row[i] = block_scale;
+                     }
+--- a/solver-core/src/linalg/kkt.rs
++++ b/solver-core/src/linalg/kkt.rs
+@@ -47,6 +47,7 @@
+ 
+     /// Workspace for KKT matrix construction
+     kkt_mat: Option<SparseCsc>,
++    h_diag_positions: Option<Vec<usize>>,
+ 
+     /// Static regularization
+     static_reg: f64,
+@@ -76,6 +77,7 @@
+             m,
+             qdldl,
+             kkt_mat: None,
++            h_diag_positions: None,
+             static_reg,
+             perm: None,
+             perm_inv: None,
+@@ -282,6 +284,11 @@
+ 
+         let kkt = self.build_kkt_matrix(p, a, h_blocks);
+         self.qdldl.symbolic_factorization(&kkt)?;
++        self.h_diag_positions = if Self::can_diag_update(h_blocks) {
++            Some(self.compute_h_diag_positions(&kkt))
++        } else {
++            None
++        };
+         self.kkt_mat = Some(kkt);
+         Ok(())
+     }
+@@ -296,11 +303,74 @@
+         a: &SparseCsc,
+         h_blocks: &[ScalingBlock],
+     ) -> Result<QdldlFactorization, QdldlError> {
++        if Self::can_diag_update(h_blocks) {
++            if let (Some(mut kkt), Some(h_pos)) = (self.kkt_mat.take(), self.h_diag_positions.as_ref()) {
++                self.update_h_diagonal_in_place(&mut kkt, h_blocks, h_pos);
++                let factor = self.qdldl.numeric_factorization(&kkt)?;
++                self.kkt_mat = Some(kkt);
++                return Ok(factor);
++            }
++        }
++
+         let kkt = self.build_kkt_matrix(p, a, h_blocks);
+-        self.kkt_mat = Some(kkt.clone());
+-        self.qdldl.numeric_factorization(&kkt)
++        let factor = self.qdldl.numeric_factorization(&kkt)?;
++        self.kkt_mat = Some(kkt);
++        Ok(factor)
+     }
+ 
++
++    fn can_diag_update(h_blocks: &[ScalingBlock]) -> bool {
++        h_blocks.iter().all(|b| matches!(b, ScalingBlock::Zero { .. } | ScalingBlock::Diagonal { .. }))
++    }
++
++    fn compute_h_diag_positions(&self, kkt: &SparseCsc) -> Vec<usize> {
++        let mut positions = vec![0usize; self.m];
++        let perm_inv = self.perm_inv.as_deref();
++
++        for slack_idx in 0..self.m {
++            let orig = self.n + slack_idx;
++            let col = if let Some(p_inv) = perm_inv { p_inv[orig] } else { orig };
++
++            let start = kkt.indptr()[col];
++            let end = kkt.indptr()[col + 1];
++            let col_rows = &kkt.indices()[start..end];
++
++            match col_rows.binary_search(&col) {
++                Ok(rel) => positions[slack_idx] = start + rel,
++                Err(_) => panic!("KKT missing diagonal entry at col={col} (orig={orig})"),
++            }
++        }
++
++        positions
++    }
++
++    fn update_h_diagonal_in_place(&self, kkt: &mut SparseCsc, h_blocks: &[ScalingBlock], h_pos: &[usize]) {
++        debug_assert_eq!(h_pos.len(), self.m);
++        let diag_reg = -2.0 * self.static_reg;
++        let mut slack_offset = 0usize;
++
++        for block in h_blocks {
++            match block {
++                ScalingBlock::Zero { dim } => {
++                    for i in 0..*dim {
++                        let idx = slack_offset + i;
++                        kkt.data_mut()[h_pos[idx]] = diag_reg;
++                    }
++                    slack_offset += *dim;
++                }
++                ScalingBlock::Diagonal { h } => {
++                    for (i, &hi) in h.iter().enumerate() {
++                        let idx = slack_offset + i;
++                        kkt.data_mut()[h_pos[idx]] = -hi + diag_reg;
++                    }
++                    slack_offset += h.len();
++                }
++                _ => panic!("update_h_diagonal_in_place called with non-diagonal scaling block"),
++            }
++        }
++
++        debug_assert_eq!(slack_offset, self.m);
++    }
+     /// Solve a single KKT system: K * [dx; dz] = [rhs_x; rhs_z].
+     ///
+     /// # Arguments

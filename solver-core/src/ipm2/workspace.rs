@@ -55,13 +55,21 @@ pub struct IpmWorkspace {
 
 impl IpmWorkspace {
     pub fn new(n: usize, m: usize, orig_n: usize, orig_m: usize) -> Self {
+        Self::new_with_sz_len(n, m, orig_n, orig_m)
+    }
+
+    /// Create workspace with explicit s/z full vector length.
+    ///
+    /// Use this when postsolve may change the number of bound constraints,
+    /// causing the recovered s/z vectors to have different sizes than orig_m.
+    pub fn new_with_sz_len(n: usize, m: usize, orig_n: usize, sz_full_len: usize) -> Self {
         let kkt_dim = n + m;
         Self {
             n,
             m,
             kkt_dim,
             orig_n,
-            orig_m,
+            orig_m: sz_full_len, // Store the actual full length for consistency
             rhs1: vec![0.0; kkt_dim],
             rhs2: vec![0.0; kkt_dim],
             sol1: vec![0.0; kkt_dim],
@@ -81,15 +89,15 @@ impl IpmWorkspace {
             mul_p_xi_q: vec![0.0; n],
             delta_w: vec![0.0; m],
             mcc_delta: vec![0.0; m],
-            r_p: vec![0.0; orig_m],
+            r_p: vec![0.0; sz_full_len],
             r_d: vec![0.0; orig_n],
             p_x: vec![0.0; orig_n],
             x_bar: vec![0.0; n],
             s_bar: vec![0.0; m],
             z_bar: vec![0.0; m],
             x_full: vec![0.0; orig_n],
-            s_full: vec![0.0; orig_m],
-            z_full: vec![0.0; orig_m],
+            s_full: vec![0.0; sz_full_len],
+            z_full: vec![0.0; sz_full_len],
             scaling: Vec::new(),
             soc_scratch: SocScratch::new(0),
         }

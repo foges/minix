@@ -56,6 +56,19 @@ impl PostsolveMap {
         self.orig_n
     }
 
+    /// Returns the expected size of the full s/z vectors after recovery.
+    ///
+    /// Given the reduced vector length (presolved constraints including bounds),
+    /// computes the full output size needed for recover_s_into / recover_z_into.
+    pub fn expected_sz_full_len(&self, reduced_len: usize) -> usize {
+        let Some(row_map) = &self.row_map else {
+            return reduced_len;
+        };
+        let kept_len = row_map.kept_rows.len();
+        let bound_rows = reduced_len.saturating_sub(kept_len);
+        row_map.orig_m + bound_rows
+    }
+
     pub fn into_row_map(self) -> Option<RowMap> {
         self.row_map
     }

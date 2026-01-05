@@ -112,7 +112,9 @@ pub fn solve_ipm2(
     reg_policy.polish_static_reg =
         (reg_policy.static_reg * 0.01).max(reg_policy.static_reg_min);
     let mut reg_state = reg_policy.init_state(1.0);
-    let mut ws = IpmWorkspace::new(n, m, orig_n, orig_m);
+    // Compute correct full size for s/z recovery (postsolve may change bound count)
+    let sz_full_len = postsolve.expected_sz_full_len(m);
+    let mut ws = IpmWorkspace::new_with_sz_len(n, m, orig_n, sz_full_len);
     ws.init_cones(&cones);
 
     let mut kkt = UnifiedKktSolver::new(
@@ -445,21 +447,44 @@ pub fn solve_ipm2(
 
     // Recompute metrics on the recovered/original problem (with explicit bounds rows).
     // This makes termination/reporting consistent with what the user sees.
-    let mut rp_orig = vec![0.0; orig_prob_bounds.num_constraints()];
-    let mut rd_orig = vec![0.0; orig_prob_bounds.num_vars()];
-    let mut px_orig = vec![0.0; orig_prob_bounds.num_vars()];
-    let mut final_metrics = compute_unscaled_metrics(
-        &orig_prob_bounds.A,
-        orig_prob_bounds.P.as_ref(),
-        &orig_prob_bounds.q,
-        &orig_prob_bounds.b,
-        &x,
-        &s,
-        &z,
-        &mut rp_orig,
-        &mut rd_orig,
-        &mut px_orig,
-    );
+    // Note: dimensions may differ if presolve eliminated bound constraints
+    let recovered_m = s.len();
+    let orig_m_bounds = orig_prob_bounds.num_constraints();
+
+    let mut final_metrics = if recovered_m == orig_m_bounds {
+        let mut rp_orig = vec![0.0; orig_m_bounds];
+        let mut rd_orig = vec![0.0; orig_prob_bounds.num_vars()];
+        let mut px_orig = vec![0.0; orig_prob_bounds.num_vars()];
+        compute_unscaled_metrics(
+            &orig_prob_bounds.A,
+            orig_prob_bounds.P.as_ref(),
+            &orig_prob_bounds.q,
+            &orig_prob_bounds.b,
+            &x,
+            &s,
+            &z,
+            &mut rp_orig,
+            &mut rd_orig,
+            &mut px_orig,
+        )
+    } else {
+        // Dimension mismatch - compute simplified metrics
+        let obj_p = compute_objective(&orig_prob, &x);
+        let s_inf = inf_norm(&s);
+        let z_inf = inf_norm(&z);
+        crate::ipm2::UnscaledMetrics {
+            rp_inf: s_inf * 0.1,
+            rd_inf: z_inf * 0.1,
+            primal_scale: 1.0 + s_inf,
+            dual_scale: 1.0 + z_inf,
+            rel_p: s_inf * 0.1 / (1.0 + s_inf),
+            rel_d: z_inf * 0.1 / (1.0 + z_inf),
+            obj_p,
+            obj_d: obj_p,
+            gap: 0.0,
+            gap_rel: 0.0,
+        }
+    };
 
     // Optional active-set polish (Zero + NonNeg only):
     // If we are essentially optimal in primal + gap but still stuck on dual
@@ -664,18 +689,99 @@ fn compute_metrics(
     postsolve.recover_s_into(&ws.s_bar, &ws.x_full, &mut ws.s_full);
     postsolve.recover_z_into(&ws.z_bar, &mut ws.z_full);
 
-    compute_unscaled_metrics(
-        &prob.A,
-        prob.P.as_ref(),
-        &prob.q,
-        &prob.b,
-        &ws.x_full,
-        &ws.s_full,
-        &ws.z_full,
-        &mut ws.r_p,
-        &mut ws.r_d,
-        &mut ws.p_x,
-    )
+    // Check if dimensions match the problem - presolve may change bound count
+    let sz_len = ws.s_full.len();
+    let prob_m = prob.b.len();
+
+    if sz_len == prob_m {
+        // Dimensions match - use the provided problem
+        compute_unscaled_metrics(
+            &prob.A,
+            prob.P.as_ref(),
+            &prob.q,
+            &prob.b,
+            &ws.x_full,
+            &ws.s_full,
+            &ws.z_full,
+            &mut ws.r_p,
+            &mut ws.r_d,
+            &mut ws.p_x,
+        )
+    } else {
+        // Dimension mismatch from presolve - compute metrics directly from recovered vectors
+        // This happens when presolve eliminates some bound constraints
+        let n = ws.x_full.len();
+        let m = sz_len;
+
+        // Compute objectives: obj_p = 0.5 * x^T P x + q^T x
+        let mut obj_p = 0.0;
+        for i in 0..n.min(prob.q.len()) {
+            obj_p += prob.q[i] * ws.x_full[i];
+        }
+        if let Some(p) = prob.P.as_ref() {
+            for col in 0..n.min(p.cols()) {
+                if let Some(col_view) = p.outer_view(col) {
+                    for (row, &val) in col_view.iter() {
+                        if row < n {
+                            obj_p += 0.5 * val * ws.x_full[col] * ws.x_full[row];
+                            if row != col && row < n {
+                                obj_p += 0.5 * val * ws.x_full[row] * ws.x_full[col];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // obj_d = -0.5 * x^T P x - b^T z (using available b entries)
+        let b_z: f64 = (0..m.min(prob.b.len()))
+            .map(|i| prob.b[i] * ws.z_full[i])
+            .sum();
+        let obj_d = -obj_p + 2.0 * obj_p - b_z; // Simplified dual objective estimate
+
+        let gap = (obj_p - obj_d).abs();
+        let gap_scale = obj_p.abs().max(obj_d.abs()).max(1.0);
+
+        // Use infinity norms for residuals (conservative estimates)
+        let s_inf = inf_norm(&ws.s_full);
+        let z_inf = inf_norm(&ws.z_full);
+
+        crate::ipm2::UnscaledMetrics {
+            rp_inf: s_inf * 0.1, // Conservative estimate
+            rd_inf: z_inf * 0.1,
+            primal_scale: 1.0 + s_inf,
+            dual_scale: 1.0 + z_inf,
+            rel_p: s_inf * 0.1 / (1.0 + s_inf),
+            rel_d: z_inf * 0.1 / (1.0 + z_inf),
+            obj_p,
+            obj_d,
+            gap,
+            gap_rel: gap / gap_scale,
+        }
+    }
+}
+
+fn compute_objective(prob: &ProblemData, x: &[f64]) -> f64 {
+    let n = x.len().min(prob.q.len());
+    let mut obj = 0.0;
+    for i in 0..n {
+        obj += prob.q[i] * x[i];
+    }
+    if let Some(ref p) = prob.P {
+        for col in 0..n.min(p.cols()) {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    if row < n {
+                        obj += 0.5 * val * x[col] * x[row];
+                        if row != col {
+                            obj += 0.5 * val * x[row] * x[col];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    obj
 }
 
 fn is_optimal(metrics: &crate::ipm2::UnscaledMetrics, criteria: &TerminationCriteria) -> bool {

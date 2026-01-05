@@ -1,0 +1,107 @@
+--- a/solver-core/src/ipm/mod.rs
++++ b/solver-core/src/ipm/mod.rs
+@@ -78,14 +78,14 @@
+-    // Using ε=1e-4 provides stability while allowing good convergence.
++    // Use a small ε floor for stability while preserving high-accuracy convergence.
+     let p_is_sparse = scaled_prob.P.as_ref().map_or(true, |p| {
+         p.nnz() < n / 2  // Less than 50% diagonal fill
+     });
+     let static_reg = if p_is_sparse {
+-        settings.static_reg.max(1e-4)  // LP or sparse QP: use at least 1e-4
++        settings.static_reg.max(1e-6)
+     } else {
+-        settings.static_reg.max(1e-6)  // Dense QP: use at least 1e-6
++        settings.static_reg.max(1e-9)
+     };
+
+--- a/solver-core/src/ipm/predcorr.rs
++++ b/solver-core/src/ipm/predcorr.rs
+@@ -1,6 +1,14 @@
+ use super::hsde::{HsdeState, HsdeResiduals, compute_mu};
+ use crate::cones::{ConeKernel, NonNegCone, SocCone};
+ use crate::linalg::kkt::KktSolver;
+ use crate::scaling::{ScalingBlock, nt};
+ use crate::problem::{ProblemData, SolverSettings};
+ use std::any::Any;
++
++fn diagnostics_enabled() -> bool {
++    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        std::env::var("MINIX_DIAGNOSTICS")
++            .map(|v| v != "0")
++            .unwrap_or(false)
++    })
++}
+@@ -91,6 +99,7 @@
+     // ======================================================================
+     // Step 1: Compute NT scaling for all cones with adaptive regularization
+     // ======================================================================
+     let mut scaling: Vec<ScalingBlock> = Vec::new();
+     let mut offset = 0;
++    let mut nt_fallbacks: usize = 0;
+@@ -132,15 +141,20 @@
+-        // Compute NT scaling based on cone type
+-        let scale = nt::compute_nt_scaling(s, z, cone.as_ref())
+-            .unwrap_or_else(|_| {
+-                // Fallback to simple diagonal scaling if NT fails
+-                let d: Vec<f64> = s.iter().zip(z.iter())
+-                    .map(|(si, zi)| (si / zi).max(1e-8).sqrt())
+-                    .collect();
+-                ScalingBlock::Diagonal { d }
+-            });
++        let scale = match nt::compute_nt_scaling(s, z, cone.as_ref()) {
++            Ok(scale) => scale,
++            Err(_) => {
++                nt_fallbacks += 1;
++                let d: Vec<f64> = s
++                    .iter()
++                    .zip(z.iter())
++                    .map(|(si, zi)| {
++                        let denom = zi.max(1e-300);
++                        (si / denom).clamp(1e-18, 1e18)
++                    })
++                    .collect();
++                ScalingBlock::Diagonal { d }
++            }
++        };
+@@ -171,6 +185,15 @@
+     let extra_reg = if needs_extra_reg {
+         // Add regularization proportional to how close we are to boundary
+         let ratio = conditioning_threshold / s_min.min(z_min).max(1e-15);
+         (ratio.sqrt() * 1e-4).min(1e-2)  // Cap at 1e-2
+     } else {
+         0.0
+     };
++
++    if diagnostics_enabled() && nt_fallbacks > 0 {
++        eprintln!(
++            "nt scaling fallback: blocks={}, s_min={:.3e}, z_min={:.3e}, mu={:.3e}, extra_reg={:.3e}",
++            nt_fallbacks,
++            s_min,
++            z_min,
++            mu,
++            extra_reg,
++        );
++    }
+
+--- a/solver-core/src/linalg/kkt.rs
++++ b/solver-core/src/linalg/kkt.rs
+@@ -176,6 +176,11 @@
+                 for _ in 0..refine_iters {
+                     symm_matvec_upper(kkt, &sol_perm, &mut kx);
++                    if self.static_reg != 0.0 {
++                        for i in 0..kkt_dim {
++                            kx[i] += self.static_reg * sol_perm[i];
++                        }
++                    }
+                     for i in 0..kkt_dim {
+                         res[i] = rhs_perm[i] - kx[i];
+                     }
+
+--- a/solver-core/src/scaling/nt.rs
++++ b/solver-core/src/scaling/nt.rs
+@@ -32,9 +32,9 @@
+-    if !cone.is_interior_primal(s) || !cone.is_interior_dual(z) {
++    if s.iter().any(|&x| !x.is_finite() || x <= 0.0) || z.iter().any(|&x| !x.is_finite() || x <= 0.0) {
+         return Err(NtScalingError::NotInterior);
+     }

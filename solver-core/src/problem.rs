@@ -387,10 +387,11 @@ impl ProblemData {
         for cone in &self.cones {
             cone.validate()?;
         }
+        // POW cones not yet supported
         if self.cones.iter().any(|cone| {
-            matches!(cone, ConeSpec::Psd { .. } | ConeSpec::Exp { .. } | ConeSpec::Pow { .. })
+            matches!(cone, ConeSpec::Pow { .. })
         }) {
-            return Err("PSD/EXP/POW cones are not supported yet".to_string());
+            return Err("POW cones are not supported yet".to_string());
         }
 
         // Check variable bounds if present

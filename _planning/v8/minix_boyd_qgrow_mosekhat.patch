@@ -1,0 +1,466 @@
+diff -ruN /mnt/data/minix_base_new/solver-bench/src/main.rs /mnt/data/minix_mod_new/solver-bench/src/main.rs
+--- /mnt/data/minix_base_new/solver-bench/src/main.rs	2026-01-05 09:43:49.287166665 +0000
++++ /mnt/data/minix_mod_new/solver-bench/src/main.rs	2026-01-05 09:51:43.931232019 +0000
+@@ -27,7 +27,7 @@
+         #[arg(long, default_value = "200")]
+         max_iter: usize,
+         /// Solver backend to use
+-        #[arg(long, value_enum, default_value = "ipm1")]
++        #[arg(long, value_enum, default_value = "ipm2")]
+         solver: SolverChoice,
+     },
+     /// Run Maros-Meszaros QP benchmark suite
+@@ -45,7 +45,7 @@
+         #[arg(long)]
+         table: bool,
+         /// Solver backend to use
+-        #[arg(long, value_enum, default_value = "ipm1")]
++        #[arg(long, value_enum, default_value = "ipm2")]
+         solver: SolverChoice,
+     },
+     /// Parse and show info about a QPS file
+@@ -62,7 +62,7 @@
+         #[arg(long)]
+         require_cache: bool,
+         /// Solver backend to use
+-        #[arg(long, value_enum, default_value = "ipm1")]
++        #[arg(long, value_enum, default_value = "ipm2")]
+         solver: SolverChoice,
+         /// Read performance baseline JSON and gate regressions
+         #[arg(long)]
+diff -ruN /mnt/data/minix_base_new/solver-bench/src/solver_choice.rs /mnt/data/minix_mod_new/solver-bench/src/solver_choice.rs
+--- /mnt/data/minix_base_new/solver-bench/src/solver_choice.rs	2026-01-05 09:43:49.288049941 +0000
++++ /mnt/data/minix_mod_new/solver-bench/src/solver_choice.rs	2026-01-05 09:51:26.587180093 +0000
+@@ -1,5 +1,6 @@
+ use clap::ValueEnum;
+-use solver_core::{solve, ProblemData, SolveResult, SolverSettings};
++use solver_core::{ProblemData, SolveResult, SolverSettings};
++use solver_core::ipm::solve_ipm;
+ use solver_core::ipm2::solve_ipm2;
+ 
+ #[derive(ValueEnum, Clone, Copy, Debug)]
+@@ -14,7 +15,7 @@
+     choice: SolverChoice,
+ ) -> Result<SolveResult, Box<dyn std::error::Error>> {
+     match choice {
+-        SolverChoice::Ipm1 => solve(prob, settings),
++        SolverChoice::Ipm1 => solve_ipm(prob, settings),
+         SolverChoice::Ipm2 => solve_ipm2(prob, settings),
+     }
+ }
+diff -ruN /mnt/data/minix_base_new/solver-core/src/ipm2/mod.rs /mnt/data/minix_mod_new/solver-core/src/ipm2/mod.rs
+--- /mnt/data/minix_base_new/solver-core/src/ipm2/mod.rs	2026-01-05 09:43:49.293617532 +0000
++++ /mnt/data/minix_mod_new/solver-core/src/ipm2/mod.rs	2026-01-05 09:44:03.975391534 +0000
+@@ -7,6 +7,7 @@
+ pub mod diagnostics;
+ pub mod metrics;
+ pub mod modes;
++pub mod polish;
+ pub mod predcorr;
+ pub mod perf;
+ pub mod regularization;
+@@ -16,6 +17,7 @@
+ pub use diagnostics::DiagnosticsConfig;
+ pub use metrics::{UnscaledMetrics, compute_unscaled_metrics};
+ pub use modes::{SolveMode, StallDetector};
++pub use polish::polish_nonneg_active_set;
+ pub use perf::{PerfSection, PerfTimers};
+ pub use regularization::{RegularizationPolicy, RegularizationState};
+ pub use solve::solve_ipm2;
+diff -ruN /mnt/data/minix_base_new/solver-core/src/ipm2/polish.rs /mnt/data/minix_mod_new/solver-core/src/ipm2/polish.rs
+--- /mnt/data/minix_base_new/solver-core/src/ipm2/polish.rs	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/minix_mod_new/solver-core/src/ipm2/polish.rs	2026-01-05 09:44:37.722603871 +0000
+@@ -0,0 +1,261 @@
++//! Active-set polishing utilities.
++//!
++//! These are **optional** post-processing steps aimed at the classic IPM
++//! endgame failure mode on large NonNeg blocks:
++//!
++//! - μ is tiny and the primal residual is excellent
++//! - but the solver cannot reduce the (unscaled) dual residual further because
++//!   the KKT system becomes extremely ill-conditioned (H = diag(s/z) spans many
++//!   orders of magnitude).
++//!
++//! What MOSEK (and many production IPM solvers) do in this regime is a form of
++//! **crossover / polishing**:
++//!
++//! 1. Identify a candidate active set (constraints with small slack or large
++//!    multipliers).
++//! 2. Solve an equality-constrained QP using only those constraints as
++//!    equalities.
++//! 3. Drop any constraints whose multiplier comes out negative (since NonNeg
++//!    dual multipliers must be >= 0), and resolve.
++//!
++//! This file implements a conservative version of that idea for problems that
++//! contain **only Zero + NonNeg cones** (including bounds that were converted to
++//! NonNeg rows).
++
++use crate::linalg::kkt::KktSolver;
++use crate::linalg::sparse;
++use crate::problem::{ConeSpec, ProblemData, SolverSettings};
++use crate::scaling::ScalingBlock;
++
++#[derive(Debug, Clone)]
++pub struct PolishResult {
++    pub x: Vec<f64>,
++    pub s: Vec<f64>,
++    pub z: Vec<f64>,
++}
++
++#[inline]
++fn inf_norm(v: &[f64]) -> f64 {
++    v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max)
++}
++
++/// Attempt an active-set polish for Zero + NonNeg problems.
++///
++/// Returns `Some(PolishResult)` on success, `None` if:
++/// - the cone set includes anything other than Zero/NonNeg
++/// - the active-set construction is empty
++/// - the KKT solve fails (numerical issues)
++pub fn polish_nonneg_active_set(
++    prob: &ProblemData,
++    x0: &[f64],
++    s0: &[f64],
++    z0: &[f64],
++    settings: &SolverSettings,
++) -> Option<PolishResult> {
++    let n = prob.num_vars();
++    let m = prob.num_constraints();
++    if x0.len() != n || s0.len() != m || z0.len() != m {
++        return None;
++    }
++
++    // Only handle Zero + NonNeg for now.
++    if prob
++        .cones
++        .iter()
++        .any(|c| !matches!(c, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. }))
++    {
++        return None;
++    }
++
++    // Collect equality rows (Zero) and inequality rows (NonNeg).
++    let mut eq_rows = Vec::new();
++    let mut ineq_rows = Vec::new();
++    let mut offset = 0usize;
++    for cone in &prob.cones {
++        match *cone {
++            ConeSpec::Zero { dim } => {
++                eq_rows.extend(offset..offset + dim);
++                offset += dim;
++            }
++            ConeSpec::NonNeg { dim } => {
++                ineq_rows.extend(offset..offset + dim);
++                offset += dim;
++            }
++            _ => unreachable!(),
++        }
++    }
++    debug_assert_eq!(offset, m);
++
++    if ineq_rows.is_empty() {
++        return None;
++    }
++
++    // Conservative thresholds based on current magnitudes.
++    // Using sqrt(tol) gives a reasonably stable active-set cut for strict tol.
++    let tol = settings.tol_feas.max(1e-16);
++    let thresh_scale = tol.sqrt().max(1e-8);
++    let s_thresh = thresh_scale * inf_norm(s0).max(1.0);
++    let z_thresh = thresh_scale * inf_norm(z0).max(1.0);
++
++    // Candidate active set: small slack OR large multiplier.
++    let mut active: Vec<usize> = ineq_rows
++        .iter()
++        .copied()
++        .filter(|&i| s0[i].abs() <= s_thresh || z0[i] >= z_thresh)
++        .collect();
++
++    if active.is_empty() {
++        return None;
++    }
++
++    // Cap active set size: a huge active set makes the polish KKT ill-posed.
++    // Keep the most "active" constraints by multiplier magnitude.
++    let max_active = n.max(64);
++    if active.len() > max_active {
++        active.sort_by(|&a, &b| z0[b].abs().partial_cmp(&z0[a].abs()).unwrap());
++        active.truncate(max_active);
++    }
++
++    // Iterative pruning: if a constraint comes out with a negative multiplier,
++    // drop it and re-solve.
++    let mut active_set = active;
++    let max_passes = 3usize;
++    let neg_mult_tol = -(thresh_scale * inf_norm(z0).max(1.0));
++
++    for _pass in 0..max_passes {
++        let (a_eq, b_eq, row_ids) = build_equality_system(prob, &eq_rows, &active_set);
++        let m_eq = row_ids.len();
++        if m_eq == 0 {
++            return None;
++        }
++
++        // Solve the equality-QP KKT:
++        //   P x + A_eq^T y + q = 0
++        //   A_eq x = b_eq
++        // using the standard KKT form with H=0 and quasi-definite regularization.
++        let h_blocks = vec![ScalingBlock::Zero { dim: m_eq }];
++        let static_reg = settings.static_reg.max(1e-12);
++        let mut kkt = KktSolver::new(n, m_eq, static_reg, settings.dynamic_reg_min_pivot);
++        if kkt.initialize(prob.P.as_ref(), &a_eq, &h_blocks).is_err() {
++            return None;
++        }
++        if kkt.update_numeric(prob.P.as_ref(), &a_eq, &h_blocks).is_err() {
++            return None;
++        }
++        let factor = match kkt.factorize() {
++            Ok(f) => f,
++            Err(_) => return None,
++        };
++
++        let rhs_x: Vec<f64> = prob.q.iter().map(|&v| -v).collect();
++        let rhs_z = b_eq;
++        let mut x = vec![0.0; n];
++        let mut y = vec![0.0; m_eq];
++        kkt.solve_refined(
++            &factor,
++            &rhs_x,
++            &rhs_z,
++            &mut x,
++            &mut y,
++            settings.kkt_refine_iters.max(4),
++        );
++
++        // Identify any "active" NonNeg constraints with negative multipliers.
++        // Those should not be treated as active; drop and try again.
++        let mut dropped_any = false;
++        if !active_set.is_empty() {
++            let active_offset = eq_rows.len();
++            let mut new_active = Vec::with_capacity(active_set.len());
++            for (k, &row) in active_set.iter().enumerate() {
++                let mult = y[active_offset + k];
++                if mult < neg_mult_tol {
++                    dropped_any = true;
++                } else {
++                    new_active.push(row);
++                }
++            }
++            if dropped_any {
++                active_set = new_active;
++                if active_set.is_empty() {
++                    return None;
++                }
++                continue;
++            }
++        }
++
++        // Reconstruct full (s,z).
++        let mut z = vec![0.0; m];
++        // Equality duals are free.
++        for (k, &row) in eq_rows.iter().enumerate() {
++            z[row] = y[k];
++        }
++        // Active inequality duals must be >= 0.
++        for (k, &row) in active_set.iter().enumerate() {
++            z[row] = y[eq_rows.len() + k].max(0.0);
++        }
++
++        let mut s = compute_slack(prob, &x);
++        // Enforce s=0 on equality rows and active rows.
++        for &row in &eq_rows {
++            s[row] = 0.0;
++        }
++        for &row in &active_set {
++            s[row] = 0.0;
++        }
++        // Project remaining NonNeg slacks to >= 0.
++        for &row in &ineq_rows {
++            if s[row] < 0.0 {
++                s[row] = 0.0;
++            }
++        }
++
++        return Some(PolishResult { x, s, z });
++    }
++
++    None
++}
++
++fn build_equality_system(
++    prob: &ProblemData,
++    eq_rows: &[usize],
++    active_ineq_rows: &[usize],
++) -> (sparse::SparseCsc, Vec<f64>, Vec<usize>) {
++    let n = prob.num_vars();
++
++    // Row ids in the new system (for debugging / future extensions).
++    let mut row_ids = Vec::with_capacity(eq_rows.len() + active_ineq_rows.len());
++    row_ids.extend_from_slice(eq_rows);
++    row_ids.extend_from_slice(active_ineq_rows);
++
++    // Map old row -> new row index.
++    let mut row_map = vec![None; prob.num_constraints()];
++    for (new_i, &old_i) in row_ids.iter().enumerate() {
++        row_map[old_i] = Some(new_i);
++    }
++
++    let m_eq = row_ids.len();
++    let mut triplets = Vec::with_capacity(prob.A.nnz());
++    for (val, (row, col)) in prob.A.iter() {
++        if let Some(new_row) = row_map[row] {
++            triplets.push((new_row, col, *val));
++        }
++    }
++
++    let a_eq = sparse::from_triplets(m_eq, n, triplets);
++    let b_eq: Vec<f64> = row_ids.iter().map(|&r| prob.b[r]).collect();
++    (a_eq, b_eq, row_ids)
++}
++
++fn compute_slack(prob: &ProblemData, x: &[f64]) -> Vec<f64> {
++    let m = prob.num_constraints();
++    let n = prob.num_vars();
++    debug_assert_eq!(x.len(), n);
++
++    // s = b - A x
++    let mut s = prob.b.clone();
++    for (val, (row, col)) in prob.A.iter() {
++        s[row] -= (*val) * x[col];
++    }
++    debug_assert_eq!(s.len(), m);
++    s
++}
+diff -ruN /mnt/data/minix_base_new/solver-core/src/ipm2/solve.rs /mnt/data/minix_mod_new/solver-core/src/ipm2/solve.rs
+--- /mnt/data/minix_base_new/solver-core/src/ipm2/solve.rs	2026-01-05 09:43:49.295315395 +0000
++++ /mnt/data/minix_mod_new/solver-core/src/ipm2/solve.rs	2026-01-05 09:50:48.386882253 +0000
+@@ -11,7 +11,7 @@
+ use crate::ipm::termination::{TerminationCriteria, check_termination};
+ use crate::ipm2::{
+     DiagnosticsConfig, IpmWorkspace, PerfSection, PerfTimers, RegularizationPolicy, SolveMode,
+-    StallDetector, compute_unscaled_metrics,
++    StallDetector, compute_unscaled_metrics, polish_nonneg_active_set,
+ };
+ use crate::ipm2::predcorr::predictor_corrector_step_in_place;
+ use crate::linalg::kkt::KktSolver;
+@@ -29,6 +29,8 @@
+     prob.validate()?;
+ 
+     let orig_prob = prob.clone();
++    // Keep an "original" view with explicit bounds rows for final metrics/polish.
++    let orig_prob_bounds = orig_prob.with_bounds_as_constraints();
+     let presolved = apply_presolve(prob);
+     let mut prob = presolved.problem;
+     let postsolve = presolved.postsolve;
+@@ -90,6 +92,9 @@
+     let mut residuals = HsdeResiduals::new(n, m);
+     let mut timers = PerfTimers::default();
+     let mut stall = StallDetector::default();
++    // Enter polish earlier on ill-conditioned instances: tie the trigger to the
++    // requested gap tolerance (more robust than an absolute μ threshold).
++    stall.polish_mu_thresh = (settings.tol_gap * 100.0).max(1e-12);
+     let mut solve_mode = SolveMode::Normal;
+     let mut reg_policy = RegularizationPolicy::default();
+     reg_policy.static_reg = settings.static_reg.max(1e-6);
+@@ -292,9 +297,72 @@
+     let s_unscaled = scaling.unscale_s(&s_scaled);
+     let z_unscaled = scaling.unscale_z(&z_scaled);
+ 
+-    let x = postsolve.recover_x(&x_unscaled);
+-    let s = postsolve.recover_s(&s_unscaled, &x);
+-    let z = postsolve.recover_z(&z_unscaled);
++    let mut x = postsolve.recover_x(&x_unscaled);
++    let mut s = postsolve.recover_s(&s_unscaled, &x);
++    let mut z = postsolve.recover_z(&z_unscaled);
++
++    // Recompute metrics on the recovered/original problem (with explicit bounds rows).
++    // This makes termination/reporting consistent with what the user sees.
++    let mut rp_orig = vec![0.0; orig_prob_bounds.num_constraints()];
++    let mut rd_orig = vec![0.0; orig_prob_bounds.num_vars()];
++    let mut px_orig = vec![0.0; orig_prob_bounds.num_vars()];
++    let mut final_metrics = compute_unscaled_metrics(
++        &orig_prob_bounds.A,
++        orig_prob_bounds.P.as_ref(),
++        &orig_prob_bounds.q,
++        &orig_prob_bounds.b,
++        &x,
++        &s,
++        &z,
++        &mut rp_orig,
++        &mut rd_orig,
++        &mut px_orig,
++    );
++
++    // Optional active-set polish (Zero + NonNeg only):
++    // If we are essentially optimal in primal + gap but still stuck on dual
++    // feasibility, run a one-shot crossover to recover high-quality multipliers.
++    if status == SolveStatus::MaxIters {
++        let primal_ok = final_metrics.rp_inf <= criteria.tol_feas * final_metrics.primal_scale;
++        let dual_ok = final_metrics.rd_inf <= criteria.tol_feas * final_metrics.dual_scale;
++        let gap_scale_abs = final_metrics.obj_p.abs().min(final_metrics.obj_d.abs()).max(1.0);
++        let gap_ok_abs = final_metrics.gap <= criteria.tol_gap * gap_scale_abs;
++        let gap_ok = gap_ok_abs || final_metrics.gap_rel <= criteria.tol_gap_rel;
++
++        if primal_ok && gap_ok && !dual_ok {
++            if let Some(polished) = polish_nonneg_active_set(
++                &orig_prob_bounds,
++                &x,
++                &s,
++                &z,
++                settings,
++            ) {
++                x = polished.x;
++                s = polished.s;
++                z = polished.z;
++
++                rp_orig = vec![0.0; orig_prob_bounds.num_constraints()];
++                rd_orig = vec![0.0; orig_prob_bounds.num_vars()];
++                px_orig = vec![0.0; orig_prob_bounds.num_vars()];
++                final_metrics = compute_unscaled_metrics(
++                    &orig_prob_bounds.A,
++                    orig_prob_bounds.P.as_ref(),
++                    &orig_prob_bounds.q,
++                    &orig_prob_bounds.b,
++                    &x,
++                    &s,
++                    &z,
++                    &mut rp_orig,
++                    &mut rd_orig,
++                    &mut px_orig,
++                );
++
++                if is_optimal(&final_metrics, &criteria) {
++                    status = SolveStatus::Optimal;
++                }
++            }
++        }
++    }
+ 
+     // Compute objective value using ORIGINAL (unscaled) problem data
+     let mut obj_val = 0.0;
+@@ -320,11 +388,7 @@
+ 
+     let solve_time_ms = start.elapsed().as_millis() as u64;
+ 
+-    let (primal_res, dual_res, gap) = if let Some(metrics) = last_metrics {
+-        (metrics.rel_p, metrics.rel_d, metrics.gap_rel)
+-    } else {
+-        (0.0, 0.0, 0.0)
+-    };
++    let (primal_res, dual_res, gap) = (final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
+ 
+     Ok(SolveResult {
+         status,
+diff -ruN /mnt/data/minix_base_new/solver-core/src/lib.rs /mnt/data/minix_mod_new/solver-core/src/lib.rs
+--- /mnt/data/minix_base_new/solver-core/src/lib.rs	2026-01-05 09:43:49.311086517 +0000
++++ /mnt/data/minix_mod_new/solver-core/src/lib.rs	2026-01-05 09:51:10.984862331 +0000
+@@ -103,5 +103,7 @@
+     problem: &ProblemData,
+     settings: &SolverSettings,
+ ) -> Result<SolveResult, Box<dyn std::error::Error>> {
+-    ipm::solve_ipm(problem, settings)
++    // ipm2 is the active development track. Keep ipm1 for A/B/regression,
++    // but route the default entry point to ipm2.
++    ipm2::solve_ipm2(problem, settings)
+ }

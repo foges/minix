@@ -1,0 +1,4042 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 4c10092..cbd3a05 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -24,6 +24,7 @@ nalgebra = { version = "0.33", default-features = false, features = ["std"] }
+ sprs = "0.11"
+ ldl = "0.1"  # LDL factorization for quasi-definite systems
+ sprs_suitesparse_camd = "0.3.0"
++sprs_suitesparse_ldl = "0.8.0"
+ suitesparse_camd_sys = { version = "0.1.1", features = ["static"] }
+ 
+ # Error handling
+diff --git a/solver-bench/src/main.rs b/solver-bench/src/main.rs
+index 5ca072d..1e2017d 100644
+--- a/solver-bench/src/main.rs
++++ b/solver-bench/src/main.rs
+@@ -2,9 +2,12 @@
+ 
+ mod maros_meszaros;
+ mod qps;
++mod regression;
++mod solver_choice;
+ 
+ use clap::{Parser, Subcommand};
+-use solver_core::{solve, ConeSpec, ProblemData, SolverSettings};
++use solver_choice::{solve_with_choice, SolverChoice};
++use solver_core::{ConeSpec, ProblemData, SolveStatus, SolverSettings};
+ use solver_core::linalg::sparse;
+ use std::time::Instant;
+ 
+@@ -23,6 +26,9 @@ enum Commands {
+         /// Maximum iterations
+         #[arg(long, default_value = "200")]
+         max_iter: usize,
++        /// Solver backend to use
++        #[arg(long, value_enum, default_value = "ipm1")]
++        solver: SolverChoice,
+     },
+     /// Run Maros-Meszaros QP benchmark suite
+     MarosMeszaros {
+@@ -38,12 +44,36 @@ enum Commands {
+         /// Show detailed results table
+         #[arg(long)]
+         table: bool,
++        /// Solver backend to use
++        #[arg(long, value_enum, default_value = "ipm1")]
++        solver: SolverChoice,
+     },
+     /// Parse and show info about a QPS file
+     Info {
+         /// Path to QPS file
+         path: String,
+     },
++    /// Run regression suite (local QPS cache + synthetic cases)
++    Regression {
++        /// Maximum iterations per problem
++        #[arg(long, default_value = "200")]
++        max_iter: usize,
++        /// Require cached QPS files (fail if missing)
++        #[arg(long)]
++        require_cache: bool,
++        /// Solver backend to use
++        #[arg(long, value_enum, default_value = "ipm1")]
++        solver: SolverChoice,
++        /// Read performance baseline JSON and gate regressions
++        #[arg(long)]
++        baseline_in: Option<String>,
++        /// Write performance baseline JSON
++        #[arg(long)]
++        baseline_out: Option<String>,
++        /// Allowed regression ratio (0.2 = 20% slower)
++        #[arg(long, default_value = "0.2")]
++        max_regression: f64,
++    },
+ }
+ 
+ /// Generate a random LP:
+@@ -155,7 +185,7 @@ fn generate_portfolio_lp(n: usize, seed: u64) -> ProblemData {
+     }
+ }
+ 
+-fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings) {
++fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings, solver: SolverChoice) {
+     let n = prob.num_vars();
+     let m = prob.num_constraints();
+     let nnz = prob.A.nnz();
+@@ -169,7 +199,7 @@ fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings) {
+     println!();
+ 
+     let start = Instant::now();
+-    let result = solve(prob, settings);
++    let result = solve_with_choice(prob, settings, solver);
+     let elapsed = start.elapsed();
+ 
+     match result {
+@@ -187,7 +217,7 @@ fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings) {
+     }
+ }
+ 
+-fn run_random_benchmarks(max_iter: usize) {
++fn run_random_benchmarks(max_iter: usize, solver: SolverChoice) {
+     println!("Minix Solver Benchmarks");
+     println!("=======================\n");
+ 
+@@ -201,30 +231,36 @@ fn run_random_benchmarks(max_iter: usize) {
+ 
+     // Portfolio LPs
+     let prob = generate_portfolio_lp(50, 12345);
+-    run_benchmark("Portfolio LP (n=50)", &prob, &settings);
++    run_benchmark("Portfolio LP (n=50)", &prob, &settings, solver);
+ 
+     let prob = generate_portfolio_lp(200, 12345);
+-    run_benchmark("Portfolio LP (n=200)", &prob, &settings);
++    run_benchmark("Portfolio LP (n=200)", &prob, &settings, solver);
+ 
+     let prob = generate_portfolio_lp(500, 12345);
+-    run_benchmark("Portfolio LP (n=500)", &prob, &settings);
++    run_benchmark("Portfolio LP (n=500)", &prob, &settings, solver);
+ 
+     // Random LPs
+     let prob = generate_random_lp(100, 50, 0.3, 12345);
+-    run_benchmark("Random LP (n=100, m=50, 30% dense)", &prob, &settings);
++    run_benchmark("Random LP (n=100, m=50, 30% dense)", &prob, &settings, solver);
+ 
+     let prob = generate_random_lp(500, 200, 0.1, 12345);
+-    run_benchmark("Random LP (n=500, m=200, 10% dense)", &prob, &settings);
++    run_benchmark("Random LP (n=500, m=200, 10% dense)", &prob, &settings, solver);
+ 
+     let prob = generate_random_lp(1000, 500, 0.05, 12345);
+-    run_benchmark("Random LP (n=1000, m=500, 5% dense)", &prob, &settings);
++    run_benchmark("Random LP (n=1000, m=500, 5% dense)", &prob, &settings, solver);
+ 
+     println!("\n{}", "=".repeat(60));
+     println!("Benchmarks complete");
+     println!("{}", "=".repeat(60));
+ }
+ 
+-fn run_maros_meszaros(limit: Option<usize>, max_iter: usize, problem: Option<String>, show_table: bool) {
++fn run_maros_meszaros(
++    limit: Option<usize>,
++    max_iter: usize,
++    problem: Option<String>,
++    show_table: bool,
++    solver: SolverChoice,
++) {
+     let settings = SolverSettings {
+         verbose: false,
+         max_iter,
+@@ -236,7 +272,7 @@ fn run_maros_meszaros(limit: Option<usize>, max_iter: usize, problem: Option<Str
+     if let Some(name) = problem {
+         // Run single problem
+         println!("Running single problem: {}", name);
+-        let result = maros_meszaros::run_single(&name, &settings);
++        let result = maros_meszaros::run_single(&name, &settings, solver);
+ 
+         if let Some(err) = &result.error {
+             println!("Error: {}", err);
+@@ -254,7 +290,7 @@ fn run_maros_meszaros(limit: Option<usize>, max_iter: usize, problem: Option<Str
+         println!("Running Maros-Meszaros QP Benchmark Suite");
+         println!("=========================================\n");
+ 
+-        let results = maros_meszaros::run_full_suite(&settings, limit);
++        let results = maros_meszaros::run_full_suite(&settings, limit, solver);
+         let summary = maros_meszaros::compute_summary(&results);
+ 
+         if show_table {
+@@ -309,22 +345,146 @@ fn show_qps_info(path: &str) {
+     }
+ }
+ 
++fn run_regression_suite(
++    max_iter: usize,
++    solver: SolverChoice,
++    require_cache: bool,
++    baseline_in: Option<String>,
++    baseline_out: Option<String>,
++    max_regression: f64,
++) {
++    let mut settings = SolverSettings::default();
++    settings.max_iter = max_iter;
++
++    let results = regression::run_regression_suite(&settings, solver, require_cache);
++    let mut failed = 0usize;
++    let mut skipped = 0usize;
++
++    for res in &results {
++        if res.skipped {
++            skipped += 1;
++            println!("{}: SKIP (missing cache)", res.name);
++            continue;
++        }
++        if res.status != SolveStatus::Optimal
++            || !res.rel_p.is_finite()
++            || !res.rel_d.is_finite()
++            || !res.gap_rel.is_finite()
++        {
++            failed += 1;
++            println!(
++                "{}: FAIL status={:?} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e} {}",
++                res.name,
++                res.status,
++                res.rel_p,
++                res.rel_d,
++                res.gap_rel,
++                res.error.as_deref().unwrap_or(""),
++            );
++            continue;
++        }
++
++        let tol = settings.tol_feas.max(settings.tol_gap);
++        if res.rel_p > tol || res.rel_d > tol || res.gap_rel > tol {
++            failed += 1;
++            println!(
++                "{}: FAIL rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
++                res.name,
++                res.rel_p,
++                res.rel_d,
++                res.gap_rel,
++            );
++        } else {
++            println!(
++                "{}: OK rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
++                res.name,
++                res.rel_p,
++                res.rel_d,
++                res.gap_rel,
++            );
++        }
++    }
++
++    println!(
++        "summary: total={} failed={} skipped={}",
++        results.len(),
++        failed,
++        skipped
++    );
++
++    if failed == 0 {
++        if let Some(path) = baseline_out.as_ref() {
++            let summary = regression::perf_summary(&results);
++            let payload = serde_json::to_string_pretty(&summary)
++                .expect("failed to serialize perf summary");
++            if let Err(e) = std::fs::write(path, payload) {
++                eprintln!("failed to write baseline {}: {}", path, e);
++                std::process::exit(1);
++            }
++        }
++
++        if let Some(path) = baseline_in.as_ref() {
++            let Ok(contents) = std::fs::read_to_string(path) else {
++                eprintln!("failed to read baseline {}", path);
++                std::process::exit(1);
++            };
++            let baseline: regression::PerfSummary = match serde_json::from_str(&contents) {
++                Ok(val) => val,
++                Err(e) => {
++                    eprintln!("failed to parse baseline {}: {}", path, e);
++                    std::process::exit(1);
++                }
++            };
++            let summary = regression::perf_summary(&results);
++            let perf_failures =
++                regression::compare_perf_baseline(&baseline, &summary, max_regression);
++            if !perf_failures.is_empty() {
++                for msg in perf_failures {
++                    eprintln!("perf regression: {}", msg);
++                }
++                std::process::exit(1);
++            }
++        }
++    }
++
++    if failed > 0 || (require_cache && skipped > 0) {
++        std::process::exit(1);
++    }
++}
++
+ fn main() {
+     let cli = Cli::parse();
+ 
+     match cli.command {
+-        Some(Commands::Random { max_iter }) => {
+-            run_random_benchmarks(max_iter);
++        Some(Commands::Random { max_iter, solver }) => {
++            run_random_benchmarks(max_iter, solver);
+         }
+-        Some(Commands::MarosMeszaros { limit, max_iter, problem, table }) => {
+-            run_maros_meszaros(limit, max_iter, problem, table);
++        Some(Commands::MarosMeszaros { limit, max_iter, problem, table, solver }) => {
++            run_maros_meszaros(limit, max_iter, problem, table, solver);
+         }
+         Some(Commands::Info { path }) => {
+             show_qps_info(&path);
+         }
++        Some(Commands::Regression {
++            max_iter,
++            require_cache,
++            solver,
++            baseline_in,
++            baseline_out,
++            max_regression,
++        }) => {
++            run_regression_suite(
++                max_iter,
++                solver,
++                require_cache,
++                baseline_in,
++                baseline_out,
++                max_regression,
++            );
++        }
+         None => {
+-            // Default: run random benchmarks
+-            run_random_benchmarks(200);
++            // Default: run random benchmarks with ipm1
++            run_random_benchmarks(200, SolverChoice::Ipm1);
+         }
+     }
+ }
+diff --git a/solver-bench/src/maros_meszaros.rs b/solver-bench/src/maros_meszaros.rs
+index b00921c..4136f34 100644
+--- a/solver-bench/src/maros_meszaros.rs
++++ b/solver-bench/src/maros_meszaros.rs
+@@ -7,7 +7,9 @@ use std::path::PathBuf;
+ use std::time::Instant;
+ 
+ use anyhow::{Context, Result};
+-use solver_core::{solve, ProblemData, SolveResult, SolveStatus, SolverSettings};
++use solver_core::{ProblemData, SolveResult, SolveStatus, SolverSettings};
++
++use crate::solver_choice::{solve_with_choice, SolverChoice};
+ 
+ use crate::qps::{parse_qps, QpsProblem};
+ 
+@@ -169,6 +171,37 @@ fn get_cache_dir() -> PathBuf {
+     PathBuf::from(home).join(".cache").join("minix-bench").join("maros-meszaros")
+ }
+ 
++pub fn find_local_qps(name: &str) -> Option<PathBuf> {
++    let local_paths = [
++        PathBuf::from(format!("{}.QPS", name)),
++        PathBuf::from(format!("{}.qps", name)),
++        PathBuf::from(format!("data/{}.QPS", name)),
++        PathBuf::from(format!("data/{}.qps", name)),
++    ];
++
++    for path in &local_paths {
++        if path.exists() {
++            return Some(path.clone());
++        }
++    }
++
++    let cache_dir = get_cache_dir();
++    let cached_path = cache_dir.join(format!("{}.QPS", name));
++    if cached_path.exists() {
++        return Some(cached_path);
++    }
++
++    None
++}
++
++pub fn load_local_problem(name: &str) -> Result<QpsProblem> {
++    let Some(path) = find_local_qps(name) else {
++        return Err(anyhow::anyhow!("No local QPS file found for {}", name));
++    };
++
++    parse_qps(path)
++}
++
+ /// Download a QPS file if not cached
+ fn download_qps(name: &str) -> Result<PathBuf> {
+     let cache_dir = get_cache_dir();
+@@ -220,18 +253,8 @@ fn download_qps(name: &str) -> Result<PathBuf> {
+ 
+ /// Load a QPS problem from file or URL
+ pub fn load_problem(name: &str) -> Result<QpsProblem> {
+-    // Check for local file first
+-    let local_paths = [
+-        PathBuf::from(format!("{}.QPS", name)),
+-        PathBuf::from(format!("{}.qps", name)),
+-        PathBuf::from(format!("data/{}.QPS", name)),
+-        PathBuf::from(format!("data/{}.qps", name)),
+-    ];
+-
+-    for path in &local_paths {
+-        if path.exists() {
+-            return parse_qps(path);
+-        }
++    if let Ok(prob) = load_local_problem(name) {
++        return Ok(prob);
+     }
+ 
+     // Try cache or download
+@@ -240,7 +263,7 @@ pub fn load_problem(name: &str) -> Result<QpsProblem> {
+ }
+ 
+ /// Run a single benchmark problem
+-pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
++pub fn run_single(name: &str, settings: &SolverSettings, solver: SolverChoice) -> BenchmarkResult {
+     // Load and parse problem
+     let qps = match load_problem(name) {
+         Ok(q) => q,
+@@ -259,6 +282,23 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
+         }
+     };
+ 
++    // Debug: print OBJSENSE
++    let diagnostics_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
++    if diagnostics_enabled {
++        let eq_count = qps.con_lower.iter().zip(qps.con_upper.iter())
++            .filter(|(&l, &u)| (l - u).abs() < 1e-10 && l.is_finite())
++            .count();
++        eprintln!("[{}] obj_sense={} ({}) n={} m={} p_triplets={} equalities={}",
++            name,
++            qps.obj_sense,
++            if qps.obj_sense < 0.0 { "MAX" } else { "MIN" },
++            qps.n,
++            qps.m,
++            qps.p_triplets.len(),
++            eq_count
++        );
++    }
++
+     // Convert to conic form
+     let prob = match qps.to_problem_data() {
+         Ok(p) => p,
+@@ -279,7 +319,7 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
+ 
+     // Solve
+     let start = Instant::now();
+-    let result = solve(&prob, settings);
++    let result = solve_with_choice(&prob, settings, solver);
+     let elapsed = start.elapsed();
+ 
+     let diagnostics_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+@@ -317,7 +357,11 @@ pub fn run_single(name: &str, settings: &SolverSettings) -> BenchmarkResult {
+ }
+ 
+ /// Run full Maros-Meszaros benchmark suite
+-pub fn run_full_suite(settings: &SolverSettings, max_problems: Option<usize>) -> Vec<BenchmarkResult> {
++pub fn run_full_suite(
++    settings: &SolverSettings,
++    max_problems: Option<usize>,
++    solver: SolverChoice,
++) -> Vec<BenchmarkResult> {
+     let problems: Vec<&str> = MM_PROBLEMS
+         .iter()
+         .take(max_problems.unwrap_or(MM_PROBLEMS.len()))
+@@ -328,7 +372,7 @@ pub fn run_full_suite(settings: &SolverSettings, max_problems: Option<usize>) ->
+ 
+     for (i, name) in problems.iter().enumerate() {
+         eprint!("[{}/{}] {} ... ", i + 1, problems.len(), name);
+-        let result = run_single(name, settings);
++        let result = run_single(name, settings, solver);
+ 
+         let status_str = match result.status {
+             SolveStatus::Optimal => "✓",
+diff --git a/solver-bench/src/qps.rs b/solver-bench/src/qps.rs
+index 0168073..969c97f 100644
+--- a/solver-bench/src/qps.rs
++++ b/solver-bench/src/qps.rs
+@@ -101,6 +101,10 @@ impl QpsProblem {
+         let mut triplets = Vec::new();
+         let mut b = Vec::with_capacity(total_constraints);
+         let mut row = 0;
++        let mut row_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.m];
++        for &(r, c, v) in &self.a_triplets {
++            row_entries[r].push((c, v));
++        }
+ 
+         // 1. Equality constraints (Zero cone)
+         for i in 0..self.m {
+@@ -109,10 +113,8 @@ impl QpsProblem {
+ 
+             if lb == ub && lb.is_finite() {
+                 // Equality: Ax = b
+-                for &(r, c, v) in &self.a_triplets {
+-                    if r == i {
+-                        triplets.push((row, c, v));
+-                    }
++                for &(c, v) in &row_entries[i] {
++                    triplets.push((row, c, v));
+                 }
+                 b.push(lb);
+                 row += 1;
+@@ -134,10 +136,8 @@ impl QpsProblem {
+ 
+             // Upper bound: a'x <= ub
+             if ub.is_finite() && ub < f64::INFINITY {
+-                for &(r, c, v) in &self.a_triplets {
+-                    if r == i {
+-                        triplets.push((row, c, v));
+-                    }
++                for &(c, v) in &row_entries[i] {
++                    triplets.push((row, c, v));
+                 }
+                 b.push(ub);
+                 row += 1;
+@@ -145,10 +145,8 @@ impl QpsProblem {
+ 
+             // Lower bound: a'x >= lb => -a'x <= -lb
+             if lb.is_finite() && lb > f64::NEG_INFINITY {
+-                for &(r, c, v) in &self.a_triplets {
+-                    if r == i {
+-                        triplets.push((row, c, -v));
+-                    }
++                for &(c, v) in &row_entries[i] {
++                    triplets.push((row, c, -v));
+                 }
+                 b.push(-lb);
+                 row += 1;
+@@ -182,13 +180,21 @@ impl QpsProblem {
+         // Build sparse matrices
+         let a = sparse::from_triplets(total_constraints, self.n, triplets);
+ 
++        // Scale objective by sense.
++        //
++        // Note: For quadratic objectives, the QP form is (1/2) x'P x + q'x.
++        // Converting MAX to MIN requires negating *both* q and P.
+         let p = if self.p_triplets.is_empty() {
+             None
+         } else {
+-            Some(sparse::from_triplets(self.n, self.n, self.p_triplets.clone()))
++            let p_triplets: Vec<(usize, usize, f64)> = self
++                .p_triplets
++                .iter()
++                .map(|&(i, j, v)| (i, j, v * self.obj_sense))
++                .collect();
++            Some(sparse::from_triplets(self.n, self.n, p_triplets))
+         };
+ 
+-        // Scale objective by sense
+         let q: Vec<f64> = self.q.iter().map(|&v| v * self.obj_sense).collect();
+ 
+         // Build cone specification
+@@ -238,6 +244,7 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
+     let mut var_upper: HashMap<String, f64> = HashMap::new();
+ 
+     let mut section = String::new();
++    let mut obj_sense = 1.0; // 1 = minimize, -1 = maximize
+ 
+     for line_result in reader.lines() {
+         let line = line_result?;
+@@ -283,7 +290,7 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
+             "OBJSENSE" => {
+                 // Handle OBJSENSE MAX or MIN
+                 if line.contains("MAX") {
+-                    // Will negate objective later
++                    obj_sense = -1.0;
+                 }
+             }
+             "ROWS" => {
+@@ -483,7 +490,7 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
+         name,
+         n,
+         m,
+-        obj_sense: 1.0, // Minimize by default
++        obj_sense, // Parsed from OBJSENSE section (1.0 = min, -1.0 = max)
+         q,
+         p_triplets,
+         a_triplets,
+diff --git a/solver-core/Cargo.toml b/solver-core/Cargo.toml
+index 1e33c9b..8f10883 100644
+--- a/solver-core/Cargo.toml
++++ b/solver-core/Cargo.toml
+@@ -15,6 +15,7 @@ sprs.workspace = true
+ ldl.workspace = true
+ sprs_suitesparse_camd.workspace = true
+ suitesparse_camd_sys.workspace = true
++sprs_suitesparse_ldl = { workspace = true, optional = true }
+ 
+ # Error handling
+ thiserror.workspace = true
+@@ -39,6 +40,7 @@ env_logger.workspace = true
+ default = []
+ parallel = ["rayon"]
+ gpu = []  # Placeholder for future GPU support
++suitesparse-ldl = ["sprs_suitesparse_ldl"]
+ 
+ # Benchmarks will be added later
+ # [[bench]]
+diff --git a/solver-core/src/cones/nonneg.rs b/solver-core/src/cones/nonneg.rs
+index ee68c92..b50e67d 100644
+--- a/solver-core/src/cones/nonneg.rs
++++ b/solver-core/src/cones/nonneg.rs
+@@ -38,9 +38,11 @@ impl NonNegCone {
+     const INTERIOR_TOL: f64 = 1e-12;
+ 
+     /// Scaling interior tolerance: accept very small positive values.
++    #[allow(dead_code)]
+     const SCALING_INTERIOR_TOL: f64 = 1e-300;
+ 
+     /// Relaxed interior check for scaling computations.
++    #[allow(dead_code)]
+     pub(crate) fn is_interior_scaling(&self, s: &[f64]) -> bool {
+         assert_eq!(s.len(), self.dim);
+         if s.iter().any(|&x| !x.is_finite()) {
+diff --git a/solver-core/src/ipm/hsde.rs b/solver-core/src/ipm/hsde.rs
+index bdbb159..3f55ad2 100644
+--- a/solver-core/src/ipm/hsde.rs
++++ b/solver-core/src/ipm/hsde.rs
+@@ -21,7 +21,9 @@
+ //!   τ ≥ 0, κ ≥ 0, τ κ = 0
+ 
+ use crate::cones::ConeKernel;
+-use crate::problem::ProblemData;
++use crate::postsolve::PostsolveMap;
++use crate::presolve::ruiz::RuizScaling;
++use crate::problem::{ProblemData, WarmStart};
+ 
+ /// HSDE state variables.
+ #[derive(Debug, Clone)]
+@@ -193,6 +195,66 @@ impl HsdeState {
+         self.tau = 1.0;
+         self.kappa = 1.0;
+     }
++
++    pub fn apply_warm_start(
++        &mut self,
++        warm: &WarmStart,
++        postsolve: &PostsolveMap,
++        scaling: &RuizScaling,
++        cones: &[Box<dyn ConeKernel>],
++    ) {
++        if let Some(tau) = warm.tau {
++            if tau.is_finite() && tau > 0.0 {
++                self.tau = tau;
++            }
++        }
++        if let Some(kappa) = warm.kappa {
++            if kappa.is_finite() && kappa > 0.0 {
++                self.kappa = kappa;
++            }
++        }
++
++        if let Some(x_full) = warm.x.as_ref() {
++            let x_reduced = if x_full.len() == postsolve.orig_n() {
++                postsolve.reduce_x(x_full)
++            } else if x_full.len() == self.x.len() {
++                x_full.clone()
++            } else {
++                Vec::new()
++            };
++            if x_reduced.len() == self.x.len() {
++                for i in 0..self.x.len() {
++                    self.x[i] = x_reduced[i] / scaling.col_scale[i];
++                }
++            }
++        }
++
++        if let Some(s_full) = warm.s.as_ref() {
++            let s_reduced = postsolve.reduce_s(s_full, self.s.len());
++            if s_reduced.len() == self.s.len() {
++                for i in 0..self.s.len() {
++                    self.s[i] = s_reduced[i] * scaling.row_scale[i];
++                }
++            }
++        }
++
++        if let Some(z_full) = warm.z.as_ref() {
++            let z_reduced = postsolve.reduce_z(z_full, self.z.len());
++            if z_reduced.len() == self.z.len() {
++                for i in 0..self.z.len() {
++                    self.z[i] = z_reduced[i] / (scaling.cost_scale * scaling.row_scale[i]);
++                }
++            }
++        }
++
++        if self.tau.is_finite() && self.tau > 0.0 {
++            for i in 0..self.x.len() {
++                self.xi[i] = self.x[i] / self.tau;
++            }
++        }
++
++        self.push_to_interior(cones, 1e-6);
++    }
+ }
+ 
+ /// HSDE residuals.
+diff --git a/solver-core/src/ipm/mod.rs b/solver-core/src/ipm/mod.rs
+index 505a215..8e91770 100644
+--- a/solver-core/src/ipm/mod.rs
++++ b/solver-core/src/ipm/mod.rs
+@@ -8,12 +8,16 @@ pub mod termination;
+ 
+ use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone};
+ use crate::linalg::kkt::KktSolver;
++use crate::presolve::apply_presolve;
+ use crate::presolve::ruiz::equilibrate;
++use crate::presolve::singleton::detect_singleton_rows;
+ use crate::problem::{ProblemData, ConeSpec, SolverSettings, SolveResult, SolveStatus, SolveInfo};
++use crate::ipm2::metrics::compute_unscaled_metrics;
+ use crate::scaling::ScalingBlock;
+ use hsde::{HsdeState, HsdeResiduals, compute_residuals, compute_mu};
+-use predcorr::predictor_corrector_step;
++use predcorr::{predictor_corrector_step, StepTimings};
+ use termination::{TerminationCriteria, check_termination};
++use std::time::Instant;
+ 
+ /// Main IPM solver.
+ ///
+@@ -35,11 +39,17 @@ pub fn solve_ipm(
+     // Validate problem
+     prob.validate()?;
+ 
++    let orig_prob = prob.clone();
++    let presolved = apply_presolve(prob);
++    let prob = presolved.problem;
++    let postsolve = presolved.postsolve;
++
+     // Convert var_bounds to explicit constraints if present
+     let prob = prob.with_bounds_as_constraints();
+ 
+     let n = prob.num_vars();
+     let m = prob.num_constraints();
++    let orig_n = orig_prob.num_vars();
+ 
+     // Apply Ruiz equilibration for numerical stability
+     let (a_scaled, p_scaled, q_scaled, b_scaled, scaling) = equilibrate(
+@@ -62,6 +72,15 @@ pub fn solve_ipm(
+         integrality: prob.integrality.clone(),
+     };
+ 
++    let singleton_partition = detect_singleton_rows(&scaled_prob.A);
++    if settings.verbose {
++        eprintln!(
++            "presolve: singleton_rows={} non_singleton_rows={}",
++            singleton_partition.singleton_rows.len(),
++            singleton_partition.non_singleton_rows.len(),
++        );
++    }
++
+     // Precompute constant RHS used by the two-solve dtau strategy: rhs_x2 = -q.
+     let neg_q: Vec<f64> = scaled_prob.q.iter().map(|&v| -v).collect();
+ 
+@@ -74,6 +93,9 @@ pub fn solve_ipm(
+     // Initialize HSDE state
+     let mut state = HsdeState::new(n, m);
+     state.initialize_with_prob(&cones, &scaled_prob);
++    if let Some(warm) = settings.warm_start.as_ref() {
++        state.apply_warm_start(warm, &postsolve, &scaling, &cones);
++    }
+ 
+     // Initialize residuals
+     let mut residuals = HsdeResiduals::new(n, m);
+@@ -88,22 +110,13 @@ pub fn solve_ipm(
+     let p_is_sparse = scaled_prob.P.as_ref().map_or(true, |p| {
+         p.nnz() < n / 2  // Less than 50% diagonal fill
+     });
+-    let static_reg = if p_is_sparse {
++    let mut static_reg = if p_is_sparse {
+         settings.static_reg.max(1e-6)
+     } else {
+         settings.static_reg.max(1e-6)
+     };
+ 
+-    let mut kkt = KktSolver::new(
+-        n,
+-        m,
+-        static_reg,
+-        settings.dynamic_reg_min_pivot,
+-    );
+-
+-    // Perform symbolic factorization once with initial scaling structure.
+-    // This determines the sparsity pattern of L and the elimination tree.
+-    // Subsequent calls to factor() reuse this symbolic factorization.
++    // Build initial scaling structure for KKT assembly.
+     let initial_scaling: Vec<ScalingBlock> = cones.iter().map(|cone| {
+         let dim = cone.dim();
+         if cone.barrier_degree() == 0 {
+@@ -117,6 +130,19 @@ pub fn solve_ipm(
+         }
+     }).collect();
+ 
++    let mut kkt = KktSolver::new_with_singleton_elimination(
++        n,
++        m,
++        static_reg,
++        settings.dynamic_reg_min_pivot,
++        &scaled_prob.A,
++        &initial_scaling,
++    );
++
++    // Perform symbolic factorization once with initial scaling structure.
++    // This determines the sparsity pattern of L and the elimination tree.
++    // Subsequent calls to factor() reuse this symbolic factorization.
++
+     if let Err(e) = kkt.initialize(scaled_prob.P.as_ref(), &scaled_prob.A, &initial_scaling) {
+         return Err(format!("KKT symbolic factorization failed: {}", e).into());
+     }
+@@ -137,6 +163,9 @@ pub fn solve_ipm(
+     let mut iter = 0;
+     let mut consecutive_failures = 0;
+     const MAX_CONSECUTIVE_FAILURES: usize = 3;
++    let mut timings = StepTimings::default();
++    let mut last_dynamic_bumps = 0;
++    let start = Instant::now();
+ 
+     if settings.verbose {
+         println!("Minix IPM Solver");
+@@ -179,6 +208,7 @@ pub fn solve_ipm(
+             mu,
+             barrier_degree,
+             settings,
++            &mut timings,
+         ) {
+             Ok(result) => {
+                 consecutive_failures = 0;  // Reset on success
+@@ -201,7 +231,7 @@ pub fn solve_ipm(
+                 }
+ 
+                 // Push s and z back to interior with larger margin
+-                let recovery_margin = (mu * 0.1).max(1e-4);
++                let recovery_margin = (mu * 0.1).clamp(1e-4, 1e4);
+                 state.push_to_interior(&cones, recovery_margin);
+ 
+                 // Recompute mu after recovery
+@@ -283,6 +313,8 @@ pub fn solve_ipm(
+             );
+         }
+ 
++        last_dynamic_bumps = kkt.dynamic_bumps();
++        static_reg = kkt.static_reg();
+         iter += 1;
+     }
+ 
+@@ -317,15 +349,19 @@ pub fn solve_ipm(
+     };
+ 
+     // Unscale solution back to original coordinates
+-    let x = scaling.unscale_x(&x_scaled);
+-    let s = scaling.unscale_s(&s_scaled);
+-    let z = scaling.unscale_z(&z_scaled);
++    let x_unscaled = scaling.unscale_x(&x_scaled);
++    let s_unscaled = scaling.unscale_s(&s_scaled);
++    let z_unscaled = scaling.unscale_z(&z_scaled);
++
++    let x = postsolve.recover_x(&x_unscaled);
++    let s = postsolve.recover_s(&s_unscaled, &x);
++    let z = postsolve.recover_z(&z_unscaled);
+ 
+     // Compute objective value using ORIGINAL (unscaled) problem data
+     let mut obj_val = 0.0;
+-    if let Some(ref p) = prob.P {
+-        let mut px = vec![0.0; n];
+-        for col in 0..n {
++    if let Some(ref p) = orig_prob.P {
++        let mut px = vec![0.0; orig_n];
++        for col in 0..orig_n {
+             if let Some(col_view) = p.outer_view(col) {
+                 for (row, &val) in col_view.iter() {
+                     px[row] += val * x[col];
+@@ -335,14 +371,34 @@ pub fn solve_ipm(
+                 }
+             }
+         }
+-        for i in 0..n {
++        for i in 0..orig_n {
+             obj_val += 0.5 * x[i] * px[i];
+         }
+     }
+-    for i in 0..n {
+-        obj_val += prob.q[i] * x[i];
++    for i in 0..orig_n {
++        obj_val += orig_prob.q[i] * x[i];
+     }
+ 
++    let orig_prob_bounds = orig_prob.with_bounds_as_constraints();
++    let (primal_res, dual_res, gap) = {
++        let mut r_p = vec![0.0; orig_prob_bounds.num_constraints()];
++        let mut r_d = vec![0.0; orig_prob_bounds.num_vars()];
++        let mut p_x = vec![0.0; orig_prob_bounds.num_vars()];
++        let metrics = compute_unscaled_metrics(
++            &orig_prob_bounds.A,
++            orig_prob_bounds.P.as_ref(),
++            &orig_prob_bounds.q,
++            &orig_prob_bounds.b,
++            &x,
++            &s,
++            &z,
++            &mut r_p,
++            &mut r_d,
++            &mut p_x,
++        );
++        (metrics.rel_p, metrics.rel_d, metrics.gap_rel)
++    };
++
+     Ok(SolveResult {
+         status,
+         x,
+@@ -351,16 +407,16 @@ pub fn solve_ipm(
+         obj_val,
+         info: SolveInfo {
+             iters: iter,
+-            solve_time_ms: 0,  // TODO: Add timing
+-            kkt_factor_time_ms: 0,
+-            kkt_solve_time_ms: 0,
+-            cone_time_ms: 0,
+-            primal_res: 0.0,  // TODO: Record final residuals
+-            dual_res: 0.0,
+-            gap: 0.0,
++            solve_time_ms: start.elapsed().as_millis() as u64,
++            kkt_factor_time_ms: timings.kkt_factor.as_millis() as u64,
++            kkt_solve_time_ms: timings.kkt_solve.as_millis() as u64,
++            cone_time_ms: timings.cone.as_millis() as u64,
++            primal_res,
++            dual_res,
++            gap,
+             mu,
+             reg_static: static_reg,
+-            reg_dynamic_bumps: 0,
++            reg_dynamic_bumps: last_dynamic_bumps,
+         },
+     })
+ }
+diff --git a/solver-core/src/ipm/predcorr.rs b/solver-core/src/ipm/predcorr.rs
+index 58cbb0b..1bddd28 100644
+--- a/solver-core/src/ipm/predcorr.rs
++++ b/solver-core/src/ipm/predcorr.rs
+@@ -12,6 +12,7 @@ use crate::linalg::kkt::KktSolver;
+ use crate::scaling::{ScalingBlock, nt};
+ use crate::problem::{ProblemData, SolverSettings};
+ use std::any::Any;
++use std::time::{Duration, Instant};
+ 
+ fn diagnostics_enabled() -> bool {
+     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+@@ -22,6 +23,97 @@ fn diagnostics_enabled() -> bool {
+     })
+ }
+ 
++fn min_slice(v: &[f64]) -> f64 {
++    v.iter().copied().fold(f64::INFINITY, f64::min)
++}
++
++fn all_finite(v: &[f64]) -> bool {
++    v.iter().all(|x| x.is_finite())
++}
++
++fn cone_type_name(cone: &dyn ConeKernel) -> &'static str {
++    let any = cone as &dyn Any;
++    if any.is::<NonNegCone>() {
++        "NonNeg"
++    } else if any.is::<SocCone>() {
++        "SOC"
++    } else {
++        "Other"
++    }
++}
++
++fn check_state_interior_for_step(
++    state: &HsdeState,
++    cones: &[Box<dyn ConeKernel>],
++) -> Result<(), String> {
++    if !state.tau.is_finite() || state.tau <= 0.0 {
++        return Err(format!("tau is not positive finite (tau={})", state.tau));
++    }
++    if !state.kappa.is_finite() || state.kappa <= 0.0 {
++        return Err(format!("kappa is not positive finite (kappa={})", state.kappa));
++    }
++    if !all_finite(&state.x) {
++        return Err("x contains non-finite values".to_string());
++    }
++    if !all_finite(&state.s) {
++        return Err("s contains non-finite values".to_string());
++    }
++    if !all_finite(&state.z) {
++        return Err("z contains non-finite values".to_string());
++    }
++
++    let mut offset = 0usize;
++    for cone in cones.iter() {
++        let dim = cone.dim();
++        if dim == 0 {
++            continue;
++        }
++        let s_slice = &state.s[offset..offset + dim];
++        let z_slice = &state.z[offset..offset + dim];
++
++        if cone.barrier_degree() == 0 {
++            offset += dim;
++            continue;
++        }
++
++        let any = cone.as_ref() as &dyn Any;
++        if let Some(nonneg) = any.downcast_ref::<NonNegCone>() {
++            if !nonneg.is_interior_scaling(s_slice) || !nonneg.is_interior_scaling(z_slice) {
++                return Err(format!(
++                    "NonNeg cone not interior (offset={}, dim={}, s_min={:.3e}, z_min={:.3e})",
++                    offset,
++                    dim,
++                    min_slice(s_slice),
++                    min_slice(z_slice)
++                ));
++            }
++        } else if let Some(soc) = any.downcast_ref::<SocCone>() {
++            if !soc.is_interior_scaling(s_slice) || !soc.is_interior_scaling(z_slice) {
++                return Err(format!(
++                    "SOC cone not interior (offset={}, dim={}, s_min={:.3e}, z_min={:.3e})",
++                    offset,
++                    dim,
++                    min_slice(s_slice),
++                    min_slice(z_slice)
++                ));
++            }
++        } else {
++            if !cone.is_interior_primal(s_slice) || !cone.is_interior_dual(z_slice) {
++                return Err(format!(
++                    "{} cone not interior (offset={}, dim={})",
++                    cone_type_name(cone.as_ref()),
++                    offset,
++                    dim
++                ));
++            }
++        }
++
++        offset += dim;
++    }
++
++    Ok(())
++}
++
+ /// Predictor-corrector step result.
+ #[derive(Debug)]
+ pub struct StepResult {
+@@ -35,6 +127,13 @@ pub struct StepResult {
+     pub mu_new: f64,
+ }
+ 
++#[derive(Debug, Default, Clone, Copy)]
++pub struct StepTimings {
++    pub kkt_factor: Duration,
++    pub kkt_solve: Duration,
++    pub cone: Duration,
++}
++
+ fn compute_dtau(
+     numerator: f64,
+     denominator: f64,
+@@ -216,18 +315,20 @@ pub fn predictor_corrector_step(
+     mu: f64,
+     barrier_degree: usize,
+     settings: &SolverSettings,
++    timings: &mut StepTimings,
+ ) -> Result<StepResult, String> {
+     let n = prob.num_vars();
+     let m = prob.num_constraints();
++    check_state_interior_for_step(state, cones)?;
+ 
+     assert_eq!(neg_q.len(), n, "neg_q must have length n");
+ 
+     // ======================================================================
+     // Step 1: Compute NT scaling for all cones with adaptive regularization
+     // ======================================================================
++    let cone_start = Instant::now();
+     let mut scaling: Vec<ScalingBlock> = Vec::new();
+     let mut offset = 0;
+-    let mut nt_fallbacks: usize = 0;
+ 
+     // Track minimum s and z values for adaptive regularization
+     let mut s_min = f64::INFINITY;
+@@ -261,17 +362,29 @@ pub fn predictor_corrector_step(
+         // Compute NT scaling based on cone type
+         let scale = match nt::compute_nt_scaling(s, z, cone.as_ref()) {
+             Ok(scale) => scale,
+-            Err(_) => {
+-                nt_fallbacks += 1;
+-                let d: Vec<f64> = s
+-                    .iter()
+-                    .zip(z.iter())
+-                    .map(|(si, zi)| {
+-                        let denom = zi.max(1e-300);
+-                        (si / denom).clamp(1e-18, 1e18)
+-                    })
+-                    .collect();
+-                ScalingBlock::Diagonal { d }
++            Err(e) => {
++                let s_block_min = min_slice(s);
++                let z_block_min = min_slice(z);
++                if diagnostics_enabled() {
++                    eprintln!(
++                        "nt scaling error: cone={}, offset={}, dim={}, s_min={:.3e}, z_min={:.3e}: {}",
++                        cone_type_name(cone.as_ref()),
++                        offset,
++                        dim,
++                        s_block_min,
++                        z_block_min,
++                        e
++                    );
++                }
++                return Err(format!(
++                    "NT scaling failed for cone={} (offset={}, dim={}, s_min={:.3e}, z_min={:.3e}): {}",
++                    cone_type_name(cone.as_ref()),
++                    offset,
++                    dim,
++                    s_block_min,
++                    z_block_min,
++                    e
++                ));
+             }
+         };
+ 
+@@ -294,17 +407,6 @@ pub fn predictor_corrector_step(
+         0.0
+     };
+ 
+-    if diagnostics_enabled() && nt_fallbacks > 0 {
+-        eprintln!(
+-            "nt scaling fallback: blocks={}, s_min={:.3e}, z_min={:.3e}, mu={:.3e}, extra_reg={:.3e}",
+-            nt_fallbacks,
+-            s_min,
+-            z_min,
+-            mu,
+-            extra_reg,
+-        );
+-    }
+-
+     if settings.verbose && extra_reg > 0.0 {
+         eprintln!(
+             "extra_reg={:.2e} (s_min={:.2e}, z_min={:.2e}, mu={:.2e})",
+@@ -323,12 +425,36 @@ pub fn predictor_corrector_step(
+             }
+         }
+     }
++    timings.cone += cone_start.elapsed();
+ 
+     // ======================================================================
+     // Step 2: Factor KKT system
+     // ======================================================================
+-    let factor = kkt.factor(prob.P.as_ref(), &prob.A, &scaling)
+-        .map_err(|e| format!("KKT factorization failed: {}", e))?;
++    let factor = {
++        const MAX_REG_RETRIES: usize = 3;
++        const MAX_STATIC_REG: f64 = 1e-2;
++        let mut retries = 0usize;
++        loop {
++            let start = Instant::now();
++            let factor = kkt
++                .factor(prob.P.as_ref(), &prob.A, &scaling)
++                .map_err(|e| format!("KKT factorization failed: {}", e))?;
++            timings.kkt_factor += start.elapsed();
++
++            let bumps = kkt.dynamic_bumps();
++            if bumps == 0 || retries >= MAX_REG_RETRIES {
++                break factor;
++            }
++
++            let next_reg = (kkt.static_reg() * 10.0).min(MAX_STATIC_REG);
++            if next_reg <= kkt.static_reg() {
++                break factor;
++            }
++            kkt.set_static_reg(next_reg)
++                .map_err(|e| format!("KKT reg update failed: {}", e))?;
++            retries += 1;
++        }
++    };
+ 
+     // ======================================================================
+     // Step 3: Affine step (σ = 0)
+@@ -353,15 +479,6 @@ pub fn predictor_corrector_step(
+         .map(|(si, ri)| si - ri)
+         .collect();
+ 
+-    kkt.solve_refined(
+-        &factor,
+-        &rhs_x_aff,
+-        &rhs_z_aff,
+-        &mut dx_aff,
+-        &mut dz_aff,
+-        settings.kkt_refine_iters,
+-    );
+-
+     // Compute dtau via two-solve Schur complement strategy (design doc §5.4.1)
+     // This replaces the old heuristic dtau = -(q'dx + b'dz)
+ 
+@@ -396,14 +513,24 @@ pub fn predictor_corrector_step(
+     let rhs_x2 = neg_q;
+     let rhs_z2 = &prob.b;
+ 
+-    kkt.solve_refined(
+-        &factor,
+-        rhs_x2,
+-        rhs_z2,
+-        &mut dx2,
+-        &mut dz2,
+-        settings.kkt_refine_iters,
+-    );
++    {
++        let start = Instant::now();
++        kkt.solve_two_rhs_refined_tagged(
++            &factor,
++            &rhs_x_aff,
++            &rhs_z_aff,
++            rhs_x2,
++            rhs_z2,
++            &mut dx_aff,
++            &mut dz_aff,
++            &mut dx2,
++            &mut dz2,
++            settings.kkt_refine_iters,
++            "rhs1",
++            "rhs2",
++        );
++        timings.kkt_solve += start.elapsed();
++    }
+ 
+     // Compute dtau via Schur complement formula (design doc §5.4.1)
+     // Numerator: d_τ - d_κ/τ + (2Pξ+q)ᵀΔx₁ + bᵀΔz₁
+@@ -507,8 +634,10 @@ pub fn predictor_corrector_step(
+         dkappa_aff,
+         alpha_aff,
+         barrier_degree,
++        cones,
+     );
+-    let sigma = compute_centering_parameter(alpha_aff, mu, mu_aff, barrier_degree);
++    let sigma_cap = settings.sigma_max.min(0.999);
++    let sigma = compute_centering_parameter(alpha_aff, mu, mu_aff, barrier_degree).min(sigma_cap);
+ 
+ 
+     // ======================================================================
+@@ -540,7 +669,7 @@ pub fn predictor_corrector_step(
+ 
+     let mut sigma_used = sigma;
+     let mut sigma_eff = sigma;
+-    let mut feas_weight_floor = 0.05;
++    let mut feas_weight_floor = settings.feas_weight_floor.clamp(0.0, 1.0);
+     let mut refine_iters = settings.kkt_refine_iters;
+     let mut final_feas_weight = 0.0;
+ 
+@@ -651,14 +780,18 @@ pub fn predictor_corrector_step(
+                 .map(|(ds_i, rz_i)| ds_i - feas_weight * rz_i)
+                 .collect();
+ 
+-            kkt.solve_refined(
+-                &factor,
+-                &rhs_x_comb,
+-                &rhs_z_comb,
+-                &mut dx,
+-                &mut dz,
+-                refine_iters,
+-            );
++            {
++                let start = Instant::now();
++                kkt.solve_refined(
++                    &factor,
++                    &rhs_x_comb,
++                    &rhs_z_comb,
++                    &mut dx,
++                    &mut dz,
++                    refine_iters,
++                );
++                timings.kkt_solve += start.elapsed();
++            }
+ 
+             // Compute dtau for corrector step using Schur complement formula
+             // From design doc §7.3:
+@@ -816,10 +949,10 @@ pub fn predictor_corrector_step(
+                     eprintln!("bumped KKT static_reg to {:.2e} after alpha stall", bump_reg);
+                 }
+             }
+-            sigma_eff = (sigma_eff + 0.2).min(0.999);
++            sigma_eff = (sigma_eff + 0.2).min(sigma_cap);
+             refine_iters = refine_iters.saturating_add(2);
+         } else {
+-            sigma_eff = 0.999;
++            sigma_eff = sigma_cap;
+             feas_weight_floor = 0.0;
+             refine_iters = refine_iters.saturating_add(2);
+         }
+@@ -911,9 +1044,9 @@ fn compute_step_size(
+     fraction: f64,
+ ) -> f64 {
+     let mut alpha = f64::INFINITY;
+-    let mut offset = 0;
++    let mut offset = 0usize;
+ 
+-    for cone in cones {
++    for cone in cones.iter() {
+         let dim = cone.dim();
+         if dim == 0 {
+             continue;
+@@ -924,23 +1057,34 @@ fn compute_step_size(
+         let z_slice = &z[offset..offset + dim];
+         let dz_slice = &dz[offset..offset + dim];
+ 
+-        // Primal step-to-boundary
+-        let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
+-        if alpha_p > 0.0 && alpha_p < alpha {
+-            alpha = alpha_p;
++        // Barrier-free cones (e.g., Zero) don't constrain step size.
++        if cone.barrier_degree() == 0 {
++            offset += dim;
++            continue;
++        }
++
++        // Non-finite directions -> safest possible step is 0.0.
++        if !all_finite(ds_slice) || !all_finite(dz_slice) {
++            return 0.0;
+         }
+ 
+-        // Dual step-to-boundary
++        let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
+         let alpha_d = cone.step_to_boundary_dual(z_slice, dz_slice);
+-        if alpha_d > 0.0 && alpha_d < alpha {
+-            alpha = alpha_d;
++
++        if alpha_p.is_finite() {
++            alpha = alpha.min(alpha_p.max(0.0));
++        }
++        if alpha_d.is_finite() {
++            alpha = alpha.min(alpha_d.max(0.0));
++        }
++
++        if alpha == 0.0 {
++            break;
+         }
+ 
+         offset += dim;
+     }
+ 
+-    // Apply fraction-to-boundary safety factor and cap at 1.0
+-    // (Newton step should never be > 1)
+     if alpha.is_finite() {
+         (fraction * alpha).min(1.0)
+     } else {
+@@ -948,14 +1092,11 @@ fn compute_step_size(
+     }
+ }
+ 
+-/// Compute centering parameter σ.
++/// Compute μ_aff = complementarity after affine step.
+ ///
+-/// Uses the robust formula from design doc §7.2:
+-///   σ = (1 - α_aff)³
+-///
+-/// This is simple, stable, and works well in practice.
+-/// It gives σ ≈ 0 when affine step is large (aggressive progress)
+-/// and σ ≈ 1 when affine step is small (conservative centering).
++/// IMPORTANT: Only cones with barrier_degree > 0 (NonNeg, SOC) contribute.
++/// Zero cones (equalities) must be excluded or they can pollute μ_aff
++/// with large residual values, causing σ to saturate incorrectly.
+ fn compute_mu_aff(
+     state: &HsdeState,
+     ds_aff: &[f64],
+@@ -964,6 +1105,7 @@ fn compute_mu_aff(
+     dkappa_aff: f64,
+     alpha_aff: f64,
+     barrier_degree: usize,
++    cones: &[Box<dyn ConeKernel>],
+ ) -> f64 {
+     if barrier_degree == 0 {
+         return 0.0;
+@@ -975,11 +1117,24 @@ fn compute_mu_aff(
+         return f64::NAN;
+     }
+ 
++    // Iterate by cone blocks, only including cones with barrier_degree > 0
+     let mut s_dot_z = 0.0;
+-    for i in 0..state.s.len() {
+-        let s_i = state.s[i] + alpha_aff * ds_aff[i];
+-        let z_i = state.z[i] + alpha_aff * dz_aff[i];
+-        s_dot_z += s_i * z_i;
++    let mut offset = 0;
++    for cone in cones {
++        let dim = cone.dim();
++        if dim == 0 {
++            continue;
++        }
++
++        // Skip Zero cones (barrier_degree == 0) - they shouldn't contribute
++        if cone.barrier_degree() > 0 {
++            for i in offset..offset + dim {
++                let s_i = state.s[i] + alpha_aff * ds_aff[i];
++                let z_i = state.z[i] + alpha_aff * dz_aff[i];
++                s_dot_z += s_i * z_i;
++            }
++        }
++        offset += dim;
+     }
+ 
+     (s_dot_z + tau_aff * kappa_aff) / (barrier_degree as f64 + 1.0)
+diff --git a/solver-core/src/lib.rs b/solver-core/src/lib.rs
+index 023519d..4928690 100644
+--- a/solver-core/src/lib.rs
++++ b/solver-core/src/lib.rs
+@@ -55,7 +55,7 @@
+ //! - MOSEK: Commercial-grade nonsymmetric cone handling
+ //! - ECOS: Embedded conic solver (baseline for comparison)
+ 
+-#![warn(missing_docs)]
++#![allow(missing_docs)]
+ #![warn(clippy::all)]
+ #![allow(clippy::too_many_arguments)]  // IPM algorithms need many parameters
+ 
+@@ -64,13 +64,15 @@ pub mod cones;
+ pub mod scaling;
+ pub mod linalg;
+ pub mod ipm;
++pub mod ipm2;
+ pub mod presolve;
++pub mod postsolve;
+ pub mod util;
+ 
+ // Re-export main types
+ pub use problem::{
+     ProblemData, ConeSpec, Pow3D, VarBound, VarType,
+-    SolverSettings, SolveResult, SolveStatus, SolveInfo,
++    SolverSettings, SolveResult, SolveStatus, SolveInfo, WarmStart,
+ };
+ 
+ /// Main solve entry point.
+diff --git a/solver-core/src/linalg/kkt.rs b/solver-core/src/linalg/kkt.rs
+index 2ffc1fa..2503f78 100644
+--- a/solver-core/src/linalg/kkt.rs
++++ b/solver-core/src/linalg/kkt.rs
+@@ -17,11 +17,13 @@
+ //! The solver implements the two-solve strategy from §5.4.1 of the design doc
+ //! for efficient predictor-corrector steps.
+ 
+-use super::qdldl::{QdldlError, QdldlFactorization, QdldlSolver};
++use super::backend::{BackendError, KktBackend, QdldlBackend};
+ use super::sparse::{SparseCsc, SparseSymmetricCsc};
+ use crate::scaling::ScalingBlock;
++use crate::scaling::nt::jordan_product_apply;
+ use sprs::TriMat;
+ use sprs_suitesparse_camd::try_camd;
++use std::sync::OnceLock;
+ 
+ fn symm_matvec_upper(a: &SparseCsc, x: &[f64], y: &mut [f64]) {
+     y.fill(0.0);
+@@ -33,22 +35,735 @@ fn symm_matvec_upper(a: &SparseCsc, x: &[f64], y: &mut [f64]) {
+     }
+ }
+ 
++fn kkt_diagnostics_enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        std::env::var("MINIX_DIAGNOSTICS_KKT")
++            .ok()
++            .map(|v| v != "0" && v.to_lowercase() != "false")
++            .unwrap_or(false)
++    })
++}
++
++fn quad_rep_soc_in_place(
++    w: &[f64],
++    y: &[f64],
++    out: &mut [f64],
++    w_circ_y: &mut [f64],
++    w_circ_w: &mut [f64],
++    temp: &mut [f64],
++    w2_circ_y: &mut [f64],
++) {
++    jordan_product_apply(w, y, w_circ_y);
++    jordan_product_apply(w, w, w_circ_w);
++    jordan_product_apply(w_circ_y, w, temp);
++    for i in 0..w.len() {
++        temp[i] *= 2.0;
++    }
++    jordan_product_apply(w_circ_w, y, w2_circ_y);
++    for i in 0..w.len() {
++        out[i] = temp[i] - w2_circ_y[i];
++    }
++}
++
+ struct SolveWorkspace {
+     rhs_perm: Vec<f64>,
++    rhs_perm2: Vec<f64>,
+     sol_perm: Vec<f64>,
+     kx: Vec<f64>,
+     res: Vec<f64>,
+     delta: Vec<f64>,
++    rhs_x: Vec<f64>,
++    rhs_z: Vec<f64>,
++    sol_z: Vec<f64>,
+ }
+ 
+ impl SolveWorkspace {
+-    fn new(kkt_dim: usize) -> Self {
++    fn new(n: usize, m: usize) -> Self {
++        let kkt_dim = n + m;
+         Self {
+             rhs_perm: vec![0.0; kkt_dim],
++            rhs_perm2: vec![0.0; kkt_dim],
+             sol_perm: vec![0.0; kkt_dim],
+             kx: vec![0.0; kkt_dim],
+             res: vec![0.0; kkt_dim],
+             delta: vec![0.0; kkt_dim],
++            rhs_x: vec![0.0; n],
++            rhs_z: vec![0.0; m],
++            sol_z: vec![0.0; m],
++        }
++    }
++}
++
++#[derive(Clone, Copy)]
++enum RhsPermKind {
++    Primary,
++    Secondary,
++}
++
++fn fill_rhs_perm_with_perm(
++    perm: Option<&[usize]>,
++    n: usize,
++    rhs_x: &[f64],
++    rhs_z: &[f64],
++    rhs_perm: &mut [f64],
++) {
++    let kkt_dim = n + rhs_z.len();
++    if let Some(p) = perm {
++        for i in 0..kkt_dim {
++            let src = p[i];
++            if src < n {
++                rhs_perm[i] = rhs_x[src];
++            } else {
++                rhs_perm[i] = rhs_z[src - n];
++            }
++        }
++    } else {
++        rhs_perm[..n].copy_from_slice(rhs_x);
++        rhs_perm[n..kkt_dim].copy_from_slice(rhs_z);
++    }
++}
++
++fn fill_rhs_perm_two_with_perm(
++    perm: Option<&[usize]>,
++    n: usize,
++    rhs_x1: &[f64],
++    rhs_z1: &[f64],
++    rhs_x2: &[f64],
++    rhs_z2: &[f64],
++    rhs_perm1: &mut [f64],
++    rhs_perm2: &mut [f64],
++) {
++    let kkt_dim = n + rhs_z1.len();
++    if let Some(perm) = perm {
++        for (i, &pi) in perm.iter().enumerate().take(kkt_dim) {
++            let src = pi;
++            if src < n {
++                rhs_perm1[i] = rhs_x1[src];
++                rhs_perm2[i] = rhs_x2[src];
++            } else {
++                let src = src - n;
++                rhs_perm1[i] = rhs_z1[src];
++                rhs_perm2[i] = rhs_z2[src];
++            }
++        }
++    } else {
++        rhs_perm1[..n].copy_from_slice(rhs_x1);
++        rhs_perm1[n..kkt_dim].copy_from_slice(rhs_z1);
++        rhs_perm2[..n].copy_from_slice(rhs_x2);
++        rhs_perm2[n..kkt_dim].copy_from_slice(rhs_z2);
++    }
++}
++
++fn unpermute_solution_with_perm(
++    perm_inv: Option<&[usize]>,
++    n: usize,
++    sol_perm: &[f64],
++    sol_x: &mut [f64],
++    sol_z: &mut [f64],
++) {
++    if let Some(p_inv) = perm_inv {
++        for i in 0..n {
++            sol_x[i] = sol_perm[p_inv[i]];
++        }
++        for i in 0..sol_z.len() {
++            sol_z[i] = sol_perm[p_inv[n + i]];
++        }
++    } else {
++        sol_x.copy_from_slice(&sol_perm[..n]);
++        sol_z.copy_from_slice(&sol_perm[n..n + sol_z.len()]);
++    }
++}
++
++fn prepare_rhs_singleton(
++    singleton: &SingletonElim,
++    rhs_x: &[f64],
++    rhs_z: &[f64],
++    ws: &mut SolveWorkspace,
++) {
++    ws.rhs_x.copy_from_slice(rhs_x);
++    for (red_idx, &row) in singleton.kept_rows.iter().enumerate() {
++        ws.rhs_z[red_idx] = rhs_z[row];
++    }
++    for (idx, row) in singleton.singletons.iter().enumerate() {
++        let rhs_row = rhs_z[row.row];
++        ws.rhs_x[row.col] += row.val * rhs_row * singleton.inv_h[idx];
++    }
++}
++
++fn expand_solution_z_singleton(
++    singleton: &SingletonElim,
++    rhs_z: &[f64],
++    sol_x: &[f64],
++    sol_z: &mut [f64],
++    sol_z_reduced: &[f64],
++) {
++    sol_z.fill(0.0);
++    for (red_idx, &row) in singleton.kept_rows.iter().enumerate() {
++        sol_z[row] = sol_z_reduced[red_idx];
++    }
++    for (idx, row) in singleton.singletons.iter().enumerate() {
++        let rhs_row = rhs_z[row.row];
++        sol_z[row.row] = (row.val * sol_x[row.col] - rhs_row) * singleton.inv_h[idx];
++    }
++}
++
++fn solve_permuted_with_refinement<B: KktBackend>(
++    backend: &B,
++    static_reg: f64,
++    kkt: Option<&SparseCsc>,
++    ws: &mut SolveWorkspace,
++    factor: &B::Factorization,
++    rhs_kind: RhsPermKind,
++    refine_iters: usize,
++    tag: Option<&'static str>,
++) {
++    let rhs_perm = match rhs_kind {
++        RhsPermKind::Primary => &ws.rhs_perm,
++        RhsPermKind::Secondary => &ws.rhs_perm2,
++    };
++    let kkt_dim = rhs_perm.len();
++
++    backend.solve(factor, rhs_perm, &mut ws.sol_perm);
++
++    let mut refine_done = 0usize;
++    if refine_iters > 0 {
++        if let Some(kkt) = kkt {
++            for _ in 0..refine_iters {
++                symm_matvec_upper(kkt, &ws.sol_perm, &mut ws.kx);
++                if static_reg != 0.0 {
++                    for i in 0..kkt_dim {
++                        ws.kx[i] += static_reg * ws.sol_perm[i];
++                    }
++                }
++                for i in 0..kkt_dim {
++                    ws.res[i] = rhs_perm[i] - ws.kx[i];
++                }
++
++                let res_norm = ws
++                    .res
++                    .iter()
++                    .map(|v| v * v)
++                    .sum::<f64>()
++                    .sqrt();
++                refine_done += 1;
++                if !res_norm.is_finite() || res_norm < 1e-12 {
++                    break;
++                }
++
++                backend.solve(factor, &ws.res, &mut ws.delta);
++                for i in 0..kkt_dim {
++                    ws.sol_perm[i] += ws.delta[i];
++                }
++            }
++        }
++    }
++
++    if let Some(tag) = tag {
++        if kkt_diagnostics_enabled() {
++            if let Some(kkt) = kkt {
++                symm_matvec_upper(kkt, &ws.sol_perm, &mut ws.kx);
++                if static_reg != 0.0 {
++                    for i in 0..kkt_dim {
++                        ws.kx[i] += static_reg * ws.sol_perm[i];
++                    }
++                }
++                for i in 0..kkt_dim {
++                    ws.res[i] = rhs_perm[i] - ws.kx[i];
++                }
++                let res_inf = ws
++                    .res
++                    .iter()
++                    .fold(0.0_f64, |acc, v| acc.max(v.abs()));
++                eprintln!(
++                    "kkt_resid[{tag}] inf={:.3e} refine={}/{} static_reg={:.1e} dyn_bumps={}",
++                    res_inf,
++                    refine_done,
++                    refine_iters,
++                    static_reg,
++                    backend.dynamic_bumps(),
++                );
++            }
++        }
++    }
++}
++
++fn update_dense_block_in_place(
++    static_reg: f64,
++    h: &[f64; 9],
++    positions: &[usize],
++    data: &mut [f64],
++) {
++    let mut pos_idx = 0usize;
++    for col in 0..3 {
++        for row in 0..=col {
++            let mut val = -h[row * 3 + col];
++            if row == col {
++                val -= 2.0 * static_reg;
++            }
++            data[positions[pos_idx]] = val;
++            pos_idx += 1;
++        }
++    }
++}
++
++fn update_soc_block_in_place(
++    static_reg: f64,
++    scratch: &mut SocKktScratch,
++    w: &[f64],
++    positions: &[usize],
++    data: &mut [f64],
++) {
++    let dim = w.len();
++    scratch.ensure_dim(dim);
++    let e = &mut scratch.e[..dim];
++    let col = &mut scratch.col[..dim];
++    let w_circ_y = &mut scratch.w_circ_y[..dim];
++    let w_circ_w = &mut scratch.w_circ_w[..dim];
++    let temp = &mut scratch.temp[..dim];
++    let w2_circ_y = &mut scratch.w2_circ_y[..dim];
++
++    let mut pos_idx = 0usize;
++    for col_idx in 0..dim {
++        e.fill(0.0);
++        e[col_idx] = 1.0;
++        quad_rep_soc_in_place(w, e, col, w_circ_y, w_circ_w, temp, w2_circ_y);
++        for row_idx in 0..=col_idx {
++            let mut val = -col[row_idx];
++            if row_idx == col_idx {
++                val -= 2.0 * static_reg;
++            }
++            data[positions[pos_idx]] = val;
++            pos_idx += 1;
++        }
++    }
++}
++
++fn update_h_blocks_in_place(
++    static_reg: f64,
++    m: usize,
++    h_blocks: &[ScalingBlock],
++    h_block_positions: &[HBlockPositions],
++    kkt_mat: &mut SparseCsc,
++    soc_scratch: &mut SocKktScratch,
++) {
++    let data = kkt_mat.data_mut();
++
++    let mut offset = 0usize;
++    for (block, block_pos) in h_blocks.iter().zip(h_block_positions.iter()) {
++        let block_dim = match block {
++            ScalingBlock::Zero { dim } => *dim,
++            ScalingBlock::Diagonal { d } => d.len(),
++            ScalingBlock::Dense3x3 { .. } => 3,
++            ScalingBlock::SocStructured { w } => w.len(),
++            ScalingBlock::PsdStructured { n, .. } => n * (n + 1) / 2,
++        };
++
++        match (block, block_pos) {
++            (ScalingBlock::Zero { .. }, HBlockPositions::Diagonal { positions }) => {
++                assert_eq!(positions.len(), block_dim);
++                for i in 0..block_dim {
++                    data[positions[i]] = -2.0 * static_reg;
++                }
++            }
++            (ScalingBlock::Diagonal { d }, HBlockPositions::Diagonal { positions }) => {
++                assert_eq!(positions.len(), block_dim);
++                for i in 0..block_dim {
++                    data[positions[i]] = -d[i] - 2.0 * static_reg;
++                }
++            }
++            (ScalingBlock::Zero { .. }, HBlockPositions::UpperTriangle { dim, positions }) => {
++                assert_eq!(*dim, block_dim);
++                let mut pos_idx = 0usize;
++                for col in 0..block_dim {
++                    for row in 0..=col {
++                        let val = if row == col { -2.0 * static_reg } else { 0.0 };
++                        data[positions[pos_idx]] = val;
++                        pos_idx += 1;
++                    }
++                }
++            }
++            (ScalingBlock::Diagonal { d }, HBlockPositions::UpperTriangle { dim, positions }) => {
++                assert_eq!(*dim, block_dim);
++                let mut pos_idx = 0usize;
++                for col in 0..block_dim {
++                    for row in 0..=col {
++                        let val = if row == col { -d[row] - 2.0 * static_reg } else { 0.0 };
++                        data[positions[pos_idx]] = val;
++                        pos_idx += 1;
++                    }
++                }
++            }
++            (ScalingBlock::Dense3x3 { h }, HBlockPositions::UpperTriangle { dim, positions }) => {
++                assert_eq!(*dim, block_dim);
++                update_dense_block_in_place(static_reg, h, positions, data);
++            }
++            (ScalingBlock::SocStructured { w }, HBlockPositions::UpperTriangle { dim, positions }) => {
++                assert_eq!(*dim, block_dim);
++                update_soc_block_in_place(static_reg, soc_scratch, w, positions, data);
++            }
++            _ => {
++                panic!("H block positions mismatch");
++            }
++        }
++
++        offset += block_dim;
++    }
++
++    assert_eq!(offset, m, "Scaling blocks must cover all {} slacks", m);
++}
++
++fn update_h_diagonal_in_place(
++    static_reg: f64,
++    m: usize,
++    h_blocks: &[ScalingBlock],
++    h_diag_positions: &[usize],
++    kkt_mat: &mut SparseCsc,
++) {
++    let data = kkt_mat.data_mut();
++
++    let mut offset = 0usize;
++    for block in h_blocks {
++        match block {
++            ScalingBlock::Zero { dim } => {
++                for i in 0..*dim {
++                    let slack = offset + i;
++                    data[h_diag_positions[slack]] = -2.0 * static_reg;
++                }
++                offset += *dim;
++            }
++            ScalingBlock::Diagonal { d } => {
++                for (i, &di) in d.iter().enumerate() {
++                    let slack = offset + i;
++                    data[h_diag_positions[slack]] = -di - 2.0 * static_reg;
++                }
++                offset += d.len();
++            }
++            _ => panic!("update_h_diagonal_in_place called with non-diagonal ScalingBlock"),
++        }
++    }
++
++    assert_eq!(offset, m, "Scaling blocks must cover all {} slacks", m);
++}
++
++fn update_schur_diagonal(
++    singleton: Option<&SingletonElim>,
++    p_diag_positions: Option<&[usize]>,
++    p_diag_base: &[f64],
++    p_diag_schur: &mut [f64],
++    kkt_mat: &mut SparseCsc,
++) {
++    let Some(singleton) = singleton else {
++        return;
++    };
++    let positions = p_diag_positions.expect("P diagonal positions not initialized");
++    let data = kkt_mat.data_mut();
++
++    for &col in &singleton.diag_update_cols {
++        p_diag_schur[col] = 0.0;
++    }
++    for (idx, row) in singleton.singletons.iter().enumerate() {
++        p_diag_schur[row.col] += row.val * row.val * singleton.inv_h[idx];
++    }
++    for &col in &singleton.diag_update_cols {
++        data[positions[col]] = p_diag_base[col] + p_diag_schur[col];
++    }
++}
++
++struct SocKktScratch {
++    dim: usize,
++    e: Vec<f64>,
++    col: Vec<f64>,
++    w_circ_y: Vec<f64>,
++    w_circ_w: Vec<f64>,
++    temp: Vec<f64>,
++    w2_circ_y: Vec<f64>,
++}
++
++impl SocKktScratch {
++    fn new(dim: usize) -> Self {
++        Self {
++            dim,
++            e: vec![0.0; dim],
++            col: vec![0.0; dim],
++            w_circ_y: vec![0.0; dim],
++            w_circ_w: vec![0.0; dim],
++            temp: vec![0.0; dim],
++            w2_circ_y: vec![0.0; dim],
++        }
++    }
++
++    fn ensure_dim(&mut self, dim: usize) {
++        if dim <= self.dim {
++            return;
++        }
++        self.dim = dim;
++        self.e.resize(dim, 0.0);
++        self.col.resize(dim, 0.0);
++        self.w_circ_y.resize(dim, 0.0);
++        self.w_circ_w.resize(dim, 0.0);
++        self.temp.resize(dim, 0.0);
++        self.w2_circ_y.resize(dim, 0.0);
++    }
++}
++
++enum HBlockPositions {
++    Diagonal { positions: Vec<usize> },
++    UpperTriangle { dim: usize, positions: Vec<usize> },
++}
++
++struct SingletonRowInfo {
++    row: usize,
++    col: usize,
++    val: f64,
++    block_idx: usize,
++    block_offset: usize,
++}
++
++enum BlockMap {
++    Drop,
++    KeepAll { reduced_idx: usize },
++    KeepSubset { reduced_idx: usize, kept: Vec<usize> },
++}
++
++struct ReducedScaling {
++    blocks: Vec<ScalingBlock>,
++    block_maps: Vec<BlockMap>,
++}
++
++impl ReducedScaling {
++    fn new(h_blocks: &[ScalingBlock], remove_row: &[bool]) -> Self {
++        let mut blocks = Vec::new();
++        let mut block_maps = Vec::with_capacity(h_blocks.len());
++
++        let mut offset = 0usize;
++        for block in h_blocks {
++            let block_dim = match block {
++                ScalingBlock::Zero { dim } => *dim,
++                ScalingBlock::Diagonal { d } => d.len(),
++                ScalingBlock::Dense3x3 { .. } => 3,
++                ScalingBlock::SocStructured { w } => w.len(),
++                ScalingBlock::PsdStructured { n, .. } => n * (n + 1) / 2,
++            };
++
++            let mut kept = Vec::new();
++            for i in 0..block_dim {
++                if !remove_row[offset + i] {
++                    kept.push(i);
++                }
++            }
++
++            let map = if kept.is_empty() {
++                BlockMap::Drop
++            } else if kept.len() == block_dim {
++                let reduced_idx = blocks.len();
++                blocks.push(match block {
++                    ScalingBlock::Zero { dim } => ScalingBlock::Zero { dim: *dim },
++                    ScalingBlock::Diagonal { d } => {
++                        ScalingBlock::Diagonal { d: vec![0.0; d.len()] }
++                    }
++                    ScalingBlock::Dense3x3 { h } => ScalingBlock::Dense3x3 { h: *h },
++                    ScalingBlock::SocStructured { w } => ScalingBlock::SocStructured {
++                        w: vec![0.0; w.len()],
++                    },
++                    ScalingBlock::PsdStructured { w_factor, n } => ScalingBlock::PsdStructured {
++                        w_factor: vec![0.0; w_factor.len()],
++                        n: *n,
++                    },
++                });
++                BlockMap::KeepAll { reduced_idx }
++            } else {
++                let reduced_idx = blocks.len();
++                let reduced_block = match block {
++                    ScalingBlock::Zero { .. } => ScalingBlock::Zero { dim: kept.len() },
++                    ScalingBlock::Diagonal { .. } => ScalingBlock::Diagonal { d: vec![0.0; kept.len()] },
++                    _ => panic!("Singleton elimination only supports diagonal cone blocks"),
++                };
++                blocks.push(reduced_block);
++                BlockMap::KeepSubset { reduced_idx, kept }
++            };
++
++            block_maps.push(map);
++            offset += block_dim;
++        }
++
++        Self { blocks, block_maps }
++    }
++
++    fn update_from_full(&mut self, full: &[ScalingBlock]) {
++        for (full_idx, block) in full.iter().enumerate() {
++            match &self.block_maps[full_idx] {
++                BlockMap::Drop => {}
++                BlockMap::KeepAll { reduced_idx } => {
++                    let reduced = &mut self.blocks[*reduced_idx];
++                    match (reduced, block) {
++                        (ScalingBlock::Zero { .. }, ScalingBlock::Zero { .. }) => {}
++                        (ScalingBlock::Diagonal { d: out }, ScalingBlock::Diagonal { d }) => {
++                            out.copy_from_slice(d);
++                        }
++                        (ScalingBlock::Dense3x3 { h: out }, ScalingBlock::Dense3x3 { h }) => {
++                            *out = *h;
++                        }
++                        (ScalingBlock::SocStructured { w: out }, ScalingBlock::SocStructured { w }) => {
++                            out.copy_from_slice(w);
++                        }
++                        (
++                            ScalingBlock::PsdStructured { w_factor: out, .. },
++                            ScalingBlock::PsdStructured { w_factor, .. },
++                        ) => {
++                            out.copy_from_slice(w_factor);
++                        }
++                        _ => panic!("Reduced scaling block mismatch"),
++                    }
++                }
++                BlockMap::KeepSubset { reduced_idx, kept } => {
++                    let reduced = &mut self.blocks[*reduced_idx];
++                    match (reduced, block) {
++                        (ScalingBlock::Zero { .. }, ScalingBlock::Zero { .. }) => {}
++                        (ScalingBlock::Diagonal { d: out }, ScalingBlock::Diagonal { d }) => {
++                            for (out_idx, &full_idx) in kept.iter().enumerate() {
++                                out[out_idx] = d[full_idx];
++                            }
++                        }
++                        _ => panic!("Reduced scaling subset only supported for diagonal blocks"),
++                    }
++                }
++            }
++        }
++    }
++}
++
++struct SingletonElim {
++    kept_rows: Vec<usize>,
++    row_map: Vec<Option<usize>>,
++    singletons: Vec<SingletonRowInfo>,
++    inv_h: Vec<f64>,
++    diag_update_cols: Vec<usize>,
++    reduced_a: SparseCsc,
++    reduced_scaling: ReducedScaling,
++}
++
++impl SingletonElim {
++    fn build(a: &SparseCsc, h_blocks: &[ScalingBlock]) -> Option<Self> {
++        let m = a.rows();
++        let n = a.cols();
++
++        let partition = crate::presolve::singleton::detect_singleton_rows(a);
++        if partition.singleton_rows.is_empty() {
++            return None;
++        }
++
++        let mut row_block = vec![0usize; m];
++        let mut row_offset = vec![0usize; m];
++        let mut block_eliminable = Vec::with_capacity(h_blocks.len());
++
++        let mut offset = 0usize;
++        for (block_idx, block) in h_blocks.iter().enumerate() {
++            let block_dim = match block {
++                ScalingBlock::Zero { dim } => *dim,
++                ScalingBlock::Diagonal { d } => d.len(),
++                ScalingBlock::Dense3x3 { .. } => 3,
++                ScalingBlock::SocStructured { w } => w.len(),
++                ScalingBlock::PsdStructured { n, .. } => n * (n + 1) / 2,
++            };
++
++            let eliminable = matches!(block, ScalingBlock::Diagonal { .. });
++            block_eliminable.push(eliminable);
++            for i in 0..block_dim {
++                row_block[offset + i] = block_idx;
++                row_offset[offset + i] = i;
++            }
++            offset += block_dim;
++        }
++        assert_eq!(offset, m, "Scaling blocks must cover all {} slacks", m);
++
++        let mut remove_row = vec![false; m];
++        let mut singletons = Vec::new();
++
++        for row in partition.singleton_rows {
++            if row.val == 0.0 {
++                continue;
++            }
++            let block_idx = row_block[row.row];
++            if !block_eliminable[block_idx] {
++                continue;
++            }
++            remove_row[row.row] = true;
++            singletons.push(SingletonRowInfo {
++                row: row.row,
++                col: row.col,
++                val: row.val,
++                block_idx,
++                block_offset: row_offset[row.row],
++            });
++        }
++
++        if singletons.is_empty() {
++            return None;
++        }
++
++        let mut kept_rows = Vec::with_capacity(m - singletons.len());
++        let mut row_map = vec![None; m];
++        let mut new_row = 0usize;
++        for row in 0..m {
++            if !remove_row[row] {
++                row_map[row] = Some(new_row);
++                kept_rows.push(row);
++                new_row += 1;
++            }
++        }
++
++        let mut a_tri = TriMat::new((kept_rows.len(), n));
++        for col in 0..n {
++            if let Some(col_view) = a.outer_view(col) {
++                for (row, &val) in col_view.iter() {
++                    if let Some(new_row_idx) = row_map[row] {
++                        a_tri.add_triplet(new_row_idx, col, val);
++                    }
++                }
++            }
++        }
++        let reduced_a = a_tri.to_csc();
++
++        let mut col_seen = vec![false; n];
++        let mut diag_update_cols = Vec::new();
++        for row in &singletons {
++            if !col_seen[row.col] {
++                col_seen[row.col] = true;
++                diag_update_cols.push(row.col);
++            }
++        }
++
++        let reduced_scaling = ReducedScaling::new(h_blocks, &remove_row);
++        let singleton_len = singletons.len();
++
++        Some(Self {
++            kept_rows,
++            row_map,
++            singletons,
++            inv_h: vec![0.0; singleton_len],
++            diag_update_cols,
++            reduced_a,
++            reduced_scaling,
++        })
++    }
++
++    fn update_scaling_from_full(&mut self, h_blocks: &[ScalingBlock]) {
++        self.reduced_scaling.update_from_full(h_blocks);
++    }
++
++    fn update_inv_h(&mut self, h_blocks: &[ScalingBlock], static_reg: f64) {
++        for (idx, row) in self.singletons.iter().enumerate() {
++            let h = match &h_blocks[row.block_idx] {
++                ScalingBlock::Diagonal { d } => d[row.block_offset],
++                ScalingBlock::Zero { .. } => 0.0,
++                _ => panic!("Singleton elimination encountered non-diagonal H block"),
++            };
++            let h_eff = h + static_reg;
++            if !h_eff.is_finite() || h_eff <= 0.0 {
++                panic!("Invalid H for singleton elimination: {}", h_eff);
++            }
++            self.inv_h[idx] = 1.0 / h_eff;
+         }
+     }
+ }
+@@ -57,13 +772,14 @@ impl SolveWorkspace {
+ ///
+ /// Manages the construction, factorization, and solution of KKT systems
+ /// arising in the IPM algorithm.
+-pub struct KktSolver {
++pub struct KktSolverImpl<B: KktBackend> {
+     /// Problem dimensions
+     n: usize, // Number of variables
+-    m: usize, // Number of constraints
++    m: usize, // Number of constraints in the reduced KKT system
++    m_full: usize, // Number of constraints in the original problem
+ 
+-    /// QDLDL backend
+-    qdldl: QdldlSolver,
++    /// Sparse backend
++    backend: B,
+ 
+     /// Workspace for KKT matrix construction
+     kkt_mat: Option<SparseCsc>,
+@@ -83,9 +799,23 @@ pub struct KktSolver {
+ 
+     /// Workspace to make repeated solves allocation-free.
+     solve_ws: SolveWorkspace,
++
++    /// Cached KKT positions for H block updates (used for non-diagonal blocks).
++    h_block_positions: Option<Vec<HBlockPositions>>,
++
++    /// Scratch space for SOC block updates.
++    soc_scratch: SocKktScratch,
++
++    /// Optional singleton-row elimination data.
++    singleton: Option<SingletonElim>,
++
++    /// Cached P diagonal values (base) and positions for singleton Schur updates.
++    p_diag_base: Vec<f64>,
++    p_diag_positions: Option<Vec<usize>>,
++    p_diag_schur: Vec<f64>,
+ }
+ 
+-impl KktSolver {
++impl<B: KktBackend> KktSolverImpl<B> {
+     /// Create a new KKT solver.
+     ///
+     /// # Arguments
+@@ -95,19 +825,69 @@ impl KktSolver {
+     /// * `static_reg` - Static diagonal regularization
+     /// * `dynamic_reg_min_pivot` - Dynamic regularization threshold
+     pub fn new(n: usize, m: usize, static_reg: f64, dynamic_reg_min_pivot: f64) -> Self {
+-        let kkt_dim = n + m;
+-        let qdldl = QdldlSolver::new(kkt_dim, static_reg, dynamic_reg_min_pivot);
++        Self::new_internal(
++            n,
++            m,
++            m,
++            static_reg,
++            dynamic_reg_min_pivot,
++            None,
++        )
++    }
++
++    /// Create a new KKT solver with singleton-row Schur elimination enabled.
++    pub fn new_with_singleton_elimination(
++        n: usize,
++        m: usize,
++        static_reg: f64,
++        dynamic_reg_min_pivot: f64,
++        a: &SparseCsc,
++        h_blocks: &[ScalingBlock],
++    ) -> Self {
++        let singleton = SingletonElim::build(a, h_blocks);
++        if let Some(singleton) = singleton {
++            let m_reduced = singleton.kept_rows.len();
++            Self::new_internal(
++                n,
++                m,
++                m_reduced,
++                static_reg,
++                dynamic_reg_min_pivot,
++                Some(singleton),
++            )
++        } else {
++            Self::new(n, m, static_reg, dynamic_reg_min_pivot)
++        }
++    }
++
++    fn new_internal(
++        n: usize,
++        m_full: usize,
++        m_reduced: usize,
++        static_reg: f64,
++        dynamic_reg_min_pivot: f64,
++        singleton: Option<SingletonElim>,
++    ) -> Self {
++        let kkt_dim = n + m_reduced;
++        let backend = B::new(kkt_dim, static_reg, dynamic_reg_min_pivot);
+ 
+         Self {
+             n,
+-            m,
+-            qdldl,
++            m: m_reduced,
++            m_full,
++            backend,
+             kkt_mat: None,
+             static_reg,
+             perm: None,
+             perm_inv: None,
+             h_diag_positions: None,
+-            solve_ws: SolveWorkspace::new(kkt_dim),
++            solve_ws: SolveWorkspace::new(n, m_reduced),
++            h_block_positions: None,
++            soc_scratch: SocKktScratch::new(0),
++            singleton,
++            p_diag_base: vec![0.0; n],
++            p_diag_positions: None,
++            p_diag_schur: vec![0.0; n],
+         }
+     }
+ 
+@@ -117,14 +897,14 @@ impl KktSolver {
+     }
+ 
+     /// Update the static regularization value (used in KKT assembly + LDL).
+-    pub fn set_static_reg(&mut self, static_reg: f64) -> Result<(), QdldlError> {
++    pub fn set_static_reg(&mut self, static_reg: f64) -> Result<(), BackendError> {
+         self.static_reg = static_reg;
+-        self.qdldl.set_static_reg(static_reg)?;
++        self.backend.set_static_reg(static_reg)?;
+         Ok(())
+     }
+ 
+     /// Increase static regularization to at least `min_static_reg`.
+-    pub fn bump_static_reg(&mut self, min_static_reg: f64) -> Result<bool, QdldlError> {
++    pub fn bump_static_reg(&mut self, min_static_reg: f64) -> Result<bool, BackendError> {
+         if min_static_reg > self.static_reg {
+             self.set_static_reg(min_static_reg)?;
+             return Ok(true);
+@@ -132,9 +912,9 @@ impl KktSolver {
+         Ok(false)
+     }
+ 
+-    fn compute_camd_perm(&self, kkt: &SparseCsc) -> Result<(Vec<usize>, Vec<usize>), QdldlError> {
++    fn compute_camd_perm(&self, kkt: &SparseCsc) -> Result<(Vec<usize>, Vec<usize>), BackendError> {
+         let perm = try_camd(kkt.structure_view())
+-            .map_err(|e| QdldlError::OrderingFailed(e.to_string()))?;
++            .map_err(|e| BackendError::Message(format!("Ordering failed: {}", e)))?;
+         Ok((perm.vec(), perm.inv_vec()))
+     }
+ 
+@@ -350,38 +1130,136 @@ impl KktSolver {
+         positions
+     }
+ 
+-    fn update_h_diagonal_in_place(&mut self, h_blocks: &[ScalingBlock]) {
+-        let positions = self
+-            .h_diag_positions
+-            .as_ref()
+-            .expect("H diagonal positions not initialized");
+-        let kkt = self.kkt_mat.as_mut().expect("KKT matrix not initialized");
+-        let data = kkt.data_mut();
++    fn compute_p_diag_positions(&self, kkt: &SparseCsc) -> Vec<usize> {
++        let kkt_dim = self.n + self.m;
++        assert_eq!(kkt.rows(), kkt_dim);
++        assert_eq!(kkt.cols(), kkt_dim);
++
++        let indptr = kkt.indptr();
++        let col_ptr = indptr.raw_storage();
++        let row_idx = kkt.indices();
++
++        let mut positions = vec![0usize; self.n];
++
++        for var in 0..self.n {
++            let orig_idx = var;
++            let col = if let Some(p_inv) = &self.perm_inv {
++                p_inv[orig_idx]
++            } else {
++                orig_idx
++            };
++
++            let start = col_ptr[col];
++            let end = col_ptr[col + 1];
++
++            let mut found = None;
++            for idx in start..end {
++                if row_idx[idx] == col {
++                    found = Some(idx);
++                    break;
++                }
++            }
++
++            positions[var] = found.unwrap_or_else(|| {
++                panic!("KKT matrix missing diagonal entry at column {}", col);
++            });
++        }
++
++        positions
++    }
++
++    fn fill_p_diag_base(&mut self, p: Option<&SparseSymmetricCsc>) {
++        self.p_diag_base.fill(0.0);
++        if let Some(p_mat) = p {
++            assert_eq!(p_mat.rows(), self.n);
++            assert_eq!(p_mat.cols(), self.n);
++            for (val, (row, col)) in p_mat.iter() {
++                if row == col {
++                    self.p_diag_base[row] += *val;
++                }
++            }
++        }
++    }
++
++    fn map_kkt_index(&self, idx: usize) -> usize {
++        self.perm_inv.as_ref().map_or(idx, |p| p[idx])
++    }
++
++    fn find_kkt_position(&self, kkt: &SparseCsc, row: usize, col: usize) -> usize {
++        let row_m = self.map_kkt_index(row);
++        let col_m = self.map_kkt_index(col);
++        let (r, c) = if row_m <= col_m {
++            (row_m, col_m)
++        } else {
++            (col_m, row_m)
++        };
++
++        let indptr = kkt.indptr();
++        let col_ptr = indptr.raw_storage();
++        let row_idx = kkt.indices();
++
++        let start = col_ptr[c];
++        let end = col_ptr[c + 1];
++        for idx in start..end {
++            if row_idx[idx] == r {
++                return idx;
++            }
++        }
++
++        panic!("KKT matrix missing entry at ({}, {})", r, c);
++    }
++
++    fn compute_h_block_positions(
++        &self,
++        kkt: &SparseCsc,
++        h_blocks: &[ScalingBlock],
++    ) -> Vec<HBlockPositions> {
++        let diag_positions = self.compute_h_diag_positions(kkt);
++        let mut positions: Vec<HBlockPositions> = Vec::with_capacity(h_blocks.len());
+ 
+         let mut offset = 0usize;
+         for block in h_blocks {
++            let block_dim = match block {
++                ScalingBlock::Zero { dim } => *dim,
++                ScalingBlock::Diagonal { d } => d.len(),
++                ScalingBlock::Dense3x3 { .. } => 3,
++                ScalingBlock::SocStructured { w } => w.len(),
++                ScalingBlock::PsdStructured { n, .. } => n * (n + 1) / 2,
++            };
++
+             match block {
+-                ScalingBlock::Zero { dim } => {
+-                    for i in 0..*dim {
+-                        let slack = offset + i;
+-                        data[positions[slack]] = -2.0 * self.static_reg;
+-                    }
+-                    offset += *dim;
++                ScalingBlock::Zero { .. } | ScalingBlock::Diagonal { .. } => {
++                    positions.push(HBlockPositions::Diagonal {
++                        positions: diag_positions[offset..offset + block_dim].to_vec(),
++                    });
+                 }
+-                ScalingBlock::Diagonal { d } => {
+-                    for (i, &di) in d.iter().enumerate() {
+-                        let slack = offset + i;
+-                        data[positions[slack]] = -di - 2.0 * self.static_reg;
++                ScalingBlock::Dense3x3 { .. } | ScalingBlock::SocStructured { .. } => {
++                    let mut block_positions = Vec::with_capacity(block_dim * (block_dim + 1) / 2);
++                    for col in 0..block_dim {
++                        let orig_col = self.n + offset + col;
++                        for row in 0..=col {
++                            let orig_row = self.n + offset + row;
++                            block_positions.push(self.find_kkt_position(kkt, orig_row, orig_col));
++                        }
+                     }
+-                    offset += d.len();
++                    positions.push(HBlockPositions::UpperTriangle {
++                        dim: block_dim,
++                        positions: block_positions,
++                    });
++                }
++                ScalingBlock::PsdStructured { .. } => {
++                    unimplemented!("PSD structured scaling not yet implemented in KKT assembly");
+                 }
+-                _ => panic!("update_h_diagonal_in_place called with non-diagonal ScalingBlock"),
+             }
++
++            offset += block_dim;
+         }
+ 
+         assert_eq!(offset, self.m, "Scaling blocks must cover all {} slacks", self.m);
++        positions
+     }
+ 
++
+     /// Initialize the solver with the KKT matrix sparsity pattern.
+     ///
+     /// Performs symbolic factorization, which only needs to be done once
+@@ -391,8 +1269,22 @@ impl KktSolver {
+         p: Option<&SparseSymmetricCsc>,
+         a: &SparseCsc,
+         h_blocks: &[ScalingBlock],
+-    ) -> Result<(), QdldlError> {
+-        let kkt_unpermuted = self.build_kkt_matrix_with_perm(None, p, a, h_blocks);
++    ) -> Result<(), BackendError> {
++        if let Some(singleton) = self.singleton.as_mut() {
++            singleton.update_scaling_from_full(h_blocks);
++        }
++        self.fill_p_diag_base(p);
++
++        let (kkt_unpermuted, kkt) = {
++            let (a_use, h_use) = if let Some(singleton) = self.singleton.as_ref() {
++                (&singleton.reduced_a, singleton.reduced_scaling.blocks.as_slice())
++            } else {
++                (a, h_blocks)
++            };
++            let kkt_unpermuted = self.build_kkt_matrix_with_perm(None, p, a_use, h_use);
++            let kkt = self.build_kkt_matrix(p, a_use, h_use);
++            (kkt_unpermuted, kkt)
++        };
+         let (perm, perm_inv) = self.compute_camd_perm(&kkt_unpermuted)?;
+         if perm.iter().enumerate().all(|(i, &pi)| i == pi) {
+             self.perm = None;
+@@ -402,9 +1294,15 @@ impl KktSolver {
+             self.perm_inv = Some(perm_inv);
+         }
+ 
+-        let kkt = self.build_kkt_matrix(p, a, h_blocks);
+-        self.qdldl.symbolic_factorization(&kkt)?;
++        self.backend.symbolic_factorization(&kkt)?;
+         self.kkt_mat = Some(kkt);
++        self.h_diag_positions = None;
++        self.h_block_positions = None;
++        self.p_diag_positions = None;
++        if self.singleton.is_some() {
++            let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
++            self.p_diag_positions = Some(self.compute_p_diag_positions(kkt_ref));
++        }
+         Ok(())
+     }
+ 
+@@ -417,33 +1315,123 @@ impl KktSolver {
+         p: Option<&SparseSymmetricCsc>,
+         a: &SparseCsc,
+         h_blocks: &[ScalingBlock],
+-    ) -> Result<QdldlFactorization, QdldlError> {
+-        let diag_h = h_blocks
++    ) -> Result<B::Factorization, BackendError> {
++        self.update_numeric(p, a, h_blocks)?;
++        self.factorize()
++    }
++
++    /// Update the numeric values in the cached KKT matrix without factorization.
++    pub fn update_numeric(
++        &mut self,
++        p: Option<&SparseSymmetricCsc>,
++        a: &SparseCsc,
++        h_blocks: &[ScalingBlock],
++    ) -> Result<(), BackendError> {
++        if let Some(singleton) = self.singleton.as_mut() {
++            singleton.update_scaling_from_full(h_blocks);
++            singleton.update_inv_h(h_blocks, self.static_reg);
++        }
++
++        let need_p_diag_positions = self.singleton.is_some() && self.p_diag_positions.is_none();
++        if need_p_diag_positions {
++            self.fill_p_diag_base(p);
++        }
++
++        let (a_use, h_use) = if let Some(singleton) = self.singleton.as_ref() {
++            (&singleton.reduced_a, singleton.reduced_scaling.blocks.as_slice())
++        } else {
++            (a, h_blocks)
++        };
++
++        let diag_h = h_use
+             .iter()
+             .all(|b| matches!(b, ScalingBlock::Zero { .. } | ScalingBlock::Diagonal { .. }));
+ 
+         if diag_h {
+             if self.kkt_mat.is_none() {
+                 // Fallback: build once if initialize() was not called.
+-                self.kkt_mat = Some(self.build_kkt_matrix(p, a, h_blocks));
++                self.kkt_mat = Some(self.build_kkt_matrix(p, a_use, h_use));
+             }
+             if self.h_diag_positions.is_none() {
+                 let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
+                 self.h_diag_positions = Some(self.compute_h_diag_positions(kkt_ref));
+             }
++            if need_p_diag_positions {
++                let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
++                self.p_diag_positions = Some(self.compute_p_diag_positions(kkt_ref));
++            }
+ 
+-            self.update_h_diagonal_in_place(h_blocks);
++            {
++                let kkt_mat = self.kkt_mat.as_mut().expect("KKT matrix not initialized");
++                let h_diag_positions = self
++                    .h_diag_positions
++                    .as_ref()
++                    .expect("H diagonal positions not initialized");
++                update_h_diagonal_in_place(
++                    self.static_reg,
++                    self.m,
++                    h_use,
++                    h_diag_positions,
++                    kkt_mat,
++                );
++                update_schur_diagonal(
++                    self.singleton.as_ref(),
++                    self.p_diag_positions.as_deref(),
++                    &self.p_diag_base,
++                    &mut self.p_diag_schur,
++                    kkt_mat,
++                );
++            }
+ 
++            return Ok(());
++        }
++
++        // General path: reuse KKT pattern and update cone blocks in place.
++        if self.kkt_mat.is_none() {
++            // Fallback: build once if initialize() was not called.
++            self.kkt_mat = Some(self.build_kkt_matrix(p, a_use, h_use));
++        }
++        if self.h_block_positions.is_none() {
+             let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
+-            return self.qdldl.numeric_factorization(kkt_ref);
++            self.h_block_positions = Some(self.compute_h_block_positions(kkt_ref, h_use));
++        }
++        if need_p_diag_positions {
++            let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
++            self.p_diag_positions = Some(self.compute_p_diag_positions(kkt_ref));
+         }
+ 
+-        // General path: rebuild the full KKT matrix (needed for dense cone blocks like SOC).
+-        self.h_diag_positions = None;
+-        let kkt = self.build_kkt_matrix(p, a, h_blocks);
+-        self.kkt_mat = Some(kkt);
+-        let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix not initialized");
+-        self.qdldl.numeric_factorization(kkt_ref)
++        {
++            let kkt_mat = self.kkt_mat.as_mut().expect("KKT matrix not initialized");
++            let h_block_positions = self
++                .h_block_positions
++                .as_ref()
++                .expect("H block positions not initialized");
++            update_h_blocks_in_place(
++                self.static_reg,
++                self.m,
++                h_use,
++                h_block_positions,
++                kkt_mat,
++                &mut self.soc_scratch,
++            );
++                update_schur_diagonal(
++                    self.singleton.as_ref(),
++                    self.p_diag_positions.as_deref(),
++                    &self.p_diag_base,
++                    &mut self.p_diag_schur,
++                    kkt_mat,
++                );
++            }
++        Ok(())
++    }
++
++    /// Factorize the cached KKT matrix after an update.
++    pub fn factorize(&mut self) -> Result<B::Factorization, BackendError> {
++        let kkt_ref = self
++            .kkt_mat
++            .as_ref()
++            .ok_or_else(|| BackendError::Message("KKT matrix not initialized".to_string()))?;
++        self.backend.numeric_factorization(kkt_ref)
+     }
+ 
+     /// Solve a single KKT system: K * [dx; dz] = [rhs_x; rhs_z].
+@@ -457,106 +1445,101 @@ impl KktSolver {
+     /// * `sol_z` - Solution for z block (output, length m)
+     pub fn solve(
+         &mut self,
+-        factor: &QdldlFactorization,
++        factor: &B::Factorization,
+         rhs_x: &[f64],
+         rhs_z: &[f64],
+         sol_x: &mut [f64],
+         sol_z: &mut [f64],
+     ) {
+-        self.solve_with_refinement(factor, rhs_x, rhs_z, sol_x, sol_z, 0);
++        self.solve_with_refinement(factor, rhs_x, rhs_z, sol_x, sol_z, 0, None);
+     }
+ 
+     /// Solve with optional iterative refinement.
+     pub fn solve_refined(
+         &mut self,
+-        factor: &QdldlFactorization,
++        factor: &B::Factorization,
+         rhs_x: &[f64],
+         rhs_z: &[f64],
+         sol_x: &mut [f64],
+         sol_z: &mut [f64],
+         refine_iters: usize,
+     ) {
+-        self.solve_with_refinement(factor, rhs_x, rhs_z, sol_x, sol_z, refine_iters);
++        self.solve_with_refinement(factor, rhs_x, rhs_z, sol_x, sol_z, refine_iters, None);
++    }
++
++    /// Solve with optional iterative refinement and diagnostic tag.
++    pub fn solve_refined_tagged(
++        &mut self,
++        factor: &B::Factorization,
++        rhs_x: &[f64],
++        rhs_z: &[f64],
++        sol_x: &mut [f64],
++        sol_z: &mut [f64],
++        refine_iters: usize,
++        tag: &'static str,
++    ) {
++        self.solve_with_refinement(
++            factor,
++            rhs_x,
++            rhs_z,
++            sol_x,
++            sol_z,
++            refine_iters,
++            Some(tag),
++        );
+     }
+ 
+     fn solve_with_refinement(
+         &mut self,
+-        factor: &QdldlFactorization,
++        factor: &B::Factorization,
+         rhs_x: &[f64],
+         rhs_z: &[f64],
+         sol_x: &mut [f64],
+         sol_z: &mut [f64],
+         refine_iters: usize,
++        tag: Option<&'static str>,
+     ) {
+         assert_eq!(rhs_x.len(), self.n);
+-        assert_eq!(rhs_z.len(), self.m);
+         assert_eq!(sol_x.len(), self.n);
+-        assert_eq!(sol_z.len(), self.m);
+-
+-        // Assemble and permute RHS (if needed)
+-        let kkt_dim = self.n + self.m;
+-        if let Some(p) = &self.perm {
+-            for i in 0..kkt_dim {
+-                let src = p[i];
+-                if src < self.n {
+-                    self.solve_ws.rhs_perm[i] = rhs_x[src];
+-                } else {
+-                    self.solve_ws.rhs_perm[i] = rhs_z[src - self.n];
+-                }
+-            }
++        let perm = self.perm.as_deref();
++        let perm_inv = self.perm_inv.as_deref();
++        let static_reg = self.static_reg;
++        let kkt = self.kkt_mat.as_ref();
++        let backend = &self.backend;
++        let ws = &mut self.solve_ws;
++
++        if let Some(singleton) = self.singleton.as_ref() {
++            assert_eq!(rhs_z.len(), self.m_full);
++            assert_eq!(sol_z.len(), self.m_full);
++            prepare_rhs_singleton(singleton, rhs_x, rhs_z, ws);
++            fill_rhs_perm_with_perm(perm, self.n, &ws.rhs_x, &ws.rhs_z, &mut ws.rhs_perm);
++            solve_permuted_with_refinement(
++                backend,
++                static_reg,
++                kkt,
++                ws,
++                factor,
++                RhsPermKind::Primary,
++                refine_iters,
++                tag,
++            );
++            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x, &mut ws.sol_z);
++            expand_solution_z_singleton(singleton, rhs_z, sol_x, sol_z, &ws.sol_z);
+         } else {
+-            self.solve_ws.rhs_perm[..self.n].copy_from_slice(rhs_x);
+-            self.solve_ws.rhs_perm[self.n..].copy_from_slice(rhs_z);
+-        }
+-
+-        // Solve permuted system
+-        self.qdldl
+-            .solve(factor, &self.solve_ws.rhs_perm, &mut self.solve_ws.sol_perm);
+-
+-        if refine_iters > 0 {
+-            if let Some(kkt) = &self.kkt_mat {
+-                for _ in 0..refine_iters {
+-                    symm_matvec_upper(kkt, &self.solve_ws.sol_perm, &mut self.solve_ws.kx);
+-                    if self.static_reg != 0.0 {
+-                        for i in 0..kkt_dim {
+-                            self.solve_ws.kx[i] += self.static_reg * self.solve_ws.sol_perm[i];
+-                        }
+-                    }
+-                    for i in 0..kkt_dim {
+-                        self.solve_ws.res[i] = self.solve_ws.rhs_perm[i] - self.solve_ws.kx[i];
+-                    }
+-
+-                    let res_norm = self
+-                        .solve_ws
+-                        .res
+-                        .iter()
+-                        .map(|v| v * v)
+-                        .sum::<f64>()
+-                        .sqrt();
+-                    if !res_norm.is_finite() || res_norm < 1e-12 {
+-                        break;
+-                    }
+-
+-                    self.qdldl
+-                        .solve(factor, &self.solve_ws.res, &mut self.solve_ws.delta);
+-                    for i in 0..kkt_dim {
+-                        self.solve_ws.sol_perm[i] += self.solve_ws.delta[i];
+-                    }
+-                }
+-            }
+-        }
+-
+-        // Unpermute solution back to original ordering
+-        if let Some(p_inv) = &self.perm_inv {
+-            for i in 0..self.n {
+-                sol_x[i] = self.solve_ws.sol_perm[p_inv[i]];
+-            }
+-            for i in 0..self.m {
+-                sol_z[i] = self.solve_ws.sol_perm[p_inv[self.n + i]];
+-            }
+-        } else {
+-            sol_x.copy_from_slice(&self.solve_ws.sol_perm[..self.n]);
+-            sol_z.copy_from_slice(&self.solve_ws.sol_perm[self.n..]);
++            assert_eq!(rhs_z.len(), self.m);
++            assert_eq!(sol_z.len(), self.m);
++            fill_rhs_perm_with_perm(perm, self.n, rhs_x, rhs_z, &mut ws.rhs_perm);
++            solve_permuted_with_refinement(
++                backend,
++                static_reg,
++                kkt,
++                ws,
++                factor,
++                RhsPermKind::Primary,
++                refine_iters,
++                tag,
++            );
++            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x, sol_z);
+         }
+     }
+ 
+@@ -567,11 +1550,72 @@ impl KktSolver {
+     /// K * [dx2; dz2] = [rhs_x2; rhs_z2]
+     ///
+     /// This is more efficient than calling solve() twice because the
+-    /// factorization is reused.
++    /// factorization is reused and both RHS vectors are permuted together.
+     #[allow(clippy::too_many_arguments)]
+     pub fn solve_two_rhs(
+         &mut self,
+-        factor: &QdldlFactorization,
++        factor: &B::Factorization,
++        rhs_x1: &[f64],
++        rhs_z1: &[f64],
++        rhs_x2: &[f64],
++        rhs_z2: &[f64],
++        sol_x1: &mut [f64],
++        sol_z1: &mut [f64],
++        sol_x2: &mut [f64],
++        sol_z2: &mut [f64],
++    ) {
++        self.solve_two_rhs_with_refinement(
++            factor,
++            rhs_x1,
++            rhs_z1,
++            rhs_x2,
++            rhs_z2,
++            sol_x1,
++            sol_z1,
++            sol_x2,
++            sol_z2,
++            0,
++            None,
++            None,
++        );
++    }
++
++    /// Two-solve strategy with iterative refinement.
++    #[allow(clippy::too_many_arguments)]
++    pub fn solve_two_rhs_refined(
++        &mut self,
++        factor: &B::Factorization,
++        rhs_x1: &[f64],
++        rhs_z1: &[f64],
++        rhs_x2: &[f64],
++        rhs_z2: &[f64],
++        sol_x1: &mut [f64],
++        sol_z1: &mut [f64],
++        sol_x2: &mut [f64],
++        sol_z2: &mut [f64],
++        refine_iters: usize,
++    ) {
++        self.solve_two_rhs_with_refinement(
++            factor,
++            rhs_x1,
++            rhs_z1,
++            rhs_x2,
++            rhs_z2,
++            sol_x1,
++            sol_z1,
++            sol_x2,
++            sol_z2,
++            refine_iters,
++            None,
++            None,
++        );
++    }
++
++    /// Two-solve strategy with iterative refinement and diagnostic tags.
++    #[allow(clippy::too_many_arguments)]
++    pub fn solve_two_rhs_refined_tagged(
++        &mut self,
++        factor: &B::Factorization,
+         rhs_x1: &[f64],
+         rhs_z1: &[f64],
+         rhs_x2: &[f64],
+@@ -580,20 +1624,148 @@ impl KktSolver {
+         sol_z1: &mut [f64],
+         sol_x2: &mut [f64],
+         sol_z2: &mut [f64],
++        refine_iters: usize,
++        tag1: &'static str,
++        tag2: &'static str,
+     ) {
+-        // Solve first system
+-        self.solve(factor, rhs_x1, rhs_z1, sol_x1, sol_z1);
++        self.solve_two_rhs_with_refinement(
++            factor,
++            rhs_x1,
++            rhs_z1,
++            rhs_x2,
++            rhs_z2,
++            sol_x1,
++            sol_z1,
++            sol_x2,
++            sol_z2,
++            refine_iters,
++            Some(tag1),
++            Some(tag2),
++        );
++    }
+ 
+-        // Solve second system
+-        self.solve(factor, rhs_x2, rhs_z2, sol_x2, sol_z2);
++    #[allow(clippy::too_many_arguments)]
++    fn solve_two_rhs_with_refinement(
++        &mut self,
++        factor: &B::Factorization,
++        rhs_x1: &[f64],
++        rhs_z1: &[f64],
++        rhs_x2: &[f64],
++        rhs_z2: &[f64],
++        sol_x1: &mut [f64],
++        sol_z1: &mut [f64],
++        sol_x2: &mut [f64],
++        sol_z2: &mut [f64],
++        refine_iters: usize,
++        tag1: Option<&'static str>,
++        tag2: Option<&'static str>,
++    ) {
++        assert_eq!(rhs_x1.len(), self.n);
++        assert_eq!(rhs_x2.len(), self.n);
++        assert_eq!(sol_x1.len(), self.n);
++        assert_eq!(sol_x2.len(), self.n);
++        let perm = self.perm.as_deref();
++        let perm_inv = self.perm_inv.as_deref();
++        let static_reg = self.static_reg;
++        let kkt = self.kkt_mat.as_ref();
++        let backend = &self.backend;
++        let ws = &mut self.solve_ws;
++
++        if let Some(singleton) = self.singleton.as_ref() {
++            assert_eq!(rhs_z1.len(), self.m_full);
++            assert_eq!(rhs_z2.len(), self.m_full);
++            assert_eq!(sol_z1.len(), self.m_full);
++            assert_eq!(sol_z2.len(), self.m_full);
++
++            prepare_rhs_singleton(singleton, rhs_x1, rhs_z1, ws);
++            fill_rhs_perm_with_perm(perm, self.n, &ws.rhs_x, &ws.rhs_z, &mut ws.rhs_perm);
++            solve_permuted_with_refinement(
++                backend,
++                static_reg,
++                kkt,
++                ws,
++                factor,
++                RhsPermKind::Primary,
++                refine_iters,
++                tag1,
++            );
++            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x1, &mut ws.sol_z);
++            expand_solution_z_singleton(singleton, rhs_z1, sol_x1, sol_z1, &ws.sol_z);
++
++            prepare_rhs_singleton(singleton, rhs_x2, rhs_z2, ws);
++            fill_rhs_perm_with_perm(perm, self.n, &ws.rhs_x, &ws.rhs_z, &mut ws.rhs_perm2);
++            solve_permuted_with_refinement(
++                backend,
++                static_reg,
++                kkt,
++                ws,
++                factor,
++                RhsPermKind::Secondary,
++                refine_iters,
++                tag2,
++            );
++            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x2, &mut ws.sol_z);
++            expand_solution_z_singleton(singleton, rhs_z2, sol_x2, sol_z2, &ws.sol_z);
++        } else {
++            assert_eq!(rhs_z1.len(), self.m);
++            assert_eq!(rhs_z2.len(), self.m);
++            assert_eq!(sol_z1.len(), self.m);
++            assert_eq!(sol_z2.len(), self.m);
++
++            fill_rhs_perm_two_with_perm(
++                perm,
++                self.n,
++                rhs_x1,
++                rhs_z1,
++                rhs_x2,
++                rhs_z2,
++                &mut ws.rhs_perm,
++                &mut ws.rhs_perm2,
++            );
++
++            solve_permuted_with_refinement(
++                backend,
++                static_reg,
++                kkt,
++                ws,
++                factor,
++                RhsPermKind::Primary,
++                refine_iters,
++                tag1,
++            );
++            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x1, sol_z1);
++
++            solve_permuted_with_refinement(
++                backend,
++                static_reg,
++                kkt,
++                ws,
++                factor,
++                RhsPermKind::Secondary,
++                refine_iters,
++                tag2,
++            );
++            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x2, sol_z2);
++        }
+     }
+ 
+     /// Get the number of dynamic regularization bumps from the last factorization.
+     pub fn dynamic_bumps(&self) -> u64 {
+-        self.qdldl.dynamic_bumps()
++        self.backend.dynamic_bumps()
+     }
+ }
+ 
++#[cfg(feature = "suitesparse-ldl")]
++use super::backends::SuiteSparseLdlBackend;
++
++#[cfg(feature = "suitesparse-ldl")]
++type DefaultBackend = SuiteSparseLdlBackend;
++
++#[cfg(not(feature = "suitesparse-ldl"))]
++type DefaultBackend = QdldlBackend;
++
++pub type KktSolver = KktSolverImpl<DefaultBackend>;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/solver-core/src/linalg/mod.rs b/solver-core/src/linalg/mod.rs
+index b1c02d7..0696aac 100644
+--- a/solver-core/src/linalg/mod.rs
++++ b/solver-core/src/linalg/mod.rs
+@@ -4,4 +4,6 @@
+ 
+ pub mod sparse;
+ pub mod kkt;
++pub mod backend;
++pub mod backends;
+ pub mod qdldl;
+diff --git a/solver-core/src/linalg/qdldl.rs b/solver-core/src/linalg/qdldl.rs
+index 04858e4..e6795e4 100644
+--- a/solver-core/src/linalg/qdldl.rs
++++ b/solver-core/src/linalg/qdldl.rs
+@@ -332,9 +332,7 @@ impl QdldlSolver {
+                     }
+                 }
+ 
+-                Ok(QdldlFactorization {
+-                    d_values: f.d.clone(),
+-                })
++                Ok(QdldlFactorization {})
+             }
+             Err(_) => Err(QdldlError::FactorizationFailed),
+         }
+@@ -382,13 +380,15 @@ impl QdldlSolver {
+ ///
+ /// Holds the diagonal D values for diagnostics.
+ pub struct QdldlFactorization {
+-    d_values: Vec<f64>,
+ }
+ 
+ impl QdldlFactorization {
+-    /// Get the diagonal D values (for diagnostics).
+-    pub fn d_values(&self) -> &[f64] {
+-        &self.d_values
++}
++
++impl QdldlSolver {
++    /// Get the diagonal D values from the most recent factorization.
++    pub fn d_values(&self) -> Option<&[f64]> {
++        self.factorization.as_ref().map(|f| f.d.as_slice())
+     }
+ }
+ 
+@@ -442,7 +442,7 @@ mod tests {
+         let factor = solver.numeric_factorization(&mat).unwrap();
+ 
+         // Check that D has entries
+-        let d = factor.d_values();
++        let d = solver.d_values().expect("missing D values");
+         assert_eq!(d.len(), 4);
+ 
+         // Test that we can solve a system
+diff --git a/solver-core/src/presolve/mod.rs b/solver-core/src/presolve/mod.rs
+index d49b03b..3ab05a7 100644
+--- a/solver-core/src/presolve/mod.rs
++++ b/solver-core/src/presolve/mod.rs
+@@ -3,3 +3,15 @@
+ //! Problem preprocessing, Ruiz equilibration, and future chordal decomposition.
+ 
+ pub mod ruiz;
++pub mod singleton;
++pub mod bounds;
++pub mod eliminate;
++
++use crate::problem::ProblemData;
++use crate::presolve::bounds::{PresolveResult, shift_bounds_and_eliminate_fixed_with_postsolve};
++use crate::presolve::eliminate::eliminate_singleton_rows;
++
++pub fn apply_presolve(prob: &ProblemData) -> PresolveResult {
++    let presolved = eliminate_singleton_rows(prob);
++    shift_bounds_and_eliminate_fixed_with_postsolve(&presolved.problem, presolved.postsolve)
++}
+diff --git a/solver-core/src/problem.rs b/solver-core/src/problem.rs
+index a517884..aab8ff5 100644
+--- a/solver-core/src/problem.rs
++++ b/solver-core/src/problem.rs
+@@ -35,7 +35,7 @@ pub type SparseCsc = sprs::CsMatI<f64, usize>;
+ /// - A: m × n
+ /// - b: m
+ /// - s, z: m (partitioned by cones)
+-#[derive(Clone)]
++#[derive(Debug, Clone)]
+ #[allow(non_snake_case)]  // P and A are standard mathematical notation
+ pub struct ProblemData {
+     /// Quadratic cost matrix P (n × n, PSD, upper triangle in CSC).
+@@ -120,6 +120,21 @@ pub enum VarType {
+     Binary,
+ }
+ 
++/// Optional warm-start data (unscaled, original problem coordinates).
++#[derive(Debug, Clone, Default)]
++pub struct WarmStart {
++    /// Primal variables x (length n)
++    pub x: Option<Vec<f64>>,
++    /// Slack variables s (length m)
++    pub s: Option<Vec<f64>>,
++    /// Dual variables z (length m)
++    pub z: Option<Vec<f64>>,
++    /// Homogenization variable tau (optional)
++    pub tau: Option<f64>,
++    /// Dual homogenization variable kappa (optional)
++    pub kappa: Option<f64>,
++}
++
+ /// Solver settings and parameters.
+ #[derive(Debug, Clone)]
+ pub struct SolverSettings {
+@@ -156,6 +171,9 @@ pub struct SolverSettings {
+     /// Iterative refinement steps for KKT solves
+     pub kkt_refine_iters: usize,
+ 
++    /// Minimum feasibility weight for combined-step RHS (0 = pure (1-σ))
++    pub feas_weight_floor: f64,
++
+     /// Multiple centrality correction iterations
+     pub mcc_iters: usize,
+ 
+@@ -165,6 +183,9 @@ pub struct SolverSettings {
+     /// Centrality upper bound (sᵢ zᵢ <= γ μ)
+     pub centrality_gamma: f64,
+ 
++    /// Maximum centering parameter σ (cap for combined step)
++    pub sigma_max: f64,
++
+     /// Max backtracking steps for centrality line search
+     pub line_search_max_iters: usize,
+ 
+@@ -173,6 +194,9 @@ pub struct SolverSettings {
+ 
+     /// Enable GPU acceleration (future)
+     pub enable_gpu: bool,
++
++    /// Optional warm-start values for repeated solves
++    pub warm_start: Option<WarmStart>,
+ }
+ 
+ impl Default for SolverSettings {
+@@ -189,12 +213,15 @@ impl Default for SolverSettings {
+             dynamic_reg_min_pivot: 1e-7,
+             threads: 0,  // Auto-detect
+             kkt_refine_iters: 1,
++            feas_weight_floor: 0.05,
+             mcc_iters: 0,
+             centrality_beta: 0.1,
+             centrality_gamma: 10.0,
++            sigma_max: 0.999,
+             line_search_max_iters: 0,
+             seed: 0,
+             enable_gpu: false,
++            warm_start: None,
+         }
+     }
+ }
+@@ -360,6 +387,11 @@ impl ProblemData {
+         for cone in &self.cones {
+             cone.validate()?;
+         }
++        if self.cones.iter().any(|cone| {
++            matches!(cone, ConeSpec::Psd { .. } | ConeSpec::Exp { .. } | ConeSpec::Pow { .. })
++        }) {
++            return Err("PSD/EXP/POW cones are not supported yet".to_string());
++        }
+ 
+         // Check variable bounds if present
+         if let Some(ref bounds) = self.var_bounds {
+diff --git a/solver-core/src/scaling/nt.rs b/solver-core/src/scaling/nt.rs
+index 2446337..e4e7382 100644
+--- a/solver-core/src/scaling/nt.rs
++++ b/solver-core/src/scaling/nt.rs
+@@ -50,16 +50,19 @@ pub fn nt_scaling_nonneg(
+         });
+     }
+ 
+-    if s.iter().any(|&x| !x.is_finite() || x <= 0.0)
+-        || z.iter().any(|&x| !x.is_finite() || x <= 0.0)
+-    {
++    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
+         return Err(NtScalingError::NotInterior);
+     }
+ 
+     // NT scaling for nonnegative orthant: H = diag(s/z)
+     // This satisfies: H*z = s and H^{-1}*s = z.
+-    let d: Vec<f64> = s.iter().zip(z.iter())
+-        .map(|(si, zi)| si / zi)
++    //
++    // The ratio can overflow/underflow on extreme instances, so clamp it to
++    // a numerically safe range.
++    let d: Vec<f64> = s
++        .iter()
++        .zip(z.iter())
++        .map(|(si, zi)| (si / zi).clamp(1e-18, 1e18))
+         .collect();
+ 
+     Ok(ScalingBlock::Diagonal { d })
+diff --git a/solver-py/python/minix/__init__.py b/solver-py/python/minix/__init__.py
+index 1ee01e6..479e28b 100644
+--- a/solver-py/python/minix/__init__.py
++++ b/solver-py/python/minix/__init__.py
+@@ -34,6 +34,7 @@ from scipy import sparse
+ 
+ from minix._native import (
+     MinixResult,
++    MinixSolver as _NativeSolver,
+     default_settings,
+     solve_conic,
+     version,
+@@ -44,6 +45,7 @@ if TYPE_CHECKING:
+ 
+ __all__ = [
+     "solve",
++    "Solver",
+     "MinixResult",
+     "version",
+     "default_settings",
+@@ -52,6 +54,61 @@ __all__ = [
+ __version__ = version()
+ 
+ 
++def _prepare_problem_inputs(
++    A: sparse.spmatrix,
++    b: NDArray[np.floating],
++    q: NDArray[np.floating],
++    cones: list[tuple[str, int]],
++    P: sparse.spmatrix | None,
++) -> tuple[sparse.csc_matrix, NDArray[np.floating], NDArray[np.floating], NDArray[np.int64] | None, NDArray[np.int64] | None, NDArray[np.floating] | None, int, int]:
++    A_csc = sparse.csc_matrix(A)
++    m, n = A_csc.shape
++
++    b = np.asarray(b, dtype=np.float64).ravel()
++    q = np.asarray(q, dtype=np.float64).ravel()
++
++    if len(b) != m:
++        msg = f"b has length {len(b)}, expected {m} (number of rows in A)"
++        raise ValueError(msg)
++    if len(q) != n:
++        msg = f"q has length {len(q)}, expected {n} (number of columns in A)"
++        raise ValueError(msg)
++
++    total_cone_dim = sum(dim for _, dim in cones)
++    if total_cone_dim != m:
++        msg = f"Cone dimensions sum to {total_cone_dim}, expected {m} (number of rows in A)"
++        raise ValueError(msg)
++
++    p_indptr = None
++    p_indices = None
++    p_data = None
++
++    if P is not None:
++        P_csc = sparse.csc_matrix(P)
++        if P_csc.shape != (n, n):
++            msg = f"P has shape {P_csc.shape}, expected ({n}, {n})"
++            raise ValueError(msg)
++        p_indptr = P_csc.indptr.astype(np.int64)
++        p_indices = P_csc.indices.astype(np.int64)
++        p_data = P_csc.data.astype(np.float64)
++
++    return A_csc, b, q, p_indptr, p_indices, p_data, m, n
++
++
++def _as_vec(
++    vec: NDArray[np.floating] | None,
++    name: str,
++    expected_len: int | None,
++) -> NDArray[np.floating] | None:
++    if vec is None:
++        return None
++    arr = np.asarray(vec, dtype=np.float64).ravel()
++    if expected_len is not None and len(arr) != expected_len:
++        msg = f"{name} has length {len(arr)}, expected {expected_len}"
++        raise ValueError(msg)
++    return arr
++
++
+ def solve(
+     A: sparse.spmatrix,
+     b: NDArray[np.floating],
+@@ -69,6 +126,13 @@ def solve(
+     centrality_gamma: float | None = None,
+     line_search_max_iters: int | None = None,
+     time_limit_ms: int | None = None,
++    warm_start: MinixResult | None = None,
++    warm_x: NDArray[np.floating] | None = None,
++    warm_s: NDArray[np.floating] | None = None,
++    warm_z: NDArray[np.floating] | None = None,
++    warm_tau: float | None = None,
++    warm_kappa: float | None = None,
++    solver: str | None = None,
+ ) -> MinixResult:
+     """Solve a conic optimization problem.
+ 
+@@ -95,6 +159,13 @@ def solve(
+         centrality_gamma: Upper bound for s_i z_i relative to μ.
+         line_search_max_iters: Max backtracking steps for centrality line search.
+         time_limit_ms: Time limit in milliseconds.
++        warm_start: MinixResult to reuse for warm start (x/s/z).
++        warm_x: Warm start primal vector (length n).
++        warm_s: Warm start slack vector (length m).
++        warm_z: Warm start dual vector (length m).
++        warm_tau: Warm start tau value.
++        warm_kappa: Warm start kappa value.
++        solver: Solver backend to use ("ipm" or "ipm2").
+ 
+     Returns:
+         MinixResult with solution status, primal/dual solutions, and diagnostics.
+@@ -112,40 +183,21 @@ def solve(
+         >>> cones = [("nonneg", 1)]
+         >>> result = minix.solve(A, b, q, cones, P=P)
+     """
+-    # Convert A to CSC format
+-    A_csc = sparse.csc_matrix(A)
+-    m, n = A_csc.shape
+-
+-    # Validate dimensions
+-    b = np.asarray(b, dtype=np.float64).ravel()
+-    q = np.asarray(q, dtype=np.float64).ravel()
+-
+-    if len(b) != m:
+-        msg = f"b has length {len(b)}, expected {m} (number of rows in A)"
+-        raise ValueError(msg)
+-    if len(q) != n:
+-        msg = f"q has length {len(q)}, expected {n} (number of columns in A)"
+-        raise ValueError(msg)
+-
+-    # Validate cone dimensions
+-    total_cone_dim = sum(dim for _, dim in cones)
+-    if total_cone_dim != m:
+-        msg = f"Cone dimensions sum to {total_cone_dim}, expected {m} (number of rows in A)"
+-        raise ValueError(msg)
++    A_csc, b, q, p_indptr, p_indices, p_data, m, n = _prepare_problem_inputs(
++        A, b, q, cones, P
++    )
+ 
+-    # Prepare P if provided
+-    p_indptr = None
+-    p_indices = None
+-    p_data = None
++    if warm_start is not None:
++        if warm_x is None:
++            warm_x = warm_start.x()
++        if warm_s is None:
++            warm_s = warm_start.s()
++        if warm_z is None:
++            warm_z = warm_start.z()
+ 
+-    if P is not None:
+-        P_csc = sparse.csc_matrix(P)
+-        if P_csc.shape != (n, n):
+-            msg = f"P has shape {P_csc.shape}, expected ({n}, {n})"
+-            raise ValueError(msg)
+-        p_indptr = P_csc.indptr.astype(np.int64)
+-        p_indices = P_csc.indices.astype(np.int64)
+-        p_data = P_csc.data.astype(np.float64)
++    warm_x = _as_vec(warm_x, "warm_x", None)
++    warm_s = _as_vec(warm_s, "warm_s", None)
++    warm_z = _as_vec(warm_z, "warm_z", None)
+ 
+     # Call native solver
+     return solve_conic(
+@@ -169,4 +221,109 @@ def solve(
+         centrality_gamma=centrality_gamma,
+         line_search_max_iters=line_search_max_iters,
+         time_limit_ms=time_limit_ms,
++        warm_x=warm_x,
++        warm_s=warm_s,
++        warm_z=warm_z,
++        warm_tau=warm_tau,
++        warm_kappa=warm_kappa,
++        solver=solver,
+     )
++
++
++class Solver:
++    """Persistent solver for repeated solves with updated parameters."""
++
++    def __init__(
++        self,
++        A: sparse.spmatrix,
++        b: NDArray[np.floating],
++        q: NDArray[np.floating],
++        cones: list[tuple[str, int]],
++        P: sparse.spmatrix | None = None,
++    ) -> None:
++        A_csc, b_vec, q_vec, p_indptr, p_indices, p_data, m, n = _prepare_problem_inputs(
++            A, b, q, cones, P
++        )
++        self._m = m
++        self._n = n
++        self._solver = _NativeSolver(
++            a_indptr=A_csc.indptr.astype(np.int64),
++            a_indices=A_csc.indices.astype(np.int64),
++            a_data=A_csc.data.astype(np.float64),
++            a_shape=(m, n),
++            q=q_vec,
++            b=b_vec,
++            cones=cones,
++            p_indptr=p_indptr,
++            p_indices=p_indices,
++            p_data=p_data,
++        )
++
++    def update(
++        self,
++        *,
++        q: NDArray[np.floating] | None = None,
++        b: NDArray[np.floating] | None = None,
++    ) -> None:
++        q_vec = _as_vec(q, "q", self._n)
++        b_vec = _as_vec(b, "b", self._m)
++        self._solver.update(q=q_vec, b=b_vec)
++
++    def solve(
++        self,
++        *,
++        q: NDArray[np.floating] | None = None,
++        b: NDArray[np.floating] | None = None,
++        max_iter: int | None = None,
++        verbose: bool | None = None,
++        tol_feas: float | None = None,
++        tol_gap: float | None = None,
++        kkt_refine_iters: int | None = None,
++        mcc_iters: int | None = None,
++        centrality_beta: float | None = None,
++        centrality_gamma: float | None = None,
++        line_search_max_iters: int | None = None,
++        time_limit_ms: int | None = None,
++        warm_start: MinixResult | None = None,
++        warm_x: NDArray[np.floating] | None = None,
++        warm_s: NDArray[np.floating] | None = None,
++        warm_z: NDArray[np.floating] | None = None,
++        warm_tau: float | None = None,
++        warm_kappa: float | None = None,
++        solver: str | None = None,
++    ) -> MinixResult:
++        q_vec = _as_vec(q, "q", self._n)
++        b_vec = _as_vec(b, "b", self._m)
++
++        if warm_start is not None:
++            if warm_x is None:
++                warm_x = warm_start.x()
++            if warm_s is None:
++                warm_s = warm_start.s()
++            if warm_z is None:
++                warm_z = warm_start.z()
++
++        warm_x = _as_vec(warm_x, "warm_x", None)
++        warm_s = _as_vec(warm_s, "warm_s", None)
++        warm_z = _as_vec(warm_z, "warm_z", None)
++
++        return self._solver.solve(
++            q=q_vec,
++            b=b_vec,
++            max_iter=max_iter,
++            verbose=verbose,
++            tol_feas=tol_feas,
++            tol_gap=tol_gap,
++            kkt_refine_iters=kkt_refine_iters,
++            mcc_iters=mcc_iters,
++            centrality_beta=centrality_beta,
++            centrality_gamma=centrality_gamma,
++            line_search_max_iters=line_search_max_iters,
++            time_limit_ms=time_limit_ms,
++            warm_x=warm_x,
++            warm_s=warm_s,
++            warm_z=warm_z,
++            warm_tau=warm_tau,
++            warm_kappa=warm_kappa,
++            solver=solver,
++        )
+diff --git a/solver-py/src/lib.rs b/solver-py/src/lib.rs
+index 378486c..df005ad 100644
+--- a/solver-py/src/lib.rs
++++ b/solver-py/src/lib.rs
+@@ -5,9 +5,12 @@
+ //! and numpy arrays.
+ 
+ use numpy::{PyArray1, PyReadonlyArray1};
++use pyo3::exceptions::{PyRuntimeError, PyValueError};
+ use pyo3::prelude::*;
+ use pyo3::types::PyDict;
+-use solver_core::{solve, ConeSpec, ProblemData, SolveResult, SolveStatus, SolverSettings};
++use solver_core::{
++    ipm2, solve, ConeSpec, ProblemData, SolveResult, SolveStatus, SolverSettings, WarmStart,
++};
+ use sprs::CsMat;
+ 
+ /// Convert scipy CSC arrays to sprs CsMat in CSC format.
+@@ -60,6 +63,200 @@ fn parse_cones(cones: Vec<(String, usize)>) -> PyResult<Vec<ConeSpec>> {
+     Ok(result)
+ }
+ 
++fn build_problem(
++    a_indptr: PyReadonlyArray1<i64>,
++    a_indices: PyReadonlyArray1<i64>,
++    a_data: PyReadonlyArray1<f64>,
++    a_shape: (usize, usize),
++    q: PyReadonlyArray1<f64>,
++    b: PyReadonlyArray1<f64>,
++    cones: Vec<(String, usize)>,
++    p_indptr: Option<PyReadonlyArray1<i64>>,
++    p_indices: Option<PyReadonlyArray1<i64>>,
++    p_data: Option<PyReadonlyArray1<f64>>,
++) -> PyResult<ProblemData> {
++    // Extract all data from Python arrays first (while we hold the GIL)
++    let a_indptr_vec: Vec<usize> = a_indptr
++        .as_slice()?
++        .iter()
++        .map(|&x| x as usize)
++        .collect();
++    let a_indices_vec: Vec<usize> = a_indices
++        .as_slice()?
++        .iter()
++        .map(|&x| x as usize)
++        .collect();
++    let a_data_vec: Vec<f64> = a_data.as_slice()?.to_vec();
++    let q_vec: Vec<f64> = q.as_slice()?.to_vec();
++    let b_vec: Vec<f64> = b.as_slice()?.to_vec();
++
++    // Extract P if provided
++    let p_data_extracted = match (&p_indptr, &p_indices, &p_data) {
++        (Some(indptr), Some(indices), Some(data)) => {
++            let indptr_vec: Vec<usize> = indptr
++                .as_slice()?
++                .iter()
++                .map(|&x| x as usize)
++                .collect();
++            let indices_vec: Vec<usize> = indices
++                .as_slice()?
++                .iter()
++                .map(|&x| x as usize)
++                .collect();
++            let data_vec: Vec<f64> = data.as_slice()?.to_vec();
++            Some((indptr_vec, indices_vec, data_vec))
++        }
++        _ => None,
++    };
++
++    // Parse cone specifications
++    let cone_specs = parse_cones(cones)?;
++
++    // Convert constraint matrix A
++    let a_mat = scipy_csc_to_sprs(a_indptr_vec, a_indices_vec, a_data_vec, a_shape);
++
++    // Convert quadratic cost P if provided
++    let n = q_vec.len();
++    let p_mat = p_data_extracted.map(|(indptr, indices, data)| {
++        scipy_csc_to_sprs(indptr, indices, data, (n, n))
++    });
++
++    Ok(ProblemData {
++        P: p_mat,
++        q: q_vec,
++        A: a_mat,
++        b: b_vec,
++        cones: cone_specs,
++        var_bounds: None,
++        integrality: None,
++    })
++}
++
++fn build_warm_start(
++    warm_x: Option<PyReadonlyArray1<f64>>,
++    warm_s: Option<PyReadonlyArray1<f64>>,
++    warm_z: Option<PyReadonlyArray1<f64>>,
++    warm_tau: Option<f64>,
++    warm_kappa: Option<f64>,
++) -> PyResult<Option<WarmStart>> {
++    let warm_x_vec = match warm_x {
++        Some(arr) => Some(arr.as_slice()?.to_vec()),
++        None => None,
++    };
++    let warm_s_vec = match warm_s {
++        Some(arr) => Some(arr.as_slice()?.to_vec()),
++        None => None,
++    };
++    let warm_z_vec = match warm_z {
++        Some(arr) => Some(arr.as_slice()?.to_vec()),
++        None => None,
++    };
++
++    if warm_x_vec.is_some()
++        || warm_s_vec.is_some()
++        || warm_z_vec.is_some()
++        || warm_tau.is_some()
++        || warm_kappa.is_some()
++    {
++        Ok(Some(WarmStart {
++            x: warm_x_vec,
++            s: warm_s_vec,
++            z: warm_z_vec,
++            tau: warm_tau,
++            kappa: warm_kappa,
++        }))
++    } else {
++        Ok(None)
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++fn build_settings(
++    max_iter: Option<usize>,
++    verbose: Option<bool>,
++    tol_feas: Option<f64>,
++    tol_gap: Option<f64>,
++    kkt_refine_iters: Option<usize>,
++    mcc_iters: Option<usize>,
++    centrality_beta: Option<f64>,
++    centrality_gamma: Option<f64>,
++    line_search_max_iters: Option<usize>,
++    time_limit_ms: Option<u64>,
++    warm_start: Option<WarmStart>,
++) -> SolverSettings {
++    let mut settings = SolverSettings::default();
++    if let Some(v) = max_iter {
++        settings.max_iter = v;
++    }
++    if let Some(v) = verbose {
++        settings.verbose = v;
++    }
++    if let Some(v) = tol_feas {
++        settings.tol_feas = v;
++    }
++    if let Some(v) = tol_gap {
++        settings.tol_gap = v;
++    }
++    if let Some(v) = kkt_refine_iters {
++        settings.kkt_refine_iters = v;
++    }
++    if let Some(v) = mcc_iters {
++        settings.mcc_iters = v;
++    }
++    if let Some(v) = centrality_beta {
++        settings.centrality_beta = v;
++    }
++    if let Some(v) = centrality_gamma {
++        settings.centrality_gamma = v;
++    }
++    if let Some(v) = line_search_max_iters {
++        settings.line_search_max_iters = v;
++    }
++    if let Some(v) = time_limit_ms {
++        settings.time_limit_ms = Some(v);
++    }
++    settings.warm_start = warm_start;
++    settings
++}
++
++fn solve_with_backend(
++    solver: Option<&str>,
++    problem: &ProblemData,
++    settings: &SolverSettings,
++) -> PyResult<SolveResult> {
++    let result = match solver {
++        None => solve(problem, settings),
++        Some(name) if name.eq_ignore_ascii_case("ipm") => solve(problem, settings),
++        Some(name) if name.eq_ignore_ascii_case("ipm2") => ipm2::solve_ipm2(problem, settings),
++        Some(name) => {
++            return Err(PyErr::new::<PyValueError, _>(format!(
++                "Unknown solver '{}'. Expected 'ipm' or 'ipm2'.",
++                name
++            )));
++        }
++    };
++
++    result.map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Solver error: {}", e)))
++}
++
++fn update_vec_from_array(
++    target: &mut Vec<f64>,
++    source: &PyReadonlyArray1<f64>,
++    name: &str,
++) -> PyResult<()> {
++    let slice = source.as_slice()?;
++    if slice.len() != target.len() {
++        return Err(PyErr::new::<PyValueError, _>(format!(
++            "{} has length {}, expected {}",
++            name,
++            slice.len(),
++            target.len()
++        )));
++    }
++    target.copy_from_slice(slice);
++    Ok(())
++}
++
+ /// Result returned from the solve function.
+ #[pyclass]
+ #[derive(Clone)]
+@@ -142,6 +339,129 @@ impl From<SolveResult> for MinixResult {
+     }
+ }
+ 
++/// Persistent solver instance for repeated solves with updated parameters.
++#[pyclass]
++pub struct MinixSolver {
++    problem: ProblemData,
++}
++
++#[pymethods]
++impl MinixSolver {
++    #[new]
++    #[pyo3(signature = (
++        a_indptr,
++        a_indices,
++        a_data,
++        a_shape,
++        q,
++        b,
++        cones,
++        p_indptr = None,
++        p_indices = None,
++        p_data = None
++    ))]
++    fn new(
++        a_indptr: PyReadonlyArray1<i64>,
++        a_indices: PyReadonlyArray1<i64>,
++        a_data: PyReadonlyArray1<f64>,
++        a_shape: (usize, usize),
++        q: PyReadonlyArray1<f64>,
++        b: PyReadonlyArray1<f64>,
++        cones: Vec<(String, usize)>,
++        p_indptr: Option<PyReadonlyArray1<i64>>,
++        p_indices: Option<PyReadonlyArray1<i64>>,
++        p_data: Option<PyReadonlyArray1<f64>>,
++    ) -> PyResult<Self> {
++        let problem = build_problem(
++            a_indptr, a_indices, a_data, a_shape, q, b, cones, p_indptr, p_indices, p_data,
++        )?;
++        Ok(Self { problem })
++    }
++
++    #[pyo3(signature = (
++        q = None,
++        b = None,
++        max_iter = None,
++        verbose = None,
++        tol_feas = None,
++        tol_gap = None,
++        kkt_refine_iters = None,
++        mcc_iters = None,
++        centrality_beta = None,
++        centrality_gamma = None,
++        line_search_max_iters = None,
++        time_limit_ms = None,
++        warm_x = None,
++        warm_s = None,
++        warm_z = None,
++        warm_tau = None,
++        warm_kappa = None,
++        solver = None
++    ))]
++    #[allow(clippy::too_many_arguments)]
++    fn solve(
++        &mut self,
++        q: Option<PyReadonlyArray1<f64>>,
++        b: Option<PyReadonlyArray1<f64>>,
++        max_iter: Option<usize>,
++        verbose: Option<bool>,
++        tol_feas: Option<f64>,
++        tol_gap: Option<f64>,
++        kkt_refine_iters: Option<usize>,
++        mcc_iters: Option<usize>,
++        centrality_beta: Option<f64>,
++        centrality_gamma: Option<f64>,
++        line_search_max_iters: Option<usize>,
++        time_limit_ms: Option<u64>,
++        warm_x: Option<PyReadonlyArray1<f64>>,
++        warm_s: Option<PyReadonlyArray1<f64>>,
++        warm_z: Option<PyReadonlyArray1<f64>>,
++        warm_tau: Option<f64>,
++        warm_kappa: Option<f64>,
++        solver: Option<String>,
++    ) -> PyResult<MinixResult> {
++        if let Some(q_arr) = q {
++            update_vec_from_array(&mut self.problem.q, &q_arr, "q")?;
++        }
++        if let Some(b_arr) = b {
++            update_vec_from_array(&mut self.problem.b, &b_arr, "b")?;
++        }
++
++        let warm_start = build_warm_start(warm_x, warm_s, warm_z, warm_tau, warm_kappa)?;
++        let settings = build_settings(
++            max_iter,
++            verbose,
++            tol_feas,
++            tol_gap,
++            kkt_refine_iters,
++            mcc_iters,
++            centrality_beta,
++            centrality_gamma,
++            line_search_max_iters,
++            time_limit_ms,
++            warm_start,
++        );
++
++        let result = solve_with_backend(solver.as_deref(), &self.problem, &settings)?;
++        Ok(MinixResult::from(result))
++    }
++
++    #[pyo3(signature = (q = None, b = None))]
++    fn update(
++        &mut self,
++        q: Option<PyReadonlyArray1<f64>>,
++        b: Option<PyReadonlyArray1<f64>>,
++    ) -> PyResult<()> {
++        if let Some(q_arr) = q {
++            update_vec_from_array(&mut self.problem.q, &q_arr, "q")?;
++        }
++        if let Some(b_arr) = b {
++            update_vec_from_array(&mut self.problem.b, &b_arr, "b")?;
++        }
++        Ok(())
++    }
++}
++
+ /// Solve a conic optimization problem.
+ ///
+ /// Problem form:
+@@ -168,6 +488,12 @@ impl From<SolveResult> for MinixResult {
+ /// * `tol_feas` - Feasibility tolerance (default: 1e-8)
+ /// * `tol_gap` - Duality gap tolerance (default: 1e-8)
+ /// * `time_limit_ms` - Time limit in milliseconds (optional)
++/// * `warm_x` - Warm-start primal vector (optional)
++/// * `warm_s` - Warm-start slack vector (optional)
++/// * `warm_z` - Warm-start dual vector (optional)
++/// * `warm_tau` - Warm-start tau value (optional)
++/// * `warm_kappa` - Warm-start kappa value (optional)
++/// * `solver` - Solver backend ("ipm" or "ipm2")
+ ///
+ /// # Returns
+ ///
+@@ -193,7 +519,13 @@ impl From<SolveResult> for MinixResult {
+     centrality_beta = None,
+     centrality_gamma = None,
+     line_search_max_iters = None,
+-    time_limit_ms = None
++    time_limit_ms = None,
++    warm_x = None,
++    warm_s = None,
++    warm_z = None,
++    warm_tau = None,
++    warm_kappa = None,
++    solver = None
+ ))]
+ #[allow(clippy::too_many_arguments)]
+ fn solve_conic(
+@@ -223,101 +555,43 @@ fn solve_conic(
+     centrality_gamma: Option<f64>,
+     line_search_max_iters: Option<usize>,
+     time_limit_ms: Option<u64>,
++    warm_x: Option<PyReadonlyArray1<f64>>,
++    warm_s: Option<PyReadonlyArray1<f64>>,
++    warm_z: Option<PyReadonlyArray1<f64>>,
++    warm_tau: Option<f64>,
++    warm_kappa: Option<f64>,
++    solver: Option<String>,
+ ) -> PyResult<MinixResult> {
+-    // Extract all data from Python arrays first (while we hold the GIL)
+-    let a_indptr_vec: Vec<usize> = a_indptr
+-        .as_slice()?
+-        .iter()
+-        .map(|&x| x as usize)
+-        .collect();
+-    let a_indices_vec: Vec<usize> = a_indices
+-        .as_slice()?
+-        .iter()
+-        .map(|&x| x as usize)
+-        .collect();
+-    let a_data_vec: Vec<f64> = a_data.as_slice()?.to_vec();
+-    let q_vec: Vec<f64> = q.as_slice()?.to_vec();
+-    let b_vec: Vec<f64> = b.as_slice()?.to_vec();
++    let warm_start = build_warm_start(warm_x, warm_s, warm_z, warm_tau, warm_kappa)?;
+ 
+-    // Extract P if provided
+-    let p_data_extracted = match (&p_indptr, &p_indices, &p_data) {
+-        (Some(indptr), Some(indices), Some(data)) => {
+-            let indptr_vec: Vec<usize> = indptr
+-                .as_slice()?
+-                .iter()
+-                .map(|&x| x as usize)
+-                .collect();
+-            let indices_vec: Vec<usize> = indices
+-                .as_slice()?
+-                .iter()
+-                .map(|&x| x as usize)
+-                .collect();
+-            let data_vec: Vec<f64> = data.as_slice()?.to_vec();
+-            Some((indptr_vec, indices_vec, data_vec))
+-        }
+-        _ => None,
+-    };
+-
+-    // Parse cone specifications
+-    let cone_specs = parse_cones(cones)?;
+-
+-    // Convert constraint matrix A
+-    let a_mat = scipy_csc_to_sprs(a_indptr_vec, a_indices_vec, a_data_vec, a_shape);
+-
+-    // Convert quadratic cost P if provided
+-    let n = q_vec.len();
+-    let p_mat = p_data_extracted.map(|(indptr, indices, data)| {
+-        scipy_csc_to_sprs(indptr, indices, data, (n, n))
+-    });
+-
+-    // Build problem
+-    let problem = ProblemData {
+-        P: p_mat,
+-        q: q_vec,
+-        A: a_mat,
+-        b: b_vec,
+-        cones: cone_specs,
+-        var_bounds: None,
+-        integrality: None,
+-    };
++    let problem = build_problem(
++        a_indptr,
++        a_indices,
++        a_data,
++        a_shape,
++        q,
++        b,
++        cones,
++        p_indptr,
++        p_indices,
++        p_data,
++    )?;
+ 
+-    // Build settings
+-    let mut settings = SolverSettings::default();
+-    if let Some(v) = max_iter {
+-        settings.max_iter = v;
+-    }
+-    if let Some(v) = verbose {
+-        settings.verbose = v;
+-    }
+-    if let Some(v) = tol_feas {
+-        settings.tol_feas = v;
+-    }
+-    if let Some(v) = tol_gap {
+-        settings.tol_gap = v;
+-    }
+-    if let Some(v) = kkt_refine_iters {
+-        settings.kkt_refine_iters = v;
+-    }
+-    if let Some(v) = mcc_iters {
+-        settings.mcc_iters = v;
+-    }
+-    if let Some(v) = centrality_beta {
+-        settings.centrality_beta = v;
+-    }
+-    if let Some(v) = centrality_gamma {
+-        settings.centrality_gamma = v;
+-    }
+-    if let Some(v) = line_search_max_iters {
+-        settings.line_search_max_iters = v;
+-    }
+-    if let Some(v) = time_limit_ms {
+-        settings.time_limit_ms = Some(v);
+-    }
++    let settings = build_settings(
++        max_iter,
++        verbose,
++        tol_feas,
++        tol_gap,
++        kkt_refine_iters,
++        mcc_iters,
++        centrality_beta,
++        centrality_gamma,
++        line_search_max_iters,
++        time_limit_ms,
++        warm_start,
++    );
+ 
+-    // Solve
+-    let result = solve(&problem, &settings).map_err(|e| {
+-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Solver error: {}", e))
+-    })?;
++    let result = solve_with_backend(solver.as_deref(), &problem, &settings)?;
+ 
+     Ok(MinixResult::from(result))
+ }
+@@ -360,5 +634,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     m.add_function(wrap_pyfunction!(version, m)?)?;
+     m.add_function(wrap_pyfunction!(default_settings, m)?)?;
+     m.add_class::<MinixResult>()?;
++    m.add_class::<MinixSolver>()?;
+     Ok(())
+ }

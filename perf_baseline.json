@@ -1,0 +1,7 @@
+{
+  "total_solve_ms": 3755,
+  "total_kkt_factor_ms": 1405,
+  "total_kkt_solve_ms": 1020,
+  "total_cone_ms": 9,
+  "cases": 47
+}
