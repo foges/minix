@@ -706,14 +706,24 @@ pub fn predictor_corrector_step_in_place(
                         d.resize(dim, 0.0);
                     }
                     for i in 0..dim {
-                        let denom = z[i].max(1e-300);
-                        d[i] = (s[i] / denom).clamp(1e-18, 1e18);
+                        let ratio = s[i] / z[i];
+                        // Match ipm1 fallback: use 1.0 for invalid ratios
+                        d[i] = if ratio.is_finite() && ratio > 0.0 {
+                            ratio.clamp(1e-12, 1e12)
+                        } else {
+                            1.0
+                        };
                     }
                     ws.scaling[cone_idx] = ScalingBlock::Diagonal { d };
                 } else if let ScalingBlock::Diagonal { d } = &mut ws.scaling[cone_idx] {
                     for i in 0..dim {
-                        let denom = z[i].max(1e-300);
-                        d[i] = (s[i] / denom).clamp(1e-18, 1e18);
+                        let ratio = s[i] / z[i];
+                        // Match ipm1 fallback: use 1.0 for invalid ratios
+                        d[i] = if ratio.is_finite() && ratio > 0.0 {
+                            ratio.clamp(1e-12, 1e12)
+                        } else {
+                            1.0
+                        };
                     }
                 }
             }

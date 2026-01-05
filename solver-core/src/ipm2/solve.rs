@@ -144,7 +144,9 @@ pub fn solve_ipm2(
 
     let start = Instant::now();
     let mut last_metrics = None;
-    let reg_scale = scaling.cost_scale;
+    // Use fixed regularization (like ipm1) instead of scaling-dependent regularization.
+    // This avoids regularization drift on problems with extreme cost_scale.
+    let reg_scale = 1.0;
 
     while iter < settings.max_iter {
         {
