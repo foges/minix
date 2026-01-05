@@ -144,6 +144,7 @@ pub fn solve_ipm2(
 
     let start = Instant::now();
     let mut last_metrics = None;
+    let mut early_polish_result: Option<(crate::ipm2::polish::PolishResult, crate::ipm2::UnscaledMetrics)> = None;
     // Use fixed regularization (like ipm1) instead of scaling-dependent regularization.
     // This avoids regularization drift on problems with extreme cost_scale.
     let reg_scale = 1.0;
@@ -257,6 +258,84 @@ pub fn solve_ipm2(
                 check_infeasibility_unscaled(&orig_prob_bounds, &criteria, &state, &mut ws)
             {
                 term_status = Some(status);
+            } else {
+                // Early polish check: if primal and gap are good but dual is stuck,
+                // try polish now rather than waiting for max_iter
+                let primal_ok = metrics.rp_inf <= criteria.tol_feas * metrics.primal_scale;
+                let dual_ok = metrics.rd_inf <= criteria.tol_feas * metrics.dual_scale;
+                let gap_scale_abs = metrics.obj_p.abs().min(metrics.obj_d.abs()).max(1.0);
+                let gap_ok_abs = metrics.gap <= criteria.tol_gap * gap_scale_abs;
+                let gap_ok = gap_ok_abs || metrics.gap_rel <= criteria.tol_gap_rel;
+                let gap_close = metrics.gap_rel <= criteria.tol_gap_rel * 10.0;
+
+                if primal_ok && (gap_ok || gap_close) && !dual_ok && iter >= 10 {
+                    // Extract unscaled solution for polish
+                    let x_for_polish: Vec<f64> = if state.tau > 1e-8 {
+                        let x_scaled: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
+                        scaling.unscale_x(&x_scaled)
+                    } else {
+                        vec![0.0; n]
+                    };
+                    let s_for_polish: Vec<f64> = if state.tau > 1e-8 {
+                        let s_scaled: Vec<f64> = state.s.iter().map(|si| si / state.tau).collect();
+                        scaling.unscale_s(&s_scaled)
+                    } else {
+                        vec![0.0; m]
+                    };
+                    let z_for_polish: Vec<f64> = if state.tau > 1e-8 {
+                        let z_scaled: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
+                        scaling.unscale_z(&z_scaled)
+                    } else {
+                        vec![0.0; m]
+                    };
+
+                    if diag.enabled {
+                        eprintln!("early polish check at iter {}: primal_ok={} gap_ok={} gap_close={} dual_ok={}",
+                            iter, primal_ok, gap_ok, gap_close, dual_ok);
+                    }
+
+                    if let Some(polished) = polish_nonneg_active_set(
+                        &orig_prob_bounds,
+                        &x_for_polish,
+                        &s_for_polish,
+                        &z_for_polish,
+                        settings,
+                    ) {
+                        // Evaluate polished solution
+                        let mut rp_polish = vec![0.0; orig_prob_bounds.num_constraints()];
+                        let mut rd_polish = vec![0.0; orig_prob_bounds.num_vars()];
+                        let mut px_polish = vec![0.0; orig_prob_bounds.num_vars()];
+                        let polish_metrics = compute_unscaled_metrics(
+                            &orig_prob_bounds.A,
+                            orig_prob_bounds.P.as_ref(),
+                            &orig_prob_bounds.q,
+                            &orig_prob_bounds.b,
+                            &polished.x,
+                            &polished.s,
+                            &polished.z,
+                            &mut rp_polish,
+                            &mut rd_polish,
+                            &mut px_polish,
+                        );
+
+                        // Check if polish actually improved dual without worsening gap
+                        let dual_rel_after = polish_metrics.rel_d;
+                        let primal_rel_after = polish_metrics.rel_p;
+                        let gap_rel_after = polish_metrics.gap_rel;
+
+                        // Accept if: dual improved, primal still good, and gap didn't get much worse
+                        let gap_acceptable = gap_rel_after <= criteria.tol_gap_rel || gap_rel_after <= metrics.gap_rel * 2.0;
+                        if dual_rel_after < metrics.rel_d * 0.1 && primal_rel_after < criteria.tol_feas && gap_acceptable {
+                            if diag.enabled {
+                                eprintln!("early polish SUCCESS at iter {}: rel_d {:.3e} -> {:.3e}, rel_p {:.3e} -> {:.3e}, gap_rel {:.3e} -> {:.3e}",
+                                    iter, metrics.rel_d, dual_rel_after, metrics.rel_p, primal_rel_after, metrics.gap_rel, gap_rel_after);
+                            }
+                            // Store polished solution and mark as optimal
+                            early_polish_result = Some((polished, polish_metrics));
+                            term_status = Some(SolveStatus::Optimal);
+                        }
+                    }
+                }
             }
             metrics
         };
@@ -303,6 +382,31 @@ pub fn solve_ipm2(
 
     if iter >= settings.max_iter && status == SolveStatus::NumericalError {
         status = SolveStatus::MaxIters;
+    }
+
+    // If early polish succeeded, use that solution directly
+    if let Some((polished, polish_metrics)) = early_polish_result {
+        let solve_time_ms = start.elapsed().as_millis() as u64;
+        return Ok(SolveResult {
+            status,
+            x: polished.x,
+            s: polished.s,
+            z: polished.z,
+            obj_val: polish_metrics.obj_p,
+            info: SolveInfo {
+                iters: iter,
+                solve_time_ms,
+                kkt_factor_time_ms: timers.factorization.as_millis() as u64,
+                kkt_solve_time_ms: timers.solve.as_millis() as u64,
+                cone_time_ms: timers.scaling.as_millis() as u64,
+                primal_res: polish_metrics.rel_p,
+                dual_res: polish_metrics.rel_d,
+                gap: polish_metrics.gap_rel,
+                mu,
+                reg_static: reg_state.static_reg_eff,
+                reg_dynamic_bumps: reg_state.dynamic_bumps,
+            },
+        });
     }
 
     // Extract solution in scaled space
