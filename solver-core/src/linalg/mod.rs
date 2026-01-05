@@ -8,3 +8,4 @@ pub mod backend;
 pub mod backends;
 pub mod qdldl;
 pub mod normal_eqns;
+pub mod unified_kkt;
