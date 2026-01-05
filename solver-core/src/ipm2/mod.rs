@@ -1,7 +1,10 @@
-//! Experimental "ipm2" module: staging ground for MOSEK-close refactors.
+//! Main IPM solver module (ipm2).
 //!
-//! This module is intentionally additive: it can live side-by-side with the current ipm.
-//! Wire it in via a feature flag or a settings knob so you can A/B against the existing solver.
+//! Implements a predictor-corrector interior point method with:
+//! - HSDE (Homogeneous Self-Dual Embedding) formulation
+//! - Ruiz equilibration for problem scaling
+//! - NT (Nesterov-Todd) scaling for cone operations
+//! - Active-set polishing for bound-heavy QP problems
 #![allow(missing_docs)]
 
 pub mod diagnostics;

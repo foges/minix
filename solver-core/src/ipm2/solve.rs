@@ -1,8 +1,8 @@
-//! Experimental "ipm2" solver entry point.
+//! Main IPM solver entry point (ipm2).
 //!
-//! This is a parallel implementation track meant to be A/B tested against the
-//! existing `ipm` solver. It currently reuses the same HSDE and predictor-corrector
-//! kernels while wiring in the ipm2 scaffolding (workspace, diagnostics, timers).
+//! Implements a predictor-corrector interior point method using HSDE
+//! (Homogeneous Self-Dual Embedding) with Ruiz equilibration, NT scaling,
+//! and active-set polishing for bound-heavy problems.
 
 use std::time::Instant;
 
@@ -143,7 +143,6 @@ pub fn solve_ipm2(
     const MAX_CONSECUTIVE_FAILURES: usize = 3;
 
     let start = Instant::now();
-    let mut last_metrics = None;
     let mut early_polish_result: Option<(crate::ipm2::polish::PolishResult, crate::ipm2::UnscaledMetrics)> = None;
     // Use fixed regularization (like ipm1) instead of scaling-dependent regularization.
     // This avoids regularization drift on problems with extreme cost_scale.
@@ -339,7 +338,6 @@ pub fn solve_ipm2(
             }
             metrics
         };
-        last_metrics = Some(metrics);
 
         if diag.should_log(iter) {
             let min_s = state.s.iter().copied().fold(f64::INFINITY, f64::min);
