@@ -127,7 +127,7 @@ pub fn nt_scaling_soc(
 
     quad_rep_apply(&s_sqrt, &u_inv_sqrt, &mut w);
 
-    Ok(ScalingBlock::SocStructured { w, diag_reg: 0.0 })
+    Ok(ScalingBlock::SocStructured { w })
 }
 
 /// Compute NT scaling for PSD cone.
@@ -525,8 +525,7 @@ mod tests {
 
         let scaling = nt_scaling_soc(&cone, &s, &z).unwrap();
 
-        if let ScalingBlock::SocStructured { w, diag_reg } = scaling {
-            assert_eq!(diag_reg, 0.0);
+        if let ScalingBlock::SocStructured { w } = scaling {
             // Verify H*z = s where H = P(w)
             let mut hz = vec![0.0; 3];
             quad_rep_apply(&w, &z, &mut hz);
@@ -547,8 +546,7 @@ mod tests {
 
         let scaling = nt_scaling_soc(&cone, &s, &z).unwrap();
 
-        if let ScalingBlock::SocStructured { w, diag_reg } = scaling {
-            assert_eq!(diag_reg, 0.0);
+        if let ScalingBlock::SocStructured { w } = scaling {
             let mut hz = vec![0.0; 5];
             quad_rep_apply(&w, &z, &mut hz);
 

@@ -1222,7 +1222,7 @@ pub fn predictor_corrector_step(
                         let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
 
                         // MCC delta if present
-                        let delta = if is_nonneg {
+                        let delta = if cone_type == ConeType::NonNeg {
                             mcc_delta.as_ref().map_or(0.0, |d| d[i])
                         } else {
                             0.0
@@ -1378,14 +1378,14 @@ pub fn predictor_corrector_step(
                     cones,
                     settings.centrality_beta,
                     settings.centrality_gamma,
-                    settings.soc_centrality_beta,
-                    settings.soc_centrality_gamma,
+                    0.0,   // soc_centrality_beta (disabled - SOC centrality is harmful)
+                    100.0, // soc_centrality_gamma (disabled)
                     barrier_degree,
                     alpha,
-                    settings.enable_soc_centrality,
-                    settings.soc_centrality_use_upper,
-                    settings.soc_centrality_use_jordan,
-                    settings.soc_centrality_mu_threshold,
+                    false, // enable_soc_centrality (disabled - causes BOYD1/BOYD2 failures)
+                    false, // soc_centrality_use_upper (disabled)
+                    false, // soc_centrality_use_jordan (disabled)
+                    0.0,   // soc_centrality_mu_threshold (disabled)
                     &mut ws.cent_s_trial,
                     &mut ws.cent_z_trial,
                     &mut ws.cent_w,

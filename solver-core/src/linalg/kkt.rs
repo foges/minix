@@ -1107,7 +1107,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                         }
                     }
                 }
-                ScalingBlock::SocStructured { w, diag_reg } => {
+                ScalingBlock::SocStructured { w } => {
                     // For SOC, the scaling matrix is H(w) = quadratic representation P(w)
                     // We need to compute the full dim x dim matrix and add -(H + 2ε*I) to KKT
                     let dim = w.len();
@@ -1129,9 +1129,6 @@ impl<B: KktBackend> KktSolverImpl<B> {
                             // Add regularization to diagonal
                             if i == j {
                                 val -= 2.0 * self.static_reg;
-                                if *diag_reg != 0.0 {
-                                    val -= diag_reg;
-                                }
                             }
                             add_triplet(kkt_row, kkt_col, val, &mut tri);
                         }

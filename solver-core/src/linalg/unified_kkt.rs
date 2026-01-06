@@ -239,6 +239,9 @@ mod tests {
 
     #[test]
     fn test_should_use_normal_equations() {
+        // Enable normal equations for this test
+        std::env::set_var("MINIX_NORMAL_EQNS", "1");
+
         // Tall problem with only NonNeg cones - should use
         let cones = vec![ConeSpec::NonNeg { dim: 100 }];
         assert!(should_use_normal_equations(10, 100, &cones));

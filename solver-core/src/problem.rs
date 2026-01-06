@@ -183,35 +183,11 @@ pub struct SolverSettings {
     /// Centrality upper bound (sᵢ zᵢ <= γ μ)
     pub centrality_gamma: f64,
 
-    /// SOC centrality lower bound (Jordan min eigenvalue >= β μ)
-    pub soc_centrality_beta: f64,
-
-    /// SOC centrality upper bound (Jordan max eigenvalue <= γ μ)
-    pub soc_centrality_gamma: f64,
-
-    /// Use SOC centrality upper bound check
-    pub soc_centrality_use_upper: bool,
-
-    /// Use Jordan product for SOC centrality (true) or min-eig product (false)
-    pub soc_centrality_use_jordan: bool,
-
-    /// Apply SOC centrality only when μ >= threshold
-    pub soc_centrality_mu_threshold: f64,
-
     /// Maximum centering parameter σ (cap for combined step)
     pub sigma_max: f64,
 
     /// Max backtracking steps for centrality line search
     pub line_search_max_iters: usize,
-
-    /// Enable SOC centrality checks in line search
-    pub enable_soc_centrality: bool,
-
-    /// Enable SOC adaptive regularization on structured scaling blocks
-    pub enable_soc_adaptive_reg: bool,
-
-    /// SOC adaptive regularization scale (multiplies extra_reg)
-    pub soc_adaptive_reg_scale: f64,
 
     /// Random seed for deterministic heuristics
     pub seed: u64,
@@ -241,16 +217,8 @@ impl Default for SolverSettings {
             mcc_iters: 0,
             centrality_beta: 0.1,
             centrality_gamma: 10.0,
-            soc_centrality_beta: 0.01,
-            soc_centrality_gamma: 100.0,
-            soc_centrality_use_upper: true,
-            soc_centrality_use_jordan: true,
-            soc_centrality_mu_threshold: 0.0,
             sigma_max: 0.999,
             line_search_max_iters: 0,
-            enable_soc_centrality: true,
-            enable_soc_adaptive_reg: true,
-            soc_adaptive_reg_scale: 1.0,
             seed: 0,
             enable_gpu: false,
             warm_start: None,

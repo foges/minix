@@ -4,7 +4,7 @@
 //! on various problem types.
 
 use solver_core::{solve, ProblemData, ConeSpec, SolverSettings, SolveStatus};
-use solver_core::cones::{PsdCone, ExpCone};
+use solver_core::cones::{PsdCone, ExpCone, ConeKernel};
 use solver_core::linalg::sparse;
 
 #[test]

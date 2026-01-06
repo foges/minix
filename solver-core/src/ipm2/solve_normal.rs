@@ -483,6 +483,7 @@ pub fn solve_normal_equations(
             mu,
             reg_static: settings.static_reg,
             reg_dynamic_bumps: 0,
+            line_search_backtracks: 0,
         },
     })
 }

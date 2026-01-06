@@ -444,6 +444,7 @@ pub fn solve_ipm2(
                 mu,
                 reg_static: reg_state.static_reg_eff,
                 reg_dynamic_bumps: reg_state.dynamic_bumps,
+                line_search_backtracks: 0,
             },
         });
     }
@@ -657,6 +658,7 @@ pub fn solve_ipm2(
             mu,
             reg_static: reg_state.static_reg_eff,
             reg_dynamic_bumps: reg_state.dynamic_bumps,
+            line_search_backtracks: 0,
         },
     })
 }
