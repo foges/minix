@@ -348,9 +348,9 @@ pub fn solve_ipm2(
                 let gap_scale_abs = metrics.obj_p.abs().min(metrics.obj_d.abs()).max(1.0);
                 let gap_ok_abs = metrics.gap <= criteria.tol_gap * gap_scale_abs;
                 let gap_ok = gap_ok_abs || metrics.gap_rel <= criteria.tol_gap_rel;
-                // Try polish aggressively when gap is within 1000x of tolerance
-                // (we'll only accept it if the gap actually improves)
-                let gap_close = metrics.gap_rel <= criteria.tol_gap_rel * 1000.0;
+                // Try polish when gap is within 100x of tolerance
+                // (we'll only accept it if the result meets quality standards)
+                let gap_close = metrics.gap_rel <= criteria.tol_gap_rel * 100.0;
 
                 // Case 1: Dual stuck - try dual polish (existing logic)
                 if primal_ok && (gap_ok || gap_close) && !dual_ok && iter >= 10 {
@@ -688,69 +688,19 @@ pub fn solve_ipm2(
         }
     };
 
-    // "Almost optimal" acceptance: if primal and gap are excellent but dual is stuck
-    // and we hit NumericalError or MaxIters, the solution is still useful.
-    // Many problems have structural dual infeasibility on specific components
-    // (e.g., unconstrained variables). Accept these as Optimal.
+    // "Almost optimal" acceptance: ONLY accept if ALL criteria are close to tolerance.
+    // This is conservative - we only accept solutions that are genuinely close to optimal.
+    // Previous loose acceptance tiers (40% gap, 15% dual) were accepting bad solutions.
     if matches!(status, SolveStatus::NumericalError | SolveStatus::MaxIters) {
-        let primal_excellent = final_metrics.rel_p <= criteria.tol_feas;
-        let gap_excellent = final_metrics.gap_rel <= criteria.tol_gap_rel * 10.0; // Allow 10x slack on gap
-        if primal_excellent && gap_excellent {
+        let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
+        let dual_ok = final_metrics.rel_d <= criteria.tol_feas * 100.0; // Allow 100x slack (1e-6 default)
+        let gap_ok = final_metrics.gap_rel <= criteria.tol_gap_rel * 10.0; // Allow 10x slack
+        if primal_ok && dual_ok && gap_ok {
             if diag.enabled {
-                eprintln!("almost-optimal: primal={:.3e} gap_rel={:.3e}, accepting as Optimal despite rel_d={:.3e}",
-                    final_metrics.rel_p, final_metrics.gap_rel, final_metrics.rel_d);
+                eprintln!("almost-optimal: primal={:.3e} dual={:.3e} gap_rel={:.3e}, accepting as Optimal",
+                    final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
             }
             status = SolveStatus::Optimal;
-        }
-
-        // Extended almost-optimal for QSHIP-type problems: excellent primal with moderate gap
-        // These are typically degenerate network flow problems where the dual certificate
-        // doesn't converge but the primal solution is demonstrably optimal.
-        // Accept if: primal < tol_feas, gap_rel < 40%, and no numerical overflow
-        if status != SolveStatus::Optimal {
-            let primal_very_good = final_metrics.rel_p <= criteria.tol_feas;
-            let gap_moderate = final_metrics.gap_rel <= 0.40; // 40% relative gap
-            let no_overflow = final_metrics.obj_p.abs() < 1e15 && final_metrics.obj_d.abs() < 1e15;
-            if primal_very_good && gap_moderate && no_overflow {
-                if diag.enabled {
-                    eprintln!("extended almost-optimal: primal={:.3e} gap_rel={:.3e}, accepting as Optimal",
-                        final_metrics.rel_p, final_metrics.gap_rel);
-                }
-                status = SolveStatus::Optimal;
-            }
-        }
-
-        // Dual-good acceptance: if dual is reasonably good but primal is slightly above tolerance
-        // This handles QPILOTNO-type problems where one constraint is hard to satisfy exactly
-        // Accept if: dual < 10000*tol_feas (1e-4), primal < 200*tol_feas (2e-6), gap_rel < 20%
-        if status != SolveStatus::Optimal {
-            let dual_good = final_metrics.rel_d <= criteria.tol_feas * 10000.0; // 1e-4 for default
-            let primal_acceptable = final_metrics.rel_p <= criteria.tol_feas * 200.0; // 2e-6 for default
-            let gap_reasonable = final_metrics.gap_rel <= 0.20; // 20% relative gap
-            let no_overflow = final_metrics.obj_p.abs() < 1e15 && final_metrics.obj_d.abs() < 1e15;
-            if dual_good && primal_acceptable && gap_reasonable && no_overflow {
-                if diag.enabled {
-                    eprintln!("dual-good almost-optimal: dual={:.3e} primal={:.3e} gap_rel={:.3e}, accepting as Optimal",
-                        final_metrics.rel_d, final_metrics.rel_p, final_metrics.gap_rel);
-                }
-                status = SolveStatus::Optimal;
-            }
-        }
-
-        // Both-feasible acceptance: if BOTH primal and dual are excellent, accept regardless of gap
-        // This handles QBANDM/QSHIP12S-type problems where gap doesn't converge but both
-        // residuals are small. The solution is likely optimal even if we can't prove it via gap.
-        if status != SolveStatus::Optimal {
-            let primal_excellent = final_metrics.rel_p <= criteria.tol_feas;
-            let dual_reasonable = final_metrics.rel_d <= 0.15; // 15% relative dual error
-            let no_overflow = final_metrics.obj_p.abs() < 1e15 && final_metrics.obj_d.abs() < 1e15;
-            if primal_excellent && dual_reasonable && no_overflow {
-                if diag.enabled {
-                    eprintln!("both-feasible almost-optimal: primal={:.3e} dual={:.3e} gap_rel={:.3e}, accepting as Optimal",
-                        final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
-                }
-                status = SolveStatus::Optimal;
-            }
         }
     }
 
@@ -774,9 +724,9 @@ pub fn solve_ipm2(
         }
 
         // Attempt polish if primal is OK and dual is stuck
-        // Relax gap requirement: try polish even if gap is up to 1000x tolerance
-        // (consistent with early polish check - we'll only accept if gap actually improves)
-        let gap_close = final_metrics.gap_rel <= criteria.tol_gap_rel * 1000.0;
+        // Relax gap requirement: try polish even if gap is up to 100x tolerance
+        // (consistent with early polish check - we'll only accept if result is good)
+        let gap_close = final_metrics.gap_rel <= criteria.tol_gap_rel * 100.0;
         if primal_ok && (gap_ok || gap_close) && !dual_ok {
             if diag.enabled {
                 eprintln!("attempting polish (gap_ok={}, gap_close={})...", gap_ok, gap_close);

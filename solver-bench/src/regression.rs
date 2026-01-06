@@ -122,46 +122,46 @@ pub fn run_regression_suite(
 ) -> Vec<RegressionResult> {
     let mut results = Vec::new();
 
-    // Comprehensive QPS problems
-    // Excludes: LISWET1/7-12 (MaxIter), STCQP1/2/YAO (MaxIter),
-    // CONT-200+ (too slow), CVXQP*_L (too slow), EXDATA/KSIP (too slow),
-    // QSHIP* (MaxIter), Q* with NumericalError
+    // 108 Maros-Meszaros problems that truly meet quality standards (79.4% of 136)
+    // Excluded: 28 problems with dual divergence or gap issues
     let qps_cases = [
-        // Tiny QPs (<1ms) - HS problems
+        // HS problems (tiny)
         "HS21", "HS35", "HS35MOD", "HS51", "HS52", "HS53", "HS76", "HS118", "HS268",
-        // Tiny QPs (<1ms) - Other small
+        // Other tiny (<1ms)
         "TAME", "S268", "ZECEVIC2", "LOTSCHD", "QAFIRO",
-        // Tiny QPs (<5ms) - CVXQP small
+        // CVXQP family (all 9)
         "CVXQP1_S", "CVXQP2_S", "CVXQP3_S",
-        // Tiny QPs (<10ms) - DUAL problems
+        "CVXQP1_M", "CVXQP2_M", "CVXQP3_M",
+        "CVXQP1_L", "CVXQP2_L", "CVXQP3_L",
+        // DUAL/PRIMAL families (all 16)
         "DUAL1", "DUAL2", "DUAL3", "DUAL4",
         "DUALC1", "DUALC2", "DUALC5", "DUALC8",
-        // Tiny QPs (<10ms) - PRIMALC problems
+        "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4",
         "PRIMALC1", "PRIMALC2", "PRIMALC5", "PRIMALC8",
-        // Tiny QPs (<10ms) - Other
-        "DPKLO1", "GOULDQP2", "GOULDQP3", "VALUES",
-        "QPCBLEND", "QRECIPE", "QSHARE2B", "QPCBOEI2",
-        "QSCSD1", "QSCTAP1", "QSTANDAT",
-        // Small QPs (<50ms)
-        "AUG3D", "AUG3DC", "AUG3DCQP", "AUG3DQP",
-        "DTOC3", "HUESTIS", "LASER",
-        "MOSARQP1", "MOSARQP2", "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4",
-        "HUES-MOD", "STADAT1", "QGROW7",
-        "QISRAEL", "QPCSTAIR", "QSEBA", "QSCSD6", "QSCTAP2", "QSCTAP3",
-        "QSIERRA",
-        // Medium QPs (<150ms)
-        "CVXQP1_M", "CVXQP2_M", "CVXQP3_M",
-        "LISWET2", "LISWET3", "LISWET4", "LISWET5",
-        "CONT-050",
-        "STADAT2", "STADAT3", "QSTAIR", "QSCSD8",
-        // Large QPs (<500ms)
+        // AUG family (all 8)
         "AUG2D", "AUG2DC", "AUG2DCQP", "AUG2DQP",
-        "UBH1", "QETAMACR", "LISWET6", "QGROW15", "QSHELL",
-        // Very large QPs (<3s)
-        "CONT-100", "CONT-101", "QGROW22",
-        // Tall LP (n=20, m=1001) - tests normal equations candidate
-        "KSIP",
-        // BOYD portfolio QPs (~93k vars, converge via early polish)
+        "AUG3D", "AUG3DC", "AUG3DCQP", "AUG3DQP",
+        // CONT family (all 6)
+        "CONT-050", "CONT-100", "CONT-101", "CONT-200", "CONT-201", "CONT-300",
+        // LISWET family (all 12)
+        "LISWET1", "LISWET2", "LISWET3", "LISWET4", "LISWET5", "LISWET6",
+        "LISWET7", "LISWET8", "LISWET9", "LISWET10", "LISWET11", "LISWET12",
+        // STADAT family (all 3)
+        "STADAT1", "STADAT2", "STADAT3",
+        // QGROW family (all 3)
+        "QGROW7", "QGROW15", "QGROW22",
+        // Q* problems that pass with good quality
+        "QETAMACR", "QISRAEL",
+        "QPCBLEND", "QPCBOEI2", "QPCSTAIR",
+        "QRECIPE", "QSC205",
+        "QSCSD1", "QSCSD6", "QSCSD8", "QSCTAP1", "QSCTAP2", "QSCTAP3",
+        "QSEBA", "QSHARE2B", "QSHELL", "QSIERRA", "QSTAIR", "QSTANDAT",
+        // Other medium/large
+        "DPKLO1", "DTOC3", "EXDATA", "GOULDQP2", "GOULDQP3",
+        "HUES-MOD", "HUESTIS", "KSIP", "LASER",
+        "MOSARQP1", "MOSARQP2", "POWELL20",
+        "STCQP2", "UBH1", "VALUES", "YAO",
+        // BOYD portfolio QPs (~93k vars)
         "BOYD1", "BOYD2",
     ];
     for name in qps_cases {
