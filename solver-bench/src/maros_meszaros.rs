@@ -1,7 +1,6 @@
 //! Maros-Meszaros QP benchmark suite runner.
 //!
 //! Downloads and runs the standard Maros-Meszaros test set of 138 QP problems.
-//! Prefers local MAT files from ClarabelBenchmarks if available.
 
 use std::fs;
 use std::path::PathBuf;
@@ -10,7 +9,6 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use solver_core::{ProblemData, SolveResult, SolveStatus, SolverSettings};
 
-use crate::matparser;
 use crate::solver_choice::{solve_with_choice, SolverChoice};
 use crate::qps::{parse_qps, QpsProblem};
 
@@ -252,66 +250,13 @@ fn download_qps(name: &str) -> Result<PathBuf> {
     Err(anyhow::anyhow!("Failed to download {} - file not found or invalid", name))
 }
 
-/// Get the local ClarabelBenchmarks MAT directory if available.
-fn get_local_mat_dir() -> Option<PathBuf> {
-    // Check relative to crate directory first
-    if let Ok(crate_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let repo_dir = PathBuf::from(&crate_dir)
-            .parent()
-            .map(|p| p.join("ClarabelBenchmarks/src/problem_sets/maros/targets/mat"));
-        if let Some(ref dir) = repo_dir {
-            if dir.exists() {
-                return repo_dir;
-            }
-        }
-    }
-
-    // Check relative to current working directory
-    if let Ok(cwd) = std::env::current_dir() {
-        let cwd_repo = cwd.join("ClarabelBenchmarks/src/problem_sets/maros/targets/mat");
-        if cwd_repo.exists() {
-            return Some(cwd_repo);
-        }
-    }
-
-    None
-}
-
-/// Load a problem, preferring MAT files from ClarabelBenchmarks.
-/// Note: MAT file loading may fail for sparse matrices (matfile crate limitation).
+/// Load a QPS problem from file or URL
 pub fn load_problem(name: &str) -> Result<QpsProblem> {
-    // Try local MAT file from ClarabelBenchmarks first
-    if let Some(mat_dir) = get_local_mat_dir() {
-        let mat_path = mat_dir.join(format!("{}.mat", name));
-        if mat_path.exists() {
-            // Try to load from MAT file (may fail if matrices are sparse)
-            if let Ok(osqp) = matparser::parse_mat(&mat_path) {
-                return Ok(QpsProblem {
-                    name: osqp.name,
-                    n: osqp.n,
-                    m: osqp.m,
-                    obj_sense: 1.0, // OSQP format is minimization
-                    p_triplets: osqp.p_triplets,
-                    a_triplets: osqp.a_triplets,
-                    q: osqp.q,
-                    con_lower: osqp.l,
-                    con_upper: osqp.u,
-                    var_lower: vec![-1e20; osqp.n], // No explicit var bounds in MAT format
-                    var_upper: vec![1e20; osqp.n],
-                    var_names: (0..osqp.n).map(|i| format!("x{}", i)).collect(),
-                    con_names: (0..osqp.m).map(|i| format!("c{}", i)).collect(),
-                });
-            }
-            // MAT loading failed (likely sparse matrices), fall back to QPS
-        }
-    }
-
-    // Try local QPS files
     if let Ok(prob) = load_local_problem(name) {
         return Ok(prob);
     }
 
-    // Try cache or download QPS
+    // Try cache or download
     let path = download_qps(name)?;
     parse_qps(&path)
 }

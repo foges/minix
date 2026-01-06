@@ -6,7 +6,7 @@ Rust implementation of an interior-point method (IPM) solver for convex conic op
 
 ```
 solver-core/     # Core IPM solver implementation
-solver-bench/    # Benchmark runner (600+ problems across 7 test suites)
+solver-bench/    # Benchmark runner (Maros-Meszaros QP test set + regression suite)
 solver-py/       # Python bindings via PyO3
 solver-mip/      # Mixed-integer extension (future)
 solver-ffi/      # C FFI bindings (future)
@@ -24,14 +24,9 @@ cargo test
 # Run specific solver-core tests
 cargo test --lib -p solver-core
 
-# Run benchmarks (7 test suites available)
+# Run benchmarks
 cargo run --release -p solver-bench -- maros-meszaros --limit 10
 cargo run --release -p solver-bench -- maros-meszaros --problem HS21
-cargo run --release -p solver-bench -- netlib --limit 10
-cargo run --release -p solver-bench -- cblib --limit 10
-cargo run --release -p solver-bench -- pglib --limit 5
-cargo run --release -p solver-bench -- qplib --limit 10
-cargo run --release -p solver-bench -- meszaros --limit 10
 ```
 
 ## Python Bindings

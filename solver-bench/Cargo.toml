@@ -25,5 +25,3 @@ serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
 flate2 = "1.0"
-matfile = { version = "0.5", features = ["ndarray"] }
-ndarray = "0.16"
