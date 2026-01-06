@@ -1,0 +1,54 @@
+[project]
+name = "minix"
+version = "0.1.0"
+description = "Minix: A high-performance conic optimization solver"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Chris" }]
+keywords = ["optimization", "convex", "conic", "solver", "cvxpy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.12",
+]
+
+[project.optional-dependencies]
+cvxpy = [
+    "cvxpy>=1.4",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.8",
+    "ruff>=0.2",
+]
+
+[build-system]
+requires = ["maturin>=1.4"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name = "minix._native"
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true

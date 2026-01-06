@@ -9,10 +9,13 @@ mod netlib;
 mod pglib;
 mod qplib;
 mod qps;
+mod regression;
+mod solver_choice;
 
 use clap::{Parser, Subcommand};
+use solver_choice::{solve_with_choice, SolverChoice};
 use solver_core::linalg::sparse;
-use solver_core::{solve, ConeSpec, ProblemData, SolverSettings};
+use solver_core::{ConeSpec, ProblemData, SolveStatus, SolverSettings};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -30,6 +33,9 @@ enum Commands {
         /// Maximum iterations
         #[arg(long, default_value = "200")]
         max_iter: usize,
+        /// Solver backend to use
+        #[arg(long, value_enum, default_value = "ipm2")]
+        solver: SolverChoice,
     },
     /// Run Maros-Meszaros QP benchmark suite
     MarosMeszaros {
@@ -45,6 +51,9 @@ enum Commands {
         /// Show detailed results table
         #[arg(long)]
         table: bool,
+        /// Solver backend to use
+        #[arg(long, value_enum, default_value = "ipm2")]
+        solver: SolverChoice,
     },
     /// Parse and show info about a QPS file
     Info {
@@ -152,6 +161,27 @@ enum Commands {
         /// Enable verbose solver output
         #[arg(long, short)]
         verbose: bool,
+    },
+    /// Run regression suite (local QPS cache + synthetic cases)
+    Regression {
+        /// Maximum iterations per problem
+        #[arg(long, default_value = "200")]
+        max_iter: usize,
+        /// Require cached QPS files (fail if missing)
+        #[arg(long)]
+        require_cache: bool,
+        /// Solver backend to use
+        #[arg(long, value_enum, default_value = "ipm2")]
+        solver: SolverChoice,
+        /// Read performance baseline JSON and gate regressions
+        #[arg(long)]
+        baseline_in: Option<String>,
+        /// Write performance baseline JSON
+        #[arg(long)]
+        baseline_out: Option<String>,
+        /// Allowed regression ratio (0.2 = 20% slower)
+        #[arg(long, default_value = "0.2")]
+        max_regression: f64,
     },
 }
 
@@ -721,7 +751,7 @@ fn generate_portfolio_lp(n: usize, seed: u64) -> ProblemData {
     }
 }
 
-fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings) {
+fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings, solver: SolverChoice) {
     let n = prob.num_vars();
     let m = prob.num_constraints();
     let nnz = prob.A.nnz();
@@ -739,7 +769,7 @@ fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings) {
     println!();
 
     let start = Instant::now();
-    let result = solve(prob, settings);
+    let result = solve_with_choice(prob, settings, solver);
     let elapsed = start.elapsed();
 
     match result {
@@ -760,7 +790,7 @@ fn run_benchmark(name: &str, prob: &ProblemData, settings: &SolverSettings) {
     }
 }
 
-fn run_random_benchmarks(max_iter: usize) {
+fn run_random_benchmarks(max_iter: usize, solver: SolverChoice) {
     println!("Minix Solver Benchmarks");
     println!("=======================\n");
 
@@ -774,57 +804,57 @@ fn run_random_benchmarks(max_iter: usize) {
 
     // Portfolio LPs
     let prob = generate_portfolio_lp(50, 12345);
-    run_benchmark("Portfolio LP (n=50)", &prob, &settings);
+    run_benchmark("Portfolio LP (n=50)", &prob, &settings, solver);
 
     let prob = generate_portfolio_lp(200, 12345);
-    run_benchmark("Portfolio LP (n=200)", &prob, &settings);
+    run_benchmark("Portfolio LP (n=200)", &prob, &settings, solver);
 
     let prob = generate_portfolio_lp(500, 12345);
-    run_benchmark("Portfolio LP (n=500)", &prob, &settings);
+    run_benchmark("Portfolio LP (n=500)", &prob, &settings, solver);
 
     // Random LPs
     let prob = generate_random_lp(100, 50, 0.3, 12345);
-    run_benchmark("Random LP (n=100, m=50, 30% dense)", &prob, &settings);
+    run_benchmark("Random LP (n=100, m=50, 30% dense)", &prob, &settings, solver);
 
     let prob = generate_random_lp(500, 200, 0.1, 12345);
-    run_benchmark("Random LP (n=500, m=200, 10% dense)", &prob, &settings);
+    run_benchmark("Random LP (n=500, m=200, 10% dense)", &prob, &settings, solver);
 
     let prob = generate_random_lp(1000, 500, 0.05, 12345);
-    run_benchmark("Random LP (n=1000, m=500, 5% dense)", &prob, &settings);
+    run_benchmark("Random LP (n=1000, m=500, 5% dense)", &prob, &settings, solver);
 
     // SOCP benchmarks
     let prob = generate_simple_socp(10, 12345);
-    run_benchmark("Simple SOCP (n=10, 1 SOC)", &prob, &settings);
+    run_benchmark("Simple SOCP (n=10, 1 SOC)", &prob, &settings, solver);
 
     let prob = generate_simple_socp(50, 12345);
-    run_benchmark("Simple SOCP (n=50, 1 SOC)", &prob, &settings);
+    run_benchmark("Simple SOCP (n=50, 1 SOC)", &prob, &settings, solver);
 
     let prob = generate_multi_socp(100, 10, 12345);
-    run_benchmark("Multi SOCP (n=100, 10 SOCs)", &prob, &settings);
+    run_benchmark("Multi SOCP (n=100, 10 SOCs)", &prob, &settings, solver);
 
     // Portfolio optimization (SOCP)
     let prob = generate_portfolio_socp(50, 12345);
-    run_benchmark("Portfolio SOCP (n=50 assets)", &prob, &settings);
+    run_benchmark("Portfolio SOCP (n=50 assets)", &prob, &settings, solver);
 
     let prob = generate_portfolio_socp(200, 12345);
-    run_benchmark("Portfolio SOCP (n=200 assets)", &prob, &settings);
+    run_benchmark("Portfolio SOCP (n=200 assets)", &prob, &settings, solver);
 
     // LASSO regression (SOCP)
     let prob = generate_lasso_socp(20, 100, 0.1, 12345);
-    run_benchmark("LASSO SOCP (n=20, m=100)", &prob, &settings);
+    run_benchmark("LASSO SOCP (n=20, m=100)", &prob, &settings, solver);
 
     let prob = generate_lasso_socp(50, 200, 0.1, 12345);
-    run_benchmark("LASSO SOCP (n=50, m=200)", &prob, &settings);
+    run_benchmark("LASSO SOCP (n=50, m=200)", &prob, &settings, solver);
 
     // Power flow OPF SOCP (radial network)
     let prob = generate_power_flow_socp(10, 12345);
-    run_benchmark("OPF SOCP (10-bus radial)", &prob, &settings);
+    run_benchmark("OPF SOCP (10-bus radial)", &prob, &settings, solver);
 
     let prob = generate_power_flow_socp(30, 12345);
-    run_benchmark("OPF SOCP (30-bus radial)", &prob, &settings);
+    run_benchmark("OPF SOCP (30-bus radial)", &prob, &settings, solver);
 
     let prob = generate_power_flow_socp(100, 12345);
-    run_benchmark("OPF SOCP (100-bus radial)", &prob, &settings);
+    run_benchmark("OPF SOCP (100-bus radial)", &prob, &settings, solver);
 
     println!("\n{}", "=".repeat(60));
     println!("Benchmarks complete");
@@ -836,6 +866,7 @@ fn run_maros_meszaros(
     max_iter: usize,
     problem: Option<String>,
     show_table: bool,
+    solver: SolverChoice,
 ) {
     let settings = SolverSettings {
         verbose: false,
@@ -848,7 +879,7 @@ fn run_maros_meszaros(
     if let Some(name) = problem {
         // Run single problem
         println!("Running single problem: {}", name);
-        let result = maros_meszaros::run_single(&name, &settings);
+        let result = maros_meszaros::run_single(&name, &settings, solver);
 
         if let Some(err) = &result.error {
             println!("Error: {}", err);
@@ -866,7 +897,7 @@ fn run_maros_meszaros(
         println!("Running Maros-Meszaros QP Benchmark Suite");
         println!("=========================================\n");
 
-        let results = maros_meszaros::run_full_suite(&settings, limit);
+        let results = maros_meszaros::run_full_suite(&settings, limit, solver);
         let summary = maros_meszaros::compute_summary(&results);
 
         if show_table {
@@ -921,20 +952,124 @@ fn show_qps_info(path: &str) {
     }
 }
 
+fn run_regression_suite(
+    max_iter: usize,
+    solver: SolverChoice,
+    require_cache: bool,
+    baseline_in: Option<String>,
+    baseline_out: Option<String>,
+    max_regression: f64,
+) {
+    let mut settings = SolverSettings::default();
+    settings.max_iter = max_iter;
+
+    let results = regression::run_regression_suite(&settings, solver, require_cache);
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+
+    for res in &results {
+        if res.skipped {
+            skipped += 1;
+            println!("{}: SKIP (missing cache)", res.name);
+            continue;
+        }
+        if res.status != SolveStatus::Optimal
+            || !res.rel_p.is_finite()
+            || !res.rel_d.is_finite()
+            || !res.gap_rel.is_finite()
+        {
+            failed += 1;
+            println!(
+                "{}: FAIL status={:?} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e} {}",
+                res.name,
+                res.status,
+                res.rel_p,
+                res.rel_d,
+                res.gap_rel,
+                res.error.as_deref().unwrap_or(""),
+            );
+            continue;
+        }
+
+        // Use practical tolerances for unscaled metrics
+        let tol_feas = 1e-6;
+        let tol_gap = 1e-3;
+        if res.rel_p > tol_feas || res.rel_d > tol_feas || res.gap_rel > tol_gap {
+            failed += 1;
+            println!(
+                "{}: FAIL rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
+                res.name,
+                res.rel_p,
+                res.rel_d,
+                res.gap_rel,
+            );
+        } else {
+            println!(
+                "{}: OK rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
+                res.name,
+                res.rel_p,
+                res.rel_d,
+                res.gap_rel,
+            );
+        }
+    }
+
+    println!(
+        "summary: total={} failed={} skipped={}",
+        results.len(),
+        failed,
+        skipped
+    );
+
+    if failed == 0 {
+        if let Some(path) = baseline_out.as_ref() {
+            let summary = regression::perf_summary(&results);
+            let payload = serde_json::to_string_pretty(&summary)
+                .expect("failed to serialize perf summary");
+            if let Err(e) = std::fs::write(path, payload) {
+                eprintln!("failed to write baseline {}: {}", path, e);
+                std::process::exit(1);
+            }
+        }
+
+        if let Some(path) = baseline_in.as_ref() {
+            let Ok(contents) = std::fs::read_to_string(path) else {
+                eprintln!("failed to read baseline {}", path);
+                std::process::exit(1);
+            };
+            let baseline: regression::PerfSummary = match serde_json::from_str(&contents) {
+                Ok(val) => val,
+                Err(e) => {
+                    eprintln!("failed to parse baseline {}: {}", path, e);
+                    std::process::exit(1);
+                }
+            };
+            let summary = regression::perf_summary(&results);
+            let perf_failures =
+                regression::compare_perf_baseline(&baseline, &summary, max_regression);
+            if !perf_failures.is_empty() {
+                for msg in perf_failures {
+                    eprintln!("perf regression: {}", msg);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if failed > 0 || (require_cache && skipped > 0) {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Random { max_iter }) => {
-            run_random_benchmarks(max_iter);
+        Some(Commands::Random { max_iter, solver }) => {
+            run_random_benchmarks(max_iter, solver);
         }
-        Some(Commands::MarosMeszaros {
-            limit,
-            max_iter,
-            problem,
-            table,
-        }) => {
-            run_maros_meszaros(limit, max_iter, problem, table);
+        Some(Commands::MarosMeszaros { limit, max_iter, problem, table, solver }) => {
+            run_maros_meszaros(limit, max_iter, problem, table, solver);
         }
         Some(Commands::Info { path }) => {
             show_qps_info(&path);
@@ -990,9 +1125,26 @@ fn main() {
         }) => {
             run_meszaros(limit, max_iter, table, infeas, problematic, verbose);
         }
+        Some(Commands::Regression {
+            max_iter,
+            require_cache,
+            solver,
+            baseline_in,
+            baseline_out,
+            max_regression,
+        }) => {
+            run_regression_suite(
+                max_iter,
+                solver,
+                require_cache,
+                baseline_in,
+                baseline_out,
+                max_regression,
+            );
+        }
         None => {
-            // Default: run random benchmarks
-            run_random_benchmarks(200);
+            // Default: run random benchmarks with ipm1
+            run_random_benchmarks(200, SolverChoice::Ipm1);
         }
     }
 }

@@ -1,0 +1,26 @@
+--- a/solver-bench/src/qps.rs
++++ b/solver-bench/src/qps.rs
+@@ -182,13 +182,21 @@
+         // Build sparse matrices
+         let a = sparse::from_triplets(total_constraints, self.n, triplets);
+ 
++        // Scale objective by sense.
++        //
++        // Note: For quadratic objectives, the QP form is (1/2) x'P x + q'x.
++        // Converting MAX to MIN requires negating *both* q and P.
+         let p = if self.p_triplets.is_empty() {
+             None
+         } else {
+-            Some(sparse::from_triplets(self.n, self.n, self.p_triplets.clone()))
++            let p_triplets: Vec<(usize, usize, f64)> = self
++                .p_triplets
++                .iter()
++                .map(|&(i, j, v)| (i, j, v * self.obj_sense))
++                .collect();
++            Some(sparse::from_triplets(self.n, self.n, p_triplets))
+         };
+ 
+-        // Scale objective by sense
+         let q: Vec<f64> = self.q.iter().map(|&v| v * self.obj_sense).collect();
+ 
+         // Build cone specification

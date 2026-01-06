@@ -1,0 +1,85 @@
+diff -ruN /mnt/data/minix_base/solver-core/src/ipm/mod.rs /mnt/data/minix_work/solver-core/src/ipm/mod.rs
+--- /mnt/data/minix_base/solver-core/src/ipm/mod.rs	2026-01-05 00:42:57.541374549 +0000
++++ /mnt/data/minix_work/solver-core/src/ipm/mod.rs	2026-01-05 00:41:59.435461612 +0000
+@@ -88,6 +88,21 @@
+     // Compute total barrier degree
+     let barrier_degree: usize = cones.iter().map(|c| c.barrier_degree()).sum();
+ 
++    // Perform symbolic factorization once with initial scaling structure.
++    // This determines the sparsity pattern of L and the elimination tree.
++    // Subsequent calls to factor() reuse this symbolic factorization.
++    let initial_scaling: Vec<ScalingBlock> = cones.iter().map(|cone| {
++        let dim = cone.dim();
++        if cone.barrier_degree() == 0 {
++            ScalingBlock::Zero { dim }
++        } else if (cone.as_ref() as &dyn std::any::Any).downcast_ref::<SocCone>().is_some() {
++            // SOC creates a dense block in KKT
++            ScalingBlock::SocStructured { w: vec![1.0; dim] }
++        } else {
++            // NonNeg uses diagonal scaling
++            ScalingBlock::Diagonal { d: vec![1.0; dim] }
++        }
++    }).collect();
+     // Initialize HSDE state
+     let mut state = HsdeState::new(n, m);
+     state.initialize_with_prob(&cones, &scaled_prob);
+@@ -120,21 +135,7 @@
+         &initial_scaling,
+     );
+ 
+-    // Perform symbolic factorization once with initial scaling structure.
+-    // This determines the sparsity pattern of L and the elimination tree.
+-    // Subsequent calls to factor() reuse this symbolic factorization.
+-    let initial_scaling: Vec<ScalingBlock> = cones.iter().map(|cone| {
+-        let dim = cone.dim();
+-        if cone.barrier_degree() == 0 {
+-            ScalingBlock::Zero { dim }
+-        } else if (cone.as_ref() as &dyn std::any::Any).downcast_ref::<SocCone>().is_some() {
+-            // SOC creates a dense block in KKT
+-            ScalingBlock::SocStructured { w: vec![1.0; dim] }
+-        } else {
+-            // NonNeg uses diagonal scaling
+-            ScalingBlock::Diagonal { d: vec![1.0; dim] }
+-        }
+-    }).collect();
++
+ 
+     if let Err(e) = kkt.initialize(scaled_prob.P.as_ref(), &scaled_prob.A, &initial_scaling) {
+         return Err(format!("KKT symbolic factorization failed: {}", e).into());
+diff -ruN /mnt/data/minix_base/solver-core/src/linalg/kkt.rs /mnt/data/minix_work/solver-core/src/linalg/kkt.rs
+--- /mnt/data/minix_base/solver-core/src/linalg/kkt.rs	2026-01-05 00:42:57.594792151 +0000
++++ /mnt/data/minix_work/solver-core/src/linalg/kkt.rs	2026-01-05 00:46:58.106429193 +0000
+@@ -260,7 +260,6 @@
+ 
+ struct SingletonElim {
+     kept_rows: Vec<usize>,
+-    row_map: Vec<Option<usize>>,
+     singletons: Vec<SingletonRowInfo>,
+     inv_h: Vec<f64>,
+     diag_update_cols: Vec<usize>,
+@@ -363,7 +362,6 @@
+ 
+         Some(Self {
+             kept_rows,
+-            row_map,
+             singletons,
+             inv_h: vec![0.0; singletons.len()],
+             diag_update_cols,
+@@ -469,6 +467,17 @@
+         h_blocks: &[ScalingBlock],
+     ) -> Self {
+         let singleton = SingletonElim::build(a, h_blocks);
++        if std::env::var("MINIX_DIAGNOSTICS").ok().as_deref() == Some("1") {
++            if let Some(ref se) = singleton {
++                eprintln!(
++                    "kkt presolve: singleton elimination enabled: m_full={} m_reduced={} eliminated={} diag_update_cols={}",
++                    m,
++                    se.kept_rows.len(),
++                    se.singletons.len(),
++                    se.diag_update_cols.len()
++                );
++            }
++        }
+         if let Some(singleton) = singleton {
+             let m_reduced = singleton.kept_rows.len();
+             Self::new_internal(

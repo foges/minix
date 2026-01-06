@@ -1,0 +1,722 @@
+# MOSEK-style linear algebra extras (stand-alone bundle)
+# Split with: python split_mosek_standalone_linalg_bundle.py mosek_standalone_linalg_bundle.txt <output_dir>
+
+===== FILE: mosek_linalg_extras/Cargo.toml =====
+[package]
+name = "mosek_linalg_extras"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mosek_linalg_extras"
+path = "src/lib.rs"
+
+[features]
+default = []
+suitesparse = []
+metis = []
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+bindgen = "0.70"
+
+===== FILE: mosek_linalg_extras/build.rs =====
+use std::env;
+use std::path::PathBuf;
+
+fn has_feature(name: &str) -> bool {
+    let key = format!("CARGO_FEATURE_{}", name.to_uppercase());
+    env::var_os(key).is_some()
+}
+
+fn main() {
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    if has_feature("suitesparse") {
+        println!("cargo:rerun-if-changed=wrapper_cholmod.h");
+
+        let bindings = bindgen::Builder::default()
+            .header("wrapper_cholmod.h")
+            .allowlist_function("cholmod_.*")
+            .allowlist_type("cholmod_.*")
+            .allowlist_var("CHOLMOD_.*")
+            .generate()
+            .expect("Unable to generate CHOLMOD bindings");
+
+        bindings
+            .write_to_file(out_path.join("cholmod_bindings.rs"))
+            .expect("Couldn't write CHOLMOD bindings!");
+
+        // Linker hints. Adjust to your platform if needed.
+        println!("cargo:rustc-link-lib=cholmod");
+        println!("cargo:rustc-link-lib=amd");
+        println!("cargo:rustc-link-lib=colamd");
+        println!("cargo:rustc-link-lib=camd");
+        println!("cargo:rustc-link-lib=ccolamd");
+        println!("cargo:rustc-link-lib=suitesparseconfig");
+        // CHOLMOD typically depends on BLAS/LAPACK; may be provided by Accelerate (macOS) or OpenBLAS.
+        println!("cargo:rustc-link-lib=blas");
+        println!("cargo:rustc-link-lib=lapack");
+    }
+
+    if has_feature("metis") {
+        println!("cargo:rerun-if-changed=wrapper_metis.h");
+
+        let bindings = bindgen::Builder::default()
+            .header("wrapper_metis.h")
+            .allowlist_function("METIS_.*")
+            .allowlist_type("idx_t")
+            .allowlist_type("real_t")
+            .allowlist_type("METIS_.*")
+            .allowlist_var("METIS_.*")
+            .generate()
+            .expect("Unable to generate METIS bindings");
+
+        bindings
+            .write_to_file(out_path.join("metis_bindings.rs"))
+            .expect("Couldn't write METIS bindings!");
+
+        println!("cargo:rustc-link-lib=metis");
+    }
+}
+
+===== FILE: mosek_linalg_extras/wrapper_cholmod.h =====
+#include <cholmod.h>
+
+===== FILE: mosek_linalg_extras/wrapper_metis.h =====
+#include <metis.h>
+
+===== FILE: mosek_linalg_extras/src/lib.rs =====
+pub mod dense_columns;
+pub mod types;
+pub mod woodbury;
+
+#[cfg(feature = "suitesparse")]
+pub mod cholmod;
+
+#[cfg(feature = "metis")]
+pub mod metis;
+
+===== FILE: mosek_linalg_extras/src/types.rs =====
+#[derive(Debug)]
+pub enum LinalgError {
+    DimensionMismatch { expected: usize, got: usize },
+    NonFiniteInput,
+    FactorizationFailed(String),
+    NotAnalyzed,
+    NotFactorized,
+}
+
+pub type LinalgResult<T> = Result<T, LinalgError>;
+
+===== FILE: mosek_linalg_extras/src/woodbury.rs =====
+use crate::types::{LinalgError, LinalgResult};
+
+/// A tiny SPD solver interface needed by Woodbury.
+///
+/// It is intentionally minimal so Woodbury can wrap any solver (CHOLMOD, proprietary, etc.).
+pub trait SpdSolve {
+    /// Solve `A x = b` (A already factorized).
+    fn solve(&mut self, b: &[f64], x_out: &mut [f64]) -> LinalgResult<()>;
+}
+
+/// Solve (S + U U^T) y = b using the Woodbury identity, where:
+/// - S is SPD and can be solved via `base`
+/// - U is m x k (k small), stored as sparse column vectors.
+pub struct WoodburySolver<'a, S: SpdSolve> {
+    base: &'a mut S,
+}
+
+impl<'a, S: SpdSolve> WoodburySolver<'a, S> {
+    pub fn new(base: &'a mut S) -> Self {
+        Self { base }
+    }
+
+    /// U is represented as Vec of columns; each column is Vec<(row, value)>.
+    pub fn solve(
+        &mut self,
+        b: &[f64],
+        u_cols: &[Vec<(usize, f64)>],
+        y_out: &mut [f64],
+    ) -> LinalgResult<()> {
+        if b.len() != y_out.len() {
+            return Err(LinalgError::DimensionMismatch {
+                expected: b.len(),
+                got: y_out.len(),
+            });
+        }
+
+        let m = b.len();
+        let k = u_cols.len();
+
+        if k == 0 {
+            self.base.solve(b, y_out)?;
+            return Ok(());
+        }
+
+        // y0 = S^{-1} b
+        let mut y0 = vec![0.0f64; m];
+        self.base.solve(b, &mut y0)?;
+
+        // W = S^{-1} U  (columns)
+        let mut w_cols: Vec<Vec<f64>> = Vec::with_capacity(k);
+        for col in u_cols {
+            let mut rhs = vec![0.0f64; m];
+            for &(r, v) in col {
+                rhs[r] = v;
+            }
+            let mut w = vec![0.0f64; m];
+            self.base.solve(&rhs, &mut w)?;
+            w_cols.push(w);
+        }
+
+        // M = I + U^T W (k x k dense)
+        let mut m_mat = vec![0.0f64; k * k];
+        for i in 0..k {
+            for j in 0..k {
+                let dot = dot_sparse_dense(&u_cols[i], &w_cols[j]);
+                m_mat[i * k + j] = dot;
+            }
+            m_mat[i * k + i] += 1.0;
+        }
+
+        // rhs2 = U^T y0
+        let mut rhs2 = vec![0.0f64; k];
+        for i in 0..k {
+            rhs2[i] = dot_sparse_dense(&u_cols[i], &y0);
+        }
+
+        // Solve M t = rhs2
+        let t = dense_spd_solve_cholesky(k, &m_mat, &rhs2)?;
+
+        // y = y0 - W t
+        y_out.copy_from_slice(&y0);
+        for i in 0..k {
+            let ti = t[i];
+            if ti == 0.0 {
+                continue;
+            }
+            let w = &w_cols[i];
+            for r in 0..m {
+                y_out[r] -= w[r] * ti;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn dot_sparse_dense(col: &[(usize, f64)], dense: &[f64]) -> f64 {
+    let mut acc = 0.0;
+    for &(r, v) in col {
+        acc += v * dense[r];
+    }
+    acc
+}
+
+/// Dense SPD solve using a naive Cholesky factorization.
+/// - a is k x k row-major.
+fn dense_spd_solve_cholesky(k: usize, a: &[f64], b: &[f64]) -> LinalgResult<Vec<f64>> {
+    if a.len() != k * k {
+        return Err(LinalgError::DimensionMismatch {
+            expected: k * k,
+            got: a.len(),
+        });
+    }
+    if b.len() != k {
+        return Err(LinalgError::DimensionMismatch {
+            expected: k,
+            got: b.len(),
+        });
+    }
+
+    // Copy A into mutable L (lower triangle) in row-major.
+    let mut l = a.to_vec();
+
+    // Cholesky: l = chol(a)
+    for i in 0..k {
+        let mut sum = l[i * k + i];
+        for p in 0..i {
+            let v = l[i * k + p];
+            sum -= v * v;
+        }
+        if !(sum.is_finite()) || sum <= 0.0 {
+            return Err(LinalgError::FactorizationFailed(
+                "Dense Cholesky failed: matrix not SPD".to_string(),
+            ));
+        }
+        let diag = sum.sqrt();
+        l[i * k + i] = diag;
+
+        for j in (i + 1)..k {
+            let mut s = l[j * k + i];
+            for p in 0..i {
+                s -= l[j * k + p] * l[i * k + p];
+            }
+            l[j * k + i] = s / diag;
+        }
+
+        // Zero upper triangle for cleanliness
+        for j in (i + 1)..k {
+            l[i * k + j] = 0.0;
+        }
+    }
+
+    // Forward solve L z = b
+    let mut z = b.to_vec();
+    for i in 0..k {
+        let mut s = z[i];
+        for p in 0..i {
+            s -= l[i * k + p] * z[p];
+        }
+        z[i] = s / l[i * k + i];
+    }
+
+    // Back solve L^T x = z
+    let mut x = z;
+    for i_rev in 0..k {
+        let i = k - 1 - i_rev;
+        let mut s = x[i];
+        for j in (i + 1)..k {
+            s -= l[j * k + i] * x[j];
+        }
+        x[i] = s / l[i * k + i];
+    }
+
+    Ok(x)
+}
+
+===== FILE: mosek_linalg_extras/src/dense_columns.rs =====
+use crate::types::{LinalgError, LinalgResult};
+
+/// A simple dense/offending column detector.
+///
+/// Semantics match MOSEK's qualitative behavior:
+/// - off_col_trh = 0 => no detection
+/// - off_col_trh = 1 => aggressive (detect many)
+/// - larger => less aggressive
+#[derive(Clone, Debug)]
+pub struct DenseColumnDetector {
+    pub off_col_trh: usize,
+    pub min_nnz_to_consider: usize,
+    pub hard_cap_dense_cols: usize,
+}
+
+impl Default for DenseColumnDetector {
+    fn default() -> Self {
+        Self {
+            off_col_trh: 40,
+            min_nnz_to_consider: 30,
+            hard_cap_dense_cols: 512,
+        }
+    }
+}
+
+impl DenseColumnDetector {
+    /// Detect dense/offending columns in A (CSC).
+    /// A is m x n, with col_ptr len n+1.
+    pub fn detect(&self, m: usize, n: usize, col_ptr: &[usize], _row_idx: &[usize]) -> Vec<bool> {
+        let mut dense = vec![false; n];
+        if self.off_col_trh == 0 {
+            return dense;
+        }
+
+        // Threshold grows with off_col_trh (less aggressive -> larger threshold).
+        let nnz_threshold = self
+            .min_nnz_to_consider
+            .saturating_mul(self.off_col_trh.max(1));
+
+        let mut candidates: Vec<(usize, usize)> = Vec::new(); // (nnz, col)
+        for j in 0..n {
+            let nnz = col_ptr[j + 1] - col_ptr[j];
+            if nnz >= nnz_threshold {
+                candidates.push((nnz, j));
+            }
+        }
+
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let cap = self.hard_cap_dense_cols.min(candidates.len());
+        for &(_, j) in candidates.iter().take(cap) {
+            dense[j] = true;
+        }
+
+        // Fallback: if nothing was flagged but there are truly huge columns, still catch them.
+        if !dense.iter().any(|&x| x) {
+            let fallback = (m / 2).max(self.min_nnz_to_consider);
+            for j in 0..n {
+                let nnz = col_ptr[j + 1] - col_ptr[j];
+                if nnz >= fallback {
+                    dense[j] = true;
+                }
+            }
+        }
+
+        dense
+    }
+}
+
+/// Build:
+/// - triplets (row,col,val) for S_sparse = sum_{j in sparse} d_j * a_j a_j^T (upper triangle)
+/// - U columns (sparse vectors) for dense columns: u_j = sqrt(d_j) * a_j
+///
+/// This is a building block for "dense column handling" + Woodbury.
+///
+/// Inputs:
+/// - A in CSC (m x n): col_ptr, row_idx, values
+/// - d: diag weights (n), must be positive
+pub fn build_sparse_trips_and_u(
+    m: usize,
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    values: &[f64],
+    d: &[f64],
+    is_dense: &[bool],
+) -> LinalgResult<(Vec<(usize, usize, f64)>, Vec<Vec<(usize, f64)>>)> {
+    if col_ptr.len() != n + 1 {
+        return Err(LinalgError::DimensionMismatch {
+            expected: n + 1,
+            got: col_ptr.len(),
+        });
+    }
+    if d.len() != n {
+        return Err(LinalgError::DimensionMismatch {
+            expected: n,
+            got: d.len(),
+        });
+    }
+    if is_dense.len() != n {
+        return Err(LinalgError::DimensionMismatch {
+            expected: n,
+            got: is_dense.len(),
+        });
+    }
+    if row_idx.len() != values.len() {
+        return Err(LinalgError::DimensionMismatch {
+            expected: row_idx.len(),
+            got: values.len(),
+        });
+    }
+
+    let mut trips: Vec<(usize, usize, f64)> = Vec::new();
+    let mut u_cols: Vec<Vec<(usize, f64)>> = Vec::new();
+
+    for j in 0..n {
+        let dj = d[j];
+        if !(dj.is_finite()) || dj <= 0.0 {
+            return Err(LinalgError::NonFiniteInput);
+        }
+
+        let start = col_ptr[j];
+        let end = col_ptr[j + 1];
+
+        if is_dense[j] {
+            let s = dj.sqrt();
+            let mut col = Vec::with_capacity(end - start);
+            for p in start..end {
+                let r = row_idx[p];
+                let v = values[p];
+                if r >= m || !v.is_finite() {
+                    return Err(LinalgError::NonFiniteInput);
+                }
+                col.push((r, s * v));
+            }
+            u_cols.push(col);
+        } else {
+            // Sparse column: emit upper-tri triplets.
+            for p in start..end {
+                let rp = row_idx[p];
+                let vp = values[p];
+                if rp >= m || !vp.is_finite() {
+                    return Err(LinalgError::NonFiniteInput);
+                }
+                let sp = dj * vp;
+                for q in p..end {
+                    let rq = row_idx[q];
+                    let vq = values[q];
+                    if rq >= m || !vq.is_finite() {
+                        return Err(LinalgError::NonFiniteInput);
+                    }
+                    let val = sp * vq;
+                    let (row, col) = if rp <= rq { (rp, rq) } else { (rq, rp) };
+                    trips.push((row, col, val));
+                }
+            }
+        }
+    }
+
+    Ok((trips, u_cols))
+}
+
+===== FILE: mosek_linalg_extras/src/cholmod.rs =====
+#![cfg(feature = "suitesparse")]
+
+use crate::types::{LinalgError, LinalgResult};
+use crate::woodbury::SpdSolve;
+use libc::{c_double, c_int};
+
+#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
+mod bindings {
+    include!(concat!(env!("OUT_DIR"), "/cholmod_bindings.rs"));
+}
+
+/// A minimal CHOLMOD SPD solver wrapper.
+///
+/// Notes:
+/// - This is a skeleton intended to be integrated into a larger solver.
+/// - CHOLMOD expects column-compressed sparse format.
+/// - For best performance, indices should be sorted within each column.
+pub struct CholmodSpdSolver {
+    common: bindings::cholmod_common,
+    analyzed: bool,
+    factorized: bool,
+    a: *mut bindings::cholmod_sparse,
+    l: *mut bindings::cholmod_factor,
+    n: usize,
+}
+
+unsafe impl Send for CholmodSpdSolver {}
+unsafe impl Sync for CholmodSpdSolver {}
+
+impl CholmodSpdSolver {
+    pub fn new() -> Self {
+        unsafe {
+            let mut common: bindings::cholmod_common = std::mem::zeroed();
+            bindings::cholmod_start(&mut common);
+            // silence
+            common.print = 0;
+            Self {
+                common,
+                analyzed: false,
+                factorized: false,
+                a: std::ptr::null_mut(),
+                l: std::ptr::null_mut(),
+                n: 0,
+            }
+        }
+    }
+
+    /// Analyze a new sparsity pattern and (re)allocate CHOLMOD sparse matrix storage.
+    ///
+    /// Input matrix is SPD, stored as upper triangle (stype=1).
+    /// Indices are 0-based.
+    pub fn analyze(&mut self, n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64]) -> LinalgResult<()> {
+        if col_ptr.len() != n + 1 {
+            return Err(LinalgError::DimensionMismatch { expected: n + 1, got: col_ptr.len() });
+        }
+        if row_idx.len() != values.len() {
+            return Err(LinalgError::DimensionMismatch { expected: row_idx.len(), got: values.len() });
+        }
+
+        unsafe {
+            // Free previous
+            if !self.l.is_null() {
+                bindings::cholmod_free_factor(&mut self.l, &mut self.common);
+                self.l = std::ptr::null_mut();
+            }
+            if !self.a.is_null() {
+                bindings::cholmod_free_sparse(&mut self.a, &mut self.common);
+                self.a = std::ptr::null_mut();
+            }
+
+            let nz = values.len() as usize;
+
+            let a = bindings::cholmod_allocate_sparse(
+                n as usize,
+                n as usize,
+                nz as usize,
+                1,   // sorted
+                1,   // packed
+                1,   // stype: 1 = upper triangular stored
+                bindings::CHOLMOD_REAL as c_int,
+                &mut self.common,
+            );
+
+            if a.is_null() {
+                return Err(LinalgError::FactorizationFailed("cholmod_allocate_sparse returned null".to_string()));
+            }
+
+            // Copy data into CHOLMOD buffers.
+            let p_ptr = (*a).p as *mut i64;
+            for (dst, src) in std::slice::from_raw_parts_mut(p_ptr, n + 1).iter_mut().zip(col_ptr.iter()) {
+                *dst = *src;
+            }
+
+            let i_ptr = (*a).i as *mut i64;
+            for (dst, src) in std::slice::from_raw_parts_mut(i_ptr, nz).iter_mut().zip(row_idx.iter()) {
+                *dst = *src;
+            }
+
+            let x_ptr = (*a).x as *mut c_double;
+            for (dst, src) in std::slice::from_raw_parts_mut(x_ptr, nz).iter_mut().zip(values.iter()) {
+                *dst = *src as c_double;
+            }
+
+            self.a = a;
+            self.l = bindings::cholmod_analyze(self.a, &mut self.common);
+            if self.l.is_null() {
+                return Err(LinalgError::FactorizationFailed("cholmod_analyze returned null".to_string()));
+            }
+
+            self.n = n;
+            self.analyzed = true;
+            self.factorized = false;
+        }
+
+        Ok(())
+    }
+
+    pub fn factorize(&mut self) -> LinalgResult<()> {
+        if !self.analyzed || self.a.is_null() || self.l.is_null() {
+            return Err(LinalgError::NotAnalyzed);
+        }
+        unsafe {
+            let ok = bindings::cholmod_factorize(self.a, self.l, &mut self.common);
+            if ok == 0 {
+                return Err(LinalgError::FactorizationFailed("cholmod_factorize failed".to_string()));
+            }
+        }
+        self.factorized = true;
+        Ok(())
+    }
+}
+
+impl SpdSolve for CholmodSpdSolver {
+    fn solve(&mut self, rhs: &[f64], x_out: &mut [f64]) -> LinalgResult<()> {
+        if !self.factorized || self.l.is_null() {
+            return Err(LinalgError::NotFactorized);
+        }
+        if rhs.len() != self.n || x_out.len() != self.n {
+            return Err(LinalgError::DimensionMismatch { expected: self.n, got: rhs.len() });
+        }
+
+        unsafe {
+            // Build dense rhs
+            let b = bindings::cholmod_allocate_dense(
+                self.n as usize,
+                1,
+                self.n as usize,
+                bindings::CHOLMOD_REAL as c_int,
+                &mut self.common,
+            );
+            if b.is_null() {
+                return Err(LinalgError::FactorizationFailed("cholmod_allocate_dense rhs failed".to_string()));
+            }
+            let bx = (*b).x as *mut c_double;
+            for (dst, src) in std::slice::from_raw_parts_mut(bx, self.n).iter_mut().zip(rhs.iter()) {
+                *dst = *src as c_double;
+            }
+
+            let x = bindings::cholmod_solve(bindings::CHOLMOD_A as c_int, self.l, b, &mut self.common);
+            if x.is_null() {
+                bindings::cholmod_free_dense(&mut (b as *mut _), &mut self.common);
+                return Err(LinalgError::FactorizationFailed("cholmod_solve failed".to_string()));
+            }
+            let xx = (*x).x as *mut c_double;
+            for (dst, src) in x_out.iter_mut().zip(std::slice::from_raw_parts(xx, self.n).iter()) {
+                *dst = *src as f64;
+            }
+
+            bindings::cholmod_free_dense(&mut (b as *mut _), &mut self.common);
+            bindings::cholmod_free_dense(&mut (x as *mut _), &mut self.common);
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for CholmodSpdSolver {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.l.is_null() {
+                bindings::cholmod_free_factor(&mut self.l, &mut self.common);
+                self.l = std::ptr::null_mut();
+            }
+            if !self.a.is_null() {
+                bindings::cholmod_free_sparse(&mut self.a, &mut self.common);
+                self.a = std::ptr::null_mut();
+            }
+            bindings::cholmod_finish(&mut self.common);
+        }
+    }
+}
+
+===== FILE: mosek_linalg_extras/src/metis.rs =====
+#![cfg(feature = "metis")]
+
+use crate::types::{LinalgError, LinalgResult};
+
+#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
+mod bindings {
+    include!(concat!(env!("OUT_DIR"), "/metis_bindings.rs"));
+}
+
+/// Compute a nested dissection ordering using METIS_NodeND.
+///
+/// Input graph format:
+/// - xadj: len n+1
+/// - adjncy: adjacency list
+///
+/// Returns:
+/// - perm: permutation
+/// - iperm: inverse permutation
+pub fn node_nd(xadj: &[bindings::idx_t], adjncy: &[bindings::idx_t]) -> LinalgResult<(Vec<bindings::idx_t>, Vec<bindings::idx_t>)> {
+    let n = xadj.len().checked_sub(1).ok_or(LinalgError::NonFiniteInput)? as bindings::idx_t;
+    let mut perm = vec![0 as bindings::idx_t; n as usize];
+    let mut iperm = vec![0 as bindings::idx_t; n as usize];
+
+    unsafe {
+        let mut options = [0 as bindings::idx_t; 40];
+        // If available in your bindings, you can call METIS_SetDefaultOptions(options.as_mut_ptr()).
+
+        let status = bindings::METIS_NodeND(
+            &n as *const _ as *mut _,
+            xadj.as_ptr() as *mut _,
+            adjncy.as_ptr() as *mut _,
+            std::ptr::null_mut(),
+            options.as_mut_ptr(),
+            perm.as_mut_ptr(),
+            iperm.as_mut_ptr(),
+        );
+
+        if status != bindings::METIS_OK as bindings::idx_t {
+            return Err(LinalgError::FactorizationFailed(format!(
+                "METIS_NodeND failed with status {}",
+                status
+            )));
+        }
+    }
+
+    Ok((perm, iperm))
+}
+
+===== FILE: mosek_linalg_extras/examples/woodbury_demo.rs =====
+use mosek_linalg_extras::woodbury::{SpdSolve, WoodburySolver};
+
+/// A toy base SPD solver: identity matrix.
+struct Identity;
+
+impl SpdSolve for Identity {
+    fn solve(&mut self, b: &[f64], x_out: &mut [f64]) -> Result<(), mosek_linalg_extras::types::LinalgError> {
+        x_out.copy_from_slice(b);
+        Ok(())
+    }
+}
+
+fn main() {
+    // Solve (I + u u^T) y = b
+    let mut base = Identity;
+    let mut wood = WoodburySolver::new(&mut base);
+
+    let b = vec![1.0, 2.0, 3.0];
+    let u_cols = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)]];
+
+    let mut y = vec![0.0; 3];
+    wood.solve(&b, &u_cols, &mut y).unwrap();
+
+    println!("y = {:?}", y);
+}
+

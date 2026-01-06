@@ -34,13 +34,22 @@ impl NonNegCone {
         Self { dim }
     }
 
-    /// Interior tolerance: s_i > tol * max(1, ||s||_∞)
-    const INTERIOR_TOL: f64 = 1e-12;
+    /// Interior tolerance for strict positivity checks.
+    ///
+    /// IMPORTANT: this must be absolute, not relative to ||s||_inf.
+    /// A relative threshold causes false "not interior" on large dynamic range,
+    /// which can destabilize NT scaling.
+    ///
+    /// 1e-300 is safely above f64 underflow while still treating all practical
+    /// positive values as interior.
+    const INTERIOR_TOL: f64 = 1e-300;
 
     /// Scaling interior tolerance: accept very small positive values.
+    #[allow(dead_code)]
     const SCALING_INTERIOR_TOL: f64 = 1e-300;
 
     /// Relaxed interior check for scaling computations.
+    #[allow(dead_code)]
     pub(crate) fn is_interior_scaling(&self, s: &[f64]) -> bool {
         assert_eq!(s.len(), self.dim);
         if s.iter().any(|&x| !x.is_finite()) {
@@ -62,17 +71,8 @@ impl ConeKernel for NonNegCone {
     fn is_interior_primal(&self, s: &[f64]) -> bool {
         assert_eq!(s.len(), self.dim);
 
-        // Check for NaN
-        if s.iter().any(|&x| x.is_nan()) {
-            return false;
-        }
-
-        // Compute tolerance relative to ||s||_∞
-        let s_max = s.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
-        let tol = Self::INTERIOR_TOL * s_max.max(1.0);
-
-        // All components must be > tol
-        s.iter().all(|&x| x > tol)
+        // Strict interior for R_+^n: every component must be finite and positive.
+        s.iter().all(|&x| x.is_finite() && x > Self::INTERIOR_TOL)
     }
 
     fn is_interior_dual(&self, z: &[f64]) -> bool {

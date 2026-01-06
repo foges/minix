@@ -1,0 +1,461 @@
+--- a/solver-core/src/cones/nonneg.rs
++++ b/solver-core/src/cones/nonneg.rs
+@@ -36,6 +36,13 @@
+ 
+
+     /// Interior tolerance: s_i > tol * max(1, ||s||_∞)
+
+     const INTERIOR_TOL: f64 = 1e-12;
+
++
+
++    const SCALING_INTERIOR_TOL: f64 = 1e-300;
+
++
+
++    pub(crate) fn is_interior_scaling(&self, s: &[f64]) -> bool {
+
++        assert_eq!(s.len(), self.dim);
+
++        s.iter().all(|&x| x.is_finite() && x > Self::SCALING_INTERIOR_TOL)
+
++    }
+
+ }
+
+ 
+
+ impl ConeKernel for NonNegCone {
+
+
+--- a/solver-core/src/cones/soc.rs
++++ b/solver-core/src/cones/soc.rs
+@@ -45,6 +45,20 @@
+     /// Interior tolerance
+
+     const INTERIOR_TOL: f64 = 1e-12;
+
+ 
+
++    const SCALING_INTERIOR_TOL: f64 = 1e-300;
+
++
+
++    pub(crate) fn is_interior_scaling(&self, s: &[f64]) -> bool {
+
++        assert_eq!(s.len(), self.dim);
+
++
+
++        if s.iter().any(|&x| !x.is_finite()) {
+
++            return false;
+
++        }
+
++
+
++        let t = s[0];
+
++        let disc = Self::discriminant(s);
+
++        t > Self::SCALING_INTERIOR_TOL && disc > Self::SCALING_INTERIOR_TOL
+
++    }
+
++
+
+     /// Compute t² - ||x||² (the discriminant used throughout)
+
+     #[inline]
+
+     fn discriminant(s: &[f64]) -> f64 {
+
+
+--- a/solver-core/src/scaling/nt.rs
++++ b/solver-core/src/scaling/nt.rs
+@@ -50,7 +50,7 @@
+         });
+
+     }
+
+ 
+
+-    if !cone.is_interior_primal(s) || !cone.is_interior_dual(z) {
+
++    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
+
+         return Err(NtScalingError::NotInterior);
+
+     }
+
+ 
+
+@@ -91,7 +91,7 @@
+         });
+
+     }
+
+ 
+
+-    if !cone.is_interior_primal(s) || !cone.is_interior_dual(z) {
+
++    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
+
+         return Err(NtScalingError::NotInterior);
+
+     }
+
+ 
+
+
+--- a/solver-core/src/ipm/predcorr.rs
++++ b/solver-core/src/ipm/predcorr.rs
+@@ -249,8 +249,13 @@
+         let scale = nt::compute_nt_scaling(s, z, cone.as_ref())
+
+             .unwrap_or_else(|_| {
+
+                 // Fallback to simple diagonal scaling if NT fails
+
+-                let d: Vec<f64> = s.iter().zip(z.iter())
+
+-                    .map(|(si, zi)| (si / zi).max(1e-8).sqrt())
+
++                let d: Vec<f64> = s
+
++                    .iter()
+
++                    .zip(z.iter())
+
++                    .map(|(si, zi)| {
+
++                        let ratio = if *zi > 0.0 { si / zi } else { 1.0 };
+
++                        ratio.max(1e-18).min(1e18)
+
++                    })
+
+                     .collect();
+
+                 ScalingBlock::Diagonal { d }
+
+             });
+
+@@ -708,7 +713,7 @@
+     }
+
+ 
+
+     // Apply fraction-to-boundary and cap at 1.0 (never take more than a full Newton step)
+
+-    alpha = (0.99 * alpha).min(1.0);
+
++    alpha = (settings.fraction_to_boundary * alpha).min(1.0);
+
+     let alpha_pre_ls = alpha;
+
+ 
+
+     if settings.line_search_max_iters > 0
+
+
+--- a/solver-core/src/linalg/kkt.rs
++++ b/solver-core/src/linalg/kkt.rs
+@@ -48,6 +48,12 @@
+     /// Workspace for KKT matrix construction
+
+     kkt_mat: Option<SparseCsc>,
+
+ 
+
++    rhs_perm: Vec<f64>,
+
++    sol_perm: Vec<f64>,
+
++    refine_kx: Vec<f64>,
+
++    refine_res: Vec<f64>,
+
++    refine_delta: Vec<f64>,
+
++
+
+     /// Static regularization
+
+     static_reg: f64,
+
+ 
+
+@@ -76,6 +82,11 @@
+             m,
+
+             qdldl,
+
+             kkt_mat: None,
+
++            rhs_perm: vec![0.0; kkt_dim],
+
++            sol_perm: vec![0.0; kkt_dim],
+
++            refine_kx: vec![0.0; kkt_dim],
+
++            refine_res: vec![0.0; kkt_dim],
+
++            refine_delta: vec![0.0; kkt_dim],
+
+             static_reg,
+
+             perm: None,
+
+             perm_inv: None,
+
+@@ -297,8 +308,9 @@
+         h_blocks: &[ScalingBlock],
+
+     ) -> Result<QdldlFactorization, QdldlError> {
+
+         let kkt = self.build_kkt_matrix(p, a, h_blocks);
+
+-        self.kkt_mat = Some(kkt.clone());
+
+-        self.qdldl.numeric_factorization(&kkt)
+
++        self.kkt_mat = Some(kkt);
+
++        let kkt_ref = self.kkt_mat.as_ref().expect("KKT matrix just built");
+
++        self.qdldl.numeric_factorization(kkt_ref)
+
+     }
+
+ 
+
+     /// Solve a single KKT system: K * [dx; dz] = [rhs_x; rhs_z].
+
+@@ -311,7 +323,7 @@
+     /// * `sol_x` - Solution for x block (output, length n)
+
+     /// * `sol_z` - Solution for z block (output, length m)
+
+     pub fn solve(
+
+-        &self,
+
++        &mut self,
+
+         factor: &QdldlFactorization,
+
+         rhs_x: &[f64],
+
+         rhs_z: &[f64],
+
+@@ -323,7 +335,7 @@
+ 
+
+     /// Solve with optional iterative refinement.
+
+     pub fn solve_refined(
+
+-        &self,
+
++        &mut self,
+
+         factor: &QdldlFactorization,
+
+         rhs_x: &[f64],
+
+         rhs_z: &[f64],
+
+@@ -335,7 +347,7 @@
+     }
+
+ 
+
+     fn solve_with_refinement(
+
+-        &self,
+
++        &mut self,
+
+         factor: &QdldlFactorization,
+
+         rhs_x: &[f64],
+
+         rhs_z: &[f64],
+
+@@ -350,45 +362,45 @@
+ 
+
+         // Assemble and permute RHS (if needed)
+
+         let kkt_dim = self.n + self.m;
+
+-        let mut rhs_perm = vec![0.0; kkt_dim];
+
++        self.rhs_perm.fill(0.0);
+
+         if let Some(p) = &self.perm {
+
+             for i in 0..kkt_dim {
+
+                 let src = p[i];
+
+                 if src < self.n {
+
+-                    rhs_perm[i] = rhs_x[src];
+
++                    self.rhs_perm[i] = rhs_x[src];
+
+                 } else {
+
+-                    rhs_perm[i] = rhs_z[src - self.n];
+
++                    self.rhs_perm[i] = rhs_z[src - self.n];
+
+                 }
+
+             }
+
+         } else {
+
+-            rhs_perm[..self.n].copy_from_slice(rhs_x);
+
+-            rhs_perm[self.n..].copy_from_slice(rhs_z);
+
++            self.rhs_perm[..self.n].copy_from_slice(rhs_x);
+
++            self.rhs_perm[self.n..].copy_from_slice(rhs_z);
+
+         }
+
+ 
+
+         // Solve permuted system
+
+-        let mut sol_perm = vec![0.0; kkt_dim];
+
+-        self.qdldl.solve(factor, &rhs_perm, &mut sol_perm);
+
++        self.sol_perm.fill(0.0);
+
++        self.qdldl.solve(factor, &self.rhs_perm, &mut self.sol_perm);
+
+ 
+
+         if refine_iters > 0 {
+
+             if let Some(kkt) = &self.kkt_mat {
+
+-                let mut kx = vec![0.0; kkt_dim];
+
+-                let mut res = vec![0.0; kkt_dim];
+
+-                let mut delta = vec![0.0; kkt_dim];
+
++                self.refine_kx.fill(0.0);
+
++                self.refine_res.fill(0.0);
+
++                self.refine_delta.fill(0.0);
+
+ 
+
+                 for _ in 0..refine_iters {
+
+-                    symm_matvec_upper(kkt, &sol_perm, &mut kx);
+
++                    symm_matvec_upper(kkt, &self.sol_perm, &mut self.refine_kx);
+
+                     for i in 0..kkt_dim {
+
+-                        res[i] = rhs_perm[i] - kx[i];
+
++                        self.refine_res[i] = self.rhs_perm[i] - self.refine_kx[i];
+
+                     }
+
+ 
+
+-                    let res_norm = res.iter().map(|v| v * v).sum::<f64>().sqrt();
+
++                    let res_norm = self.refine_res.iter().map(|v| v * v).sum::<f64>().sqrt();
+
+                     if !res_norm.is_finite() || res_norm < 1e-12 {
+
+                         break;
+
+                     }
+
+ 
+
+-                    self.qdldl.solve(factor, &res, &mut delta);
+
++                    self.qdldl.solve(factor, &self.refine_res, &mut self.refine_delta);
+
+                     for i in 0..kkt_dim {
+
+-                        sol_perm[i] += delta[i];
+
++                        self.sol_perm[i] += self.refine_delta[i];
+
+                     }
+
+                 }
+
+             }
+
+@@ -397,14 +409,14 @@
+         // Unpermute solution back to original ordering
+
+         if let Some(p_inv) = &self.perm_inv {
+
+             for i in 0..self.n {
+
+-                sol_x[i] = sol_perm[p_inv[i]];
+
++                sol_x[i] = self.sol_perm[p_inv[i]];
+
+             }
+
+             for i in 0..self.m {
+
+-                sol_z[i] = sol_perm[p_inv[self.n + i]];
+
++                sol_z[i] = self.sol_perm[p_inv[self.n + i]];
+
+             }
+
+         } else {
+
+-            sol_x.copy_from_slice(&sol_perm[..self.n]);
+
+-            sol_z.copy_from_slice(&sol_perm[self.n..]);
+
++            sol_x.copy_from_slice(&self.sol_perm[..self.n]);
+
++            sol_z.copy_from_slice(&self.sol_perm[self.n..]);
+
+         }
+
+     }
+
+ 
+
+@@ -418,7 +430,7 @@
+     /// factorization is reused.
+
+     #[allow(clippy::too_many_arguments)]
+
+     pub fn solve_two_rhs(
+
+-        &self,
+
++        &mut self,
+
+         factor: &QdldlFactorization,
+
+         rhs_x1: &[f64],
+
+         rhs_z1: &[f64],
+

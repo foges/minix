@@ -6,6 +6,10 @@
 pub mod nt;
 pub mod bfgs;
 
+use crate::cones::psd::{mat_to_svec, svec_to_mat};
+use nalgebra::DMatrix;
+use nalgebra::linalg::SymmetricEigen;
+
 /// Scaling block representation for the H matrix in the KKT system.
 #[derive(Debug, Clone)]
 #[allow(missing_docs)]  // Enum variant fields are self-documenting
@@ -54,8 +58,11 @@ impl ScalingBlock {
                     }
                 }
             }
-            ScalingBlock::PsdStructured { .. } => {
-                unimplemented!("PSD structured scaling not yet implemented")
+            ScalingBlock::PsdStructured { w_factor, n } => {
+                let w = DMatrix::<f64>::from_row_slice(*n, *n, w_factor);
+                let v_mat = svec_to_mat(v, *n);
+                let out_mat = &w * v_mat * &w;
+                mat_to_svec(&out_mat, out);
             }
         }
     }
@@ -145,8 +152,18 @@ impl ScalingBlock {
                     out.copy_from_slice(&x);
                 }
             }
-            ScalingBlock::PsdStructured { .. } => {
-                unimplemented!("PSD structured scaling inverse not yet implemented")
+            ScalingBlock::PsdStructured { w_factor, n } => {
+                let w = DMatrix::<f64>::from_row_slice(*n, *n, w_factor);
+                let w_inv = w.clone().try_inverse().unwrap_or_else(|| {
+                    let eig = SymmetricEigen::new(w);
+                    let inv_vals = eig.eigenvalues.map(|v| 1.0 / v.max(1e-18));
+                    &eig.eigenvectors
+                        * DMatrix::<f64>::from_diagonal(&inv_vals)
+                        * eig.eigenvectors.transpose()
+                });
+                let v_mat = svec_to_mat(v, *n);
+                let out_mat = &w_inv * v_mat * &w_inv;
+                mat_to_svec(&out_mat, out);
             }
         }
     }

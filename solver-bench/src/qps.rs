@@ -101,6 +101,10 @@ impl QpsProblem {
         let mut triplets = Vec::new();
         let mut b = Vec::with_capacity(total_constraints);
         let mut row = 0;
+        let mut row_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.m];
+        for &(r, c, v) in &self.a_triplets {
+            row_entries[r].push((c, v));
+        }
 
         // 1. Equality constraints (Zero cone)
         for i in 0..self.m {
@@ -109,10 +113,8 @@ impl QpsProblem {
 
             if lb == ub && lb.is_finite() {
                 // Equality: Ax = b
-                for &(r, c, v) in &self.a_triplets {
-                    if r == i {
-                        triplets.push((row, c, v));
-                    }
+                for &(c, v) in &row_entries[i] {
+                    triplets.push((row, c, v));
                 }
                 b.push(lb);
                 row += 1;
@@ -134,10 +136,8 @@ impl QpsProblem {
 
             // Upper bound: a'x <= ub
             if ub.is_finite() && ub < f64::INFINITY {
-                for &(r, c, v) in &self.a_triplets {
-                    if r == i {
-                        triplets.push((row, c, v));
-                    }
+                for &(c, v) in &row_entries[i] {
+                    triplets.push((row, c, v));
                 }
                 b.push(ub);
                 row += 1;
@@ -145,10 +145,8 @@ impl QpsProblem {
 
             // Lower bound: a'x >= lb => -a'x <= -lb
             if lb.is_finite() && lb > f64::NEG_INFINITY {
-                for &(r, c, v) in &self.a_triplets {
-                    if r == i {
-                        triplets.push((row, c, -v));
-                    }
+                for &(c, v) in &row_entries[i] {
+                    triplets.push((row, c, -v));
                 }
                 b.push(-lb);
                 row += 1;
@@ -182,13 +180,21 @@ impl QpsProblem {
         // Build sparse matrices
         let a = sparse::from_triplets(total_constraints, self.n, triplets);
 
+        // Scale objective by sense.
+        //
+        // Note: For quadratic objectives, the QP form is (1/2) x'P x + q'x.
+        // Converting MAX to MIN requires negating *both* q and P.
         let p = if self.p_triplets.is_empty() {
             None
         } else {
-            Some(sparse::from_triplets(self.n, self.n, self.p_triplets.clone()))
+            let p_triplets: Vec<(usize, usize, f64)> = self
+                .p_triplets
+                .iter()
+                .map(|&(i, j, v)| (i, j, v * self.obj_sense))
+                .collect();
+            Some(sparse::from_triplets(self.n, self.n, p_triplets))
         };
 
-        // Scale objective by sense
         let q: Vec<f64> = self.q.iter().map(|&v| v * self.obj_sense).collect();
 
         // Build cone specification
@@ -486,7 +492,7 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
         name,
         n,
         m,
-        obj_sense, // Use parsed value (1.0=min, -1.0=max)
+        obj_sense, // Parsed from OBJSENSE section (1.0 = min, -1.0 = max)
         q,
         p_triplets,
         a_triplets,

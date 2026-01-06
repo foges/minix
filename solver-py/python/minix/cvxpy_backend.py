@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from scipy import sparse
+import scipy.sparse as sp
 
 import minix
 
@@ -76,7 +77,7 @@ class MINIX(ConicSolver):
 
     # Solver capabilities
     MIP_CAPABLE = False
-    SUPPORTED_CONSTRAINTS = [Zero, NonNeg, SOC]  # Add PSD, ExpCone later
+    SUPPORTED_CONSTRAINTS = [Zero, NonNeg, SOC, PSD, ExpCone]  # PSD, EXP now supported
 
     def name(self) -> str:
         """Return the solver name."""
@@ -96,6 +97,41 @@ class MINIX(ConicSolver):
     def supports_quad_obj(self) -> bool:
         """Return True since minix supports quadratic objectives."""
         return True
+
+    @staticmethod
+    def psd_format_mat(constr: Any) -> Any:
+        """Return a linear operator to multiply by PSD constraint coefficients.
+
+        Transforms full matrix form to svec (scaled lower triangular) form.
+        Off-diagonal elements are scaled by sqrt(2) for proper inner product.
+        """
+        rows = cols = constr.expr.shape[0]
+        entries = rows * (cols + 1) // 2
+
+        row_arr = np.arange(0, entries)
+
+        lower_diag_indices = np.tril_indices(rows)
+        col_arr = np.sort(np.ravel_multi_index(lower_diag_indices,
+                                               (rows, cols),
+                                               order='F'))
+
+        val_arr = np.zeros((rows, cols))
+        val_arr[lower_diag_indices] = np.sqrt(2)
+        np.fill_diagonal(val_arr, 1.0)
+        val_arr = np.ravel(val_arr, order='F')
+        val_arr = val_arr[np.nonzero(val_arr)]
+
+        shape = (entries, rows * cols)
+        scaled_lower_tri = sp.csc_array((val_arr, (row_arr, col_arr)), shape)
+
+        idx = np.arange(rows * cols)
+        val_symm = 0.5 * np.ones(2 * rows * cols)
+        K = idx.reshape((rows, cols))
+        row_symm = np.append(idx, np.ravel(K, order='F'))
+        col_symm = np.append(idx, np.ravel(K.T, order='F'))
+        symm_matrix = sp.csc_array((val_symm, (row_symm, col_symm)))
+
+        return scaled_lower_tri @ symm_matrix
 
     def apply(
         self,

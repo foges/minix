@@ -1,0 +1,330 @@
+=== AUG2D ===
+Running single problem: AUG2D
+Status:     Optimal
+Variables:  20200
+Constraints:10000
+Iterations: 7
+Objective:  1.677512e6
+Final μ:    2.052636e-13
+Time:       99.891 ms
+=== AUG2DC ===
+Running single problem: AUG2DC
+Status:     Optimal
+Variables:  20200
+Constraints:10000
+Iterations: 7
+Objective:  1.808268e6
+Final μ:    2.015348e-13
+Time:       99.206 ms
+=== AUG2DCQP ===
+Running single problem: AUG2DCQP
+Status:     Optimal
+Variables:  20200
+Constraints:30200
+Iterations: 13
+Objective:  6.488035e6
+Final μ:    9.760136e-9
+Time:       206.367 ms
+=== AUG2DQP ===
+Running single problem: AUG2DQP
+Status:     Optimal
+Variables:  20200
+Constraints:30200
+Iterations: 13
+Objective:  6.227114e6
+Final μ:    2.911829e-9
+Time:       197.995 ms
+=== AUG3D ===
+Running single problem: AUG3D
+Status:     Optimal
+Variables:  3873
+Constraints:1000
+Iterations: 6
+Objective:  -7.824323e2
+Final μ:    2.850655e-11
+Time:       17.832 ms
+=== AUG3DC ===
+Running single problem: AUG3DC
+Status:     Optimal
+Variables:  3873
+Constraints:1000
+Iterations: 6
+Objective:  -1.165238e3
+Final μ:    2.983245e-11
+Time:       15.637 ms
+=== AUG3DCQP ===
+Running single problem: AUG3DCQP
+Status:     Optimal
+Variables:  3873
+Constraints:4873
+Iterations: 11
+Objective:  -9.431378e2
+Final μ:    2.547287e-10
+Time:       35.955 ms
+=== AUG3DQP ===
+Running single problem: AUG3DQP
+Status:     Optimal
+Variables:  3873
+Constraints:4873
+Iterations: 12
+Objective:  -6.612623e2
+Final μ:    4.491084e-10
+Time:       39.834 ms
+=== BOYD1 ===
+Running single problem: BOYD1
+Diagnostics for BOYD1:
+  r_p_inf=2.653e-1 (scale 3.750e12), r_d_inf=4.216e2 (scale 2.662e5)
+  rel_p=7.075e-14, rel_d=1.584e-3
+  gap=1.079e0, gap_rel=1.748e-8, obj_p=-6.171e7, obj_d=-6.171e7
+Status:     MaxIters
+Variables:  93261
+Constraints:93279
+Iterations: 200
+Objective:  -6.170694e7
+Final μ:    8.602072e-8
+Time:       14877.290 ms
+=== BOYD2 ===
+Running single problem: BOYD2
+Diagnostics for BOYD2:
+  r_p_inf=6.357e4 (scale 2.160e11), r_d_inf=2.929e4 (scale 3.265e8)
+  rel_p=2.943e-7, rel_d=8.969e-5
+  gap=3.053e5, gap_rel=2.023e-1, obj_p=1.509e6, obj_d=1.204e6
+Status:     MaxIters
+Variables:  93263
+Constraints:279794
+Iterations: 200
+Objective:  1.509012e6
+Final μ:    6.829842e1
+Time:       10728.592 ms
+=== CONT-050 ===
+Running single problem: CONT-050
+Status:     Optimal
+Variables:  2597
+Constraints:7595
+Iterations: 10
+Objective:  -4.563851e0
+Final μ:    2.262768e-10
+Time:       66.324 ms
+=== CONT-100 ===
+Running single problem: CONT-100
+Status:     Optimal
+Variables:  10197
+Constraints:30195
+Iterations: 11
+Objective:  -4.644398e0
+Final μ:    2.123706e-10
+Time:       534.100 ms
+=== CONT-101 ===
+Running single problem: CONT-101
+Diagnostics for CONT-101:
+  r_p_inf=1.015e-2 (scale 2.937e1), r_d_inf=1.903e-9 (scale 9.581e0)
+  rel_p=3.456e-4, rel_d=1.986e-10
+  gap=2.686e-5, gap_rel=2.686e-5, obj_p=1.754e-1, obj_d=1.754e-1
+Status:     MaxIters
+Variables:  10197
+Constraints:30492
+Iterations: 200
+Objective:  1.754487e-1
+Final μ:    2.022182e-9
+Time:       10555.851 ms
+=== CONT-200 ===
+Running single problem: CONT-200
+=== CONT-200 ===
+Running single problem: CONT-200
+Diagnostics for CONT-200:
+  r_p_inf=1.759e-4 (scale 2.254e1), r_d_inf=3.311e-13 (scale 3.684e0)
+  rel_p=7.805e-6, rel_d=8.989e-14
+  gap=4.898e-8, gap_rel=1.046e-8, obj_p=-4.685e0, obj_d=-4.685e0
+Status:     MaxIters
+Variables:  40397
+Constraints:120395
+Iterations: 200
+Objective:  -4.684920e0
+Final μ:    -1.721639e-7
+Time:       75907.961 ms
+=== CONT-201 ===
+Running single problem: CONT-201
+Diagnostics for CONT-201:
+  r_p_inf=4.817e-3 (scale 2.322e1), r_d_inf=6.657e-10 (scale 3.240e0)
+  rel_p=2.074e-4, rel_d=2.055e-10
+  gap=2.877e-6, gap_rel=2.877e-6, obj_p=-1.009e-1, obj_d=-1.009e-1
+Status:     MaxIters
+Variables:  40397
+Constraints:120992
+Iterations: 200
+Objective:  -1.009200e-1
+Final μ:    2.276667e-9
+Time:       113615.348 ms
+=== CONT-300 ===
+Running single problem: CONT-300
+Running single problem: CONT-300
+=== CVXQP1_L ===
+Running single problem: CVXQP1_L
+Diagnostics for CVXQP1_L:
+  r_p_inf=1.779e-4 (scale 2.212e1), r_d_inf=2.048e-4 (scale 3.928e7)
+  rel_p=8.045e-6, rel_d=5.214e-12
+  gap=1.373e0, gap_rel=1.263e-8, obj_p=1.087e8, obj_d=1.087e8
+Status:     MaxIters
+Variables:  10000
+Constraints:25000
+Iterations: 200
+Objective:  1.087045e8
+Final μ:    3.933847e-8
+Time:       370558.307 ms
+=== CVXQP1_M ===
+Running single problem: CVXQP1_M
+Status:     Optimal
+Variables:  1000
+Constraints:2500
+Iterations: 168
+Objective:  1.087512e6
+Final μ:    3.781311e-9
+Time:       1105.121 ms
+=== CVXQP1_S ===
+Running single problem: CVXQP1_S
+Status:     Optimal
+Variables:  100
+Constraints:250
+Iterations: 8
+Objective:  1.159072e4
+Final μ:    9.379938e-7
+Time:       1.458 ms
+=== CVXQP2_L ===
+Running single problem: CVXQP2_L
+Status:     Optimal
+Variables:  10000
+Constraints:22500
+Iterations: 11
+Objective:  8.184246e7
+Final μ:    5.964836e-9
+Time:       16474.570 ms
+=== CVXQP2_M ===
+Running single problem: CVXQP2_M
+Status:     Optimal
+Variables:  1000
+Constraints:2250
+Iterations: 10
+Objective:  8.201554e5
+Final μ:    1.677398e-9
+Time:       50.023 ms
+=== CVXQP2_S ===
+Running single problem: CVXQP2_S
+Status:     Optimal
+Variables:  100
+Constraints:225
+Iterations: 10
+Objective:  8.120940e3
+Final μ:    7.416189e-10
+Time:       1.057 ms
+=== CVXQP3_L ===
+Running single problem: CVXQP3_L
+Diagnostics for CVXQP3_L:
+  r_p_inf=4.130e-4 (scale 2.112e1), r_d_inf=7.549e-5 (scale 4.550e7)
+  rel_p=1.955e-5, rel_d=1.659e-12
+  gap=2.893e-1, gap_rel=2.500e-9, obj_p=1.157e8, obj_d=1.157e8
+Status:     MaxIters
+Variables:  10000
+Constraints:27500
+Iterations: 200
+Objective:  1.157104e8
+Final μ:    1.697209e-9
+Time:       437351.625 ms
+=== DUAL1 ===
+Running single problem: DUAL1
+Status:     Optimal
+Variables:  85
+Constraints:171
+Iterations: 13
+Objective:  3.501297e-2
+Final μ:    3.834683e-12
+Time:       7.890 ms
+=== DUAL2 ===
+Running single problem: DUAL2
+Status:     Optimal
+Variables:  96
+Constraints:193
+Iterations: 12
+Objective:  3.373368e-2
+Final μ:    7.006548e-13
+Time:       5.281 ms
+=== HS118 ===
+Running single problem: HS118
+Status:     Optimal
+Variables:  15
+Constraints:59
+Iterations: 10
+Objective:  6.648205e2
+Final μ:    3.422412e-7
+Time:       0.300 ms
+=== HS21 ===
+Running single problem: HS21
+Status:     Optimal
+Variables:  2
+Constraints:5
+Iterations: 8
+Objective:  4.000049e-2
+Final μ:    6.301294e-9
+Time:       0.222 ms
+=== HS35 ===
+Running single problem: HS35
+Status:     Optimal
+Variables:  3
+Constraints:4
+Iterations: 6
+Objective:  -8.888886e0
+Final μ:    1.707244e-7
+Time:       0.142 ms
+=== HS52 ===
+Running single problem: HS52
+Status:     Optimal
+Variables:  5
+Constraints:3
+Iterations: 4
+Objective:  -6.733524e-1
+Final μ:    1.433059e-7
+Time:       0.189 ms
+=== HS53 ===
+Running single problem: HS53
+Status:     Optimal
+Variables:  5
+Constraints:13
+Iterations: 5
+Objective:  -1.906977e0
+Final μ:    1.947119e-8
+Time:       0.185 ms
+=== HS76 ===
+Running single problem: HS76
+Status:     Optimal
+Variables:  4
+Constraints:7
+Iterations: 6
+Objective:  -4.681818e0
+Final μ:    4.260295e-8
+Time:       0.156 ms
+=== QAFIRO ===
+Running single problem: QAFIRO
+Status:     Optimal
+Variables:  32
+Constraints:59
+Iterations: 13
+Objective:  -1.590754e0
+Final μ:    3.711153e-9
+Time:       0.460 ms
+=== S268 ===
+Running single problem: S268
+Status:     Optimal
+Variables:  5
+Constraints:5
+Iterations: 14
+Objective:  -1.446300e4
+Final μ:    1.916494e-13
+Time:       0.281 ms
+=== TAME ===
+Running single problem: TAME
+Status:     Optimal
+Variables:  2
+Constraints:3
+Iterations: 5
+Objective:  0.000000e0
+Final μ:    9.874708e-9
+Time:       0.127 ms

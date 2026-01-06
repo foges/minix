@@ -21,7 +21,9 @@
 //!   τ ≥ 0, κ ≥ 0, τ κ = 0
 
 use crate::cones::ConeKernel;
-use crate::problem::ProblemData;
+use crate::postsolve::PostsolveMap;
+use crate::presolve::ruiz::RuizScaling;
+use crate::problem::{ProblemData, WarmStart};
 
 /// HSDE state variables.
 #[derive(Debug, Clone)]
@@ -192,6 +194,104 @@ impl HsdeState {
         // τ = κ = 1
         self.tau = 1.0;
         self.kappa = 1.0;
+    }
+
+    pub fn apply_warm_start(
+        &mut self,
+        warm: &WarmStart,
+        postsolve: &PostsolveMap,
+        scaling: &RuizScaling,
+        cones: &[Box<dyn ConeKernel>],
+    ) {
+        if let Some(tau) = warm.tau {
+            if tau.is_finite() && tau > 0.0 {
+                self.tau = tau;
+            }
+        }
+        if let Some(kappa) = warm.kappa {
+            if kappa.is_finite() && kappa > 0.0 {
+                self.kappa = kappa;
+            }
+        }
+
+        if let Some(x_full) = warm.x.as_ref() {
+            let x_reduced = if x_full.len() == postsolve.orig_n() {
+                postsolve.reduce_x(x_full)
+            } else if x_full.len() == self.x.len() {
+                x_full.clone()
+            } else {
+                Vec::new()
+            };
+            if x_reduced.len() == self.x.len() {
+                for i in 0..self.x.len() {
+                    self.x[i] = x_reduced[i] / scaling.col_scale[i];
+                }
+            }
+        }
+
+        if let Some(s_full) = warm.s.as_ref() {
+            let s_reduced = postsolve.reduce_s(s_full, self.s.len());
+            if s_reduced.len() == self.s.len() {
+                for i in 0..self.s.len() {
+                    self.s[i] = s_reduced[i] * scaling.row_scale[i];
+                }
+            }
+        }
+
+        if let Some(z_full) = warm.z.as_ref() {
+            let z_reduced = postsolve.reduce_z(z_full, self.z.len());
+            if z_reduced.len() == self.z.len() {
+                for i in 0..self.z.len() {
+                    self.z[i] = z_reduced[i] / (scaling.cost_scale * scaling.row_scale[i]);
+                }
+            }
+        }
+
+        if self.tau.is_finite() && self.tau > 0.0 {
+            for i in 0..self.x.len() {
+                self.xi[i] = self.x[i] / self.tau;
+            }
+        }
+
+        self.push_to_interior(cones, 1e-6);
+    }
+
+    /// Normalize τ (and κ) if τ drifts outside [lo, hi].
+    ///
+    /// HSDE embedding can cause τ to grow/shrink over iterations, which
+    /// leads to poor conditioning. This rescales all homogeneous coordinates
+    /// so that τ ≈ 1, maintaining the solution (x/τ, s/τ, z/τ).
+    ///
+    /// Returns true if normalization was applied.
+    pub fn normalize_tau_if_needed(&mut self, lo: f64, hi: f64) -> bool {
+        let tau = self.tau;
+        if !tau.is_finite() || tau <= 0.0 {
+            return false;
+        }
+        if tau >= lo && tau <= hi {
+            return false;
+        }
+
+        // Scale by 1/tau so that tau becomes 1.
+        // This keeps ξ = x/τ stable and prevents HSDE drift.
+        let scale = 1.0 / tau;
+
+        for v in &mut self.x {
+            *v *= scale;
+        }
+        for v in &mut self.z {
+            *v *= scale;
+        }
+        for v in &mut self.s {
+            *v *= scale;
+        }
+        // Note: ξ = x/τ stays unchanged since both x and τ are scaled by the same factor.
+        // After scaling: x_new/τ_new = (x_old * scale)/(τ_old * scale) = x_old/τ_old = ξ_old.
+
+        self.tau *= scale; // becomes 1
+        self.kappa *= scale; // maintain homogeneity
+
+        true
     }
 }
 

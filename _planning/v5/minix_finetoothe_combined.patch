@@ -1,0 +1,401 @@
+--- a/solver-core/src/ipm/predcorr.rs
++++ b/solver-core/src/ipm/predcorr.rs
+@@ -22,6 +22,98 @@
+     })
+ }
+ 
++
++fn min_slice(v: &[f64]) -> f64 {
++    v.iter().copied().fold(f64::INFINITY, f64::min)
++}
++
++fn all_finite(v: &[f64]) -> bool {
++    v.iter().all(|x| x.is_finite())
++}
++
++fn cone_type_name(cone: &dyn ConeKernel) -> &'static str {
++    let any = cone as &dyn Any;
++    if any.is::<NonNegCone>() {
++        "NonNeg"
++    } else if any.is::<SocCone>() {
++        "SOC"
++    } else {
++        "Other"
++    }
++}
++
++fn check_state_interior_for_step(
++    state: &HsdeState,
++    cones: &[Box<dyn ConeKernel>],
++) -> Result<(), String> {
++    if !state.tau.is_finite() || state.tau <= 0.0 {
++        return Err(format!("tau is not positive finite (tau={})", state.tau));
++    }
++    if !state.kappa.is_finite() || state.kappa <= 0.0 {
++        return Err(format!("kappa is not positive finite (kappa={})", state.kappa));
++    }
++    if !all_finite(&state.x) {
++        return Err("x contains non-finite values".to_string());
++    }
++    if !all_finite(&state.s) {
++        return Err("s contains non-finite values".to_string());
++    }
++    if !all_finite(&state.z) {
++        return Err("z contains non-finite values".to_string());
++    }
++
++    let mut offset = 0usize;
++    for cone in cones.iter() {
++        let dim = cone.dim();
++        if dim == 0 {
++            continue;
++        }
++        let s_slice = &state.s[offset..offset + dim];
++        let z_slice = &state.z[offset..offset + dim];
++
++        if cone.barrier_degree() == 0 {
++            offset += dim;
++            continue;
++        }
++
++        let any = cone.as_ref() as &dyn Any;
++        if let Some(nonneg) = any.downcast_ref::<NonNegCone>() {
++            if !nonneg.is_interior_scaling(s_slice) || !nonneg.is_interior_scaling(z_slice) {
++                return Err(format!(
++                    "NonNeg cone not interior (offset={}, dim={}, s_min={:.3e}, z_min={:.3e})",
++                    offset,
++                    dim,
++                    min_slice(s_slice),
++                    min_slice(z_slice)
++                ));
++            }
++        } else if let Some(soc) = any.downcast_ref::<SocCone>() {
++            if !soc.is_interior_scaling(s_slice) || !soc.is_interior_scaling(z_slice) {
++                return Err(format!(
++                    "SOC cone not interior (offset={}, dim={}, s_min={:.3e}, z_min={:.3e})",
++                    offset,
++                    dim,
++                    min_slice(s_slice),
++                    min_slice(z_slice)
++                ));
++            }
++        } else {
++            if !cone.is_interior_primal(s_slice) || !cone.is_interior_dual(z_slice) {
++                return Err(format!(
++                    "{} cone not interior (offset={}, dim={})",
++                    cone_type_name(cone.as_ref()),
++                    offset,
++                    dim
++                ));
++            }
++        }
++
++        offset += dim;
++    }
++
++    Ok(())
++}
++
+ /// Predictor-corrector step result.
+ #[derive(Debug)]
+ pub struct StepResult {
+@@ -219,6 +311,8 @@
+ ) -> Result<StepResult, String> {
+     let n = prob.num_vars();
+     let m = prob.num_constraints();
++    check_state_interior_for_step(state, cones)?;
++
+ 
+     assert_eq!(neg_q.len(), n, "neg_q must have length n");
+ 
+@@ -227,8 +321,6 @@
+     // ======================================================================
+     let mut scaling: Vec<ScalingBlock> = Vec::new();
+     let mut offset = 0;
+-    let mut nt_fallbacks: usize = 0;
+-
+     // Track minimum s and z values for adaptive regularization
+     let mut s_min = f64::INFINITY;
+     let mut z_min = f64::INFINITY;
+@@ -261,20 +353,33 @@
+         // Compute NT scaling based on cone type
+         let scale = match nt::compute_nt_scaling(s, z, cone.as_ref()) {
+             Ok(scale) => scale,
+-            Err(_) => {
+-                nt_fallbacks += 1;
+-                let d: Vec<f64> = s
+-                    .iter()
+-                    .zip(z.iter())
+-                    .map(|(si, zi)| {
+-                        let denom = zi.max(1e-300);
+-                        (si / denom).clamp(1e-18, 1e18)
+-                    })
+-                    .collect();
+-                ScalingBlock::Diagonal { d }
++            Err(e) => {
++                let s_block_min = min_slice(s);
++                let z_block_min = min_slice(z);
++                if diagnostics_enabled() {
++                    eprintln!(
++                        "nt scaling error: cone={}, offset={}, dim={}, s_min={:.3e}, z_min={:.3e}: {}",
++                        cone_type_name(cone.as_ref()),
++                        offset,
++                        dim,
++                        s_block_min,
++                        z_block_min,
++                        e
++                    );
++                }
++                return Err(format!(
++                    "NT scaling failed for cone={} (offset={}, dim={}, s_min={:.3e}, z_min={:.3e}): {}",
++                    cone_type_name(cone.as_ref()),
++                    offset,
++                    dim,
++                    s_block_min,
++                    z_block_min,
++                    e
++                ));
+             }
+         };
+ 
++
+         scaling.push(scale);
+         offset += dim;
+     }
+@@ -294,16 +399,6 @@
+         0.0
+     };
+ 
+-    if diagnostics_enabled() && nt_fallbacks > 0 {
+-        eprintln!(
+-            "nt scaling fallback: blocks={}, s_min={:.3e}, z_min={:.3e}, mu={:.3e}, extra_reg={:.3e}",
+-            nt_fallbacks,
+-            s_min,
+-            z_min,
+-            mu,
+-            extra_reg,
+-        );
+-    }
+ 
+     if settings.verbose && extra_reg > 0.0 {
+         eprintln!(
+@@ -911,9 +1006,9 @@
+     fraction: f64,
+ ) -> f64 {
+     let mut alpha = f64::INFINITY;
+-    let mut offset = 0;
++    let mut offset = 0usize;
+ 
+-    for cone in cones {
++    for cone in cones.iter() {
+         let dim = cone.dim();
+         if dim == 0 {
+             continue;
+@@ -924,134 +1019,37 @@
+         let z_slice = &z[offset..offset + dim];
+         let dz_slice = &dz[offset..offset + dim];
+ 
+-        // Primal step-to-boundary
+-        let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
+-        if alpha_p > 0.0 && alpha_p < alpha {
+-            alpha = alpha_p;
++        // Barrier-free cones (e.g., Zero) don't constrain step size.
++        if cone.barrier_degree() == 0 {
++            offset += dim;
++            continue;
++        }
++
++        // Non-finite directions -> safest possible step is 0.0.
++        if !all_finite(ds_slice) || !all_finite(dz_slice) {
++            return 0.0;
+         }
+ 
+-        // Dual step-to-boundary
++        let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
+         let alpha_d = cone.step_to_boundary_dual(z_slice, dz_slice);
+-        if alpha_d > 0.0 && alpha_d < alpha {
+-            alpha = alpha_d;
++
++        if alpha_p.is_finite() {
++            alpha = alpha.min(alpha_p.max(0.0));
++        }
++        if alpha_d.is_finite() {
++            alpha = alpha.min(alpha_d.max(0.0));
++        }
++
++        if alpha == 0.0 {
++            break;
+         }
+ 
+         offset += dim;
+     }
+ 
+-    // Apply fraction-to-boundary safety factor and cap at 1.0
+-    // (Newton step should never be > 1)
+     if alpha.is_finite() {
+         (fraction * alpha).min(1.0)
+     } else {
+         1.0
+     }
+ }
+-
+-/// Compute centering parameter σ.
+-///
+-/// Uses the robust formula from design doc §7.2:
+-///   σ = (1 - α_aff)³
+-///
+-/// This is simple, stable, and works well in practice.
+-/// It gives σ ≈ 0 when affine step is large (aggressive progress)
+-/// and σ ≈ 1 when affine step is small (conservative centering).
+-fn compute_mu_aff(
+-    state: &HsdeState,
+-    ds_aff: &[f64],
+-    dz_aff: &[f64],
+-    dtau_aff: f64,
+-    dkappa_aff: f64,
+-    alpha_aff: f64,
+-    barrier_degree: usize,
+-) -> f64 {
+-    if barrier_degree == 0 {
+-        return 0.0;
+-    }
+-
+-    let tau_aff = state.tau + alpha_aff * dtau_aff;
+-    let kappa_aff = state.kappa + alpha_aff * dkappa_aff;
+-    if !tau_aff.is_finite() || !kappa_aff.is_finite() || tau_aff <= 0.0 || kappa_aff <= 0.0 {
+-        return f64::NAN;
+-    }
+-
+-    let mut s_dot_z = 0.0;
+-    for i in 0..state.s.len() {
+-        let s_i = state.s[i] + alpha_aff * ds_aff[i];
+-        let z_i = state.z[i] + alpha_aff * dz_aff[i];
+-        s_dot_z += s_i * z_i;
+-    }
+-
+-    (s_dot_z + tau_aff * kappa_aff) / (barrier_degree as f64 + 1.0)
+-}
+-
+-/// Compute centering parameter σ using μ_aff when reliable.
+-fn compute_centering_parameter(
+-    alpha_aff: f64,
+-    mu: f64,
+-    mu_aff: f64,
+-    barrier_degree: usize,
+-) -> f64 {
+-    // Special case: no barrier (only Zero cones)
+-    if barrier_degree == 0 {
+-        return 0.0;
+-    }
+-
+-    let sigma_min = 1e-3;
+-    let sigma_max = 0.999;
+-    let sigma = if mu_aff.is_finite() && mu_aff > 0.0 && mu.is_finite() && mu > 0.0 {
+-        let ratio = (mu_aff / mu).max(0.0);
+-        ratio.powi(3)
+-    } else {
+-        (1.0 - alpha_aff).powi(3)
+-    };
+-
+-    sigma.max(sigma_min).min(sigma_max)
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn test_compute_centering_parameter() {
+-        // If μ_aff << μ, σ should clip to the lower bound.
+-        let sigma = compute_centering_parameter(
+-            0.99, // large alpha_aff (good progress)
+-            1.0,  // current mu
+-            1e-6, // very small mu_aff
+-            3,
+-        );
+-        assert!(
+-            sigma >= 1e-3 && sigma <= 1.1e-3,
+-            "σ should clip near 1e-3 for tiny mu_aff, got {}",
+-            sigma
+-        );
+-
+-        // Test that σ → 1 when affine step makes poor progress
+-        let sigma = compute_centering_parameter(
+-            0.01, // small alpha_aff (poor progress)
+-            1.0,  // current mu
+-            1.0,  // mu_aff ~ mu
+-            3,
+-        );
+-        assert!(sigma > 0.9, "σ should be large for small affine step, got {}", sigma);
+-    }
+-
+-    #[test]
+-    fn test_compute_step_size() {
+-        let cones: Vec<Box<dyn ConeKernel>> = vec![Box::new(NonNegCone::new(2))];
+-
+-        // Test that step size is limited by cone boundary
+-        let s = vec![1.0, 2.0];
+-        let ds = vec![-0.5, -1.0]; // Would reach boundary at α = 2 for first component
+-        let z = vec![1.0, 1.0];
+-        let dz = vec![-0.5, -0.5]; // Would reach boundary at α = 2
+-
+-        let alpha = compute_step_size(&s, &ds, &z, &dz, &cones, 1.0);
+-
+-        // Should be at most 2.0 (when s[0] + 2*(-0.5) = 0)
+-        assert!(alpha <= 2.0, "Step size should be limited by cone boundary");
+-        assert!(alpha > 0.0, "Step size should be positive");
+-    }
+-}
+--- a/solver-core/src/scaling/nt.rs
++++ b/solver-core/src/scaling/nt.rs
+@@ -50,16 +50,19 @@
+         });
+     }
+ 
+-    if s.iter().any(|&x| !x.is_finite() || x <= 0.0)
+-        || z.iter().any(|&x| !x.is_finite() || x <= 0.0)
+-    {
++    if !cone.is_interior_scaling(s) || !cone.is_interior_scaling(z) {
+         return Err(NtScalingError::NotInterior);
+     }
+ 
+     // NT scaling for nonnegative orthant: H = diag(s/z)
+     // This satisfies: H*z = s and H^{-1}*s = z.
+-    let d: Vec<f64> = s.iter().zip(z.iter())
+-        .map(|(si, zi)| si / zi)
++    //
++    // The ratio can overflow/underflow on extreme instances, so clamp it to
++    // a numerically safe range.
++    let d: Vec<f64> = s
++        .iter()
++        .zip(z.iter())
++        .map(|(si, zi)| (si / zi).clamp(1e-18, 1e18))
+         .collect();
+ 
+     Ok(ScalingBlock::Diagonal { d })
+--- a/solver-bench/src/qps.rs
++++ b/solver-bench/src/qps.rs
+@@ -182,13 +182,21 @@
+         // Build sparse matrices
+         let a = sparse::from_triplets(total_constraints, self.n, triplets);
+ 
++        // Scale objective by sense.
++        //
++        // Note: For quadratic objectives, the QP form is (1/2) x'P x + q'x.
++        // Converting MAX to MIN requires negating *both* q and P.
+         let p = if self.p_triplets.is_empty() {
+             None
+         } else {
+-            Some(sparse::from_triplets(self.n, self.n, self.p_triplets.clone()))
++            let p_triplets: Vec<(usize, usize, f64)> = self
++                .p_triplets
++                .iter()
++                .map(|&(i, j, v)| (i, j, v * self.obj_sense))
++                .collect();
++            Some(sparse::from_triplets(self.n, self.n, p_triplets))
+         };
+ 
+-        // Scale objective by sense
+         let q: Vec<f64> = self.q.iter().map(|&v| v * self.obj_sense).collect();
+ 
+         // Build cone specification

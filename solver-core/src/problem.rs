@@ -35,7 +35,7 @@ pub type SparseCsc = sprs::CsMatI<f64, usize>;
 /// - A: m × n
 /// - b: m
 /// - s, z: m (partitioned by cones)
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[allow(non_snake_case)]  // P and A are standard mathematical notation
 pub struct ProblemData {
     /// Quadratic cost matrix P (n × n, PSD, upper triangle in CSC).
@@ -120,6 +120,21 @@ pub enum VarType {
     Binary,
 }
 
+/// Optional warm-start data (unscaled, original problem coordinates).
+#[derive(Debug, Clone, Default)]
+pub struct WarmStart {
+    /// Primal variables x (length n)
+    pub x: Option<Vec<f64>>,
+    /// Slack variables s (length m)
+    pub s: Option<Vec<f64>>,
+    /// Dual variables z (length m)
+    pub z: Option<Vec<f64>>,
+    /// Homogenization variable tau (optional)
+    pub tau: Option<f64>,
+    /// Dual homogenization variable kappa (optional)
+    pub kappa: Option<f64>,
+}
+
 /// Solver settings and parameters.
 #[derive(Debug, Clone)]
 pub struct SolverSettings {
@@ -156,6 +171,9 @@ pub struct SolverSettings {
     /// Iterative refinement steps for KKT solves
     pub kkt_refine_iters: usize,
 
+    /// Minimum feasibility weight for combined-step RHS (0 = pure (1-σ))
+    pub feas_weight_floor: f64,
+
     /// Multiple centrality correction iterations
     pub mcc_iters: usize,
 
@@ -180,6 +198,9 @@ pub struct SolverSettings {
     /// Apply SOC centrality only when μ >= threshold
     pub soc_centrality_mu_threshold: f64,
 
+    /// Maximum centering parameter σ (cap for combined step)
+    pub sigma_max: f64,
+
     /// Max backtracking steps for centrality line search
     pub line_search_max_iters: usize,
 
@@ -197,6 +218,9 @@ pub struct SolverSettings {
 
     /// Enable GPU acceleration (future)
     pub enable_gpu: bool,
+
+    /// Optional warm-start values for repeated solves
+    pub warm_start: Option<WarmStart>,
 }
 
 impl Default for SolverSettings {
@@ -209,10 +233,11 @@ impl Default for SolverSettings {
             tol_gap: 1e-8,
             tol_infeas: 1e-8,
             ruiz_iters: 10,
-            static_reg: 1e-9,
-            dynamic_reg_min_pivot: 1e-7,
+            static_reg: 1e-8,
+            dynamic_reg_min_pivot: 1e-13,
             threads: 0,  // Auto-detect
-            kkt_refine_iters: 1,
+            kkt_refine_iters: 2,
+            feas_weight_floor: 0.05,
             mcc_iters: 0,
             centrality_beta: 0.1,
             centrality_gamma: 10.0,
@@ -221,12 +246,14 @@ impl Default for SolverSettings {
             soc_centrality_use_upper: true,
             soc_centrality_use_jordan: true,
             soc_centrality_mu_threshold: 0.0,
+            sigma_max: 0.999,
             line_search_max_iters: 0,
             enable_soc_centrality: true,
             enable_soc_adaptive_reg: true,
             soc_adaptive_reg_scale: 1.0,
             seed: 0,
             enable_gpu: false,
+            warm_start: None,
         }
     }
 }
@@ -394,6 +421,12 @@ impl ProblemData {
         // Validate individual cones
         for cone in &self.cones {
             cone.validate()?;
+        }
+        // POW cones not yet supported
+        if self.cones.iter().any(|cone| {
+            matches!(cone, ConeSpec::Pow { .. })
+        }) {
+            return Err("POW cones are not supported yet".to_string());
         }
 
         // Check variable bounds if present
