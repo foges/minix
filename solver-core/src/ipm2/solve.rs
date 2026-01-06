@@ -11,8 +11,10 @@ use crate::ipm::hsde::{HsdeResiduals, HsdeState, compute_mu, compute_residuals};
 use crate::ipm::termination::TerminationCriteria;
 use crate::ipm2::{
     DiagnosticsConfig, IpmWorkspace, PerfSection, PerfTimers, RegularizationPolicy, SolveMode,
-    StallDetector, compute_unscaled_metrics, polish_nonneg_active_set,
+    StallDetector, compute_unscaled_metrics, polish_nonneg_active_set, polish_primal_projection,
+    polish_primal_and_dual,
 };
+use crate::ipm2::polish::PolishResult;
 use crate::ipm2::predcorr::predictor_corrector_step_in_place;
 use crate::linalg::kkt_trait::KktSolverTrait;
 use crate::linalg::unified_kkt::UnifiedKktSolver;
@@ -309,6 +311,7 @@ pub fn solve_ipm2(
                 // (we'll only accept it if the gap actually improves)
                 let gap_close = metrics.gap_rel <= criteria.tol_gap_rel * 1000.0;
 
+                // Case 1: Dual stuck - try dual polish (existing logic)
                 if primal_ok && (gap_ok || gap_close) && !dual_ok && iter >= 10 {
                     // Extract unscaled solution for polish
                     let x_for_polish: Vec<f64> = if state.tau > 1e-8 {
@@ -372,6 +375,85 @@ pub fn solve_ipm2(
                                     iter, metrics.rel_d, dual_rel_after, metrics.rel_p, primal_rel_after, metrics.gap_rel, gap_rel_after);
                             }
                             // Store polished solution and mark as optimal
+                            early_polish_result = Some((polished, polish_metrics));
+                            term_status = Some(SolveStatus::Optimal);
+                        }
+                    }
+                }
+
+                // Case 2: Primal stuck - try primal projection polish
+                // When dual is excellent but primal is stuck (YAO-like problems)
+                if !primal_ok && dual_ok && gap_ok && iter >= 20 && stall.primal_stalling() {
+                    let x_for_polish: Vec<f64> = if state.tau > 1e-8 {
+                        let x_scaled: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
+                        scaling.unscale_x(&x_scaled)
+                    } else {
+                        vec![0.0; n]
+                    };
+                    let s_for_polish: Vec<f64> = if state.tau > 1e-8 {
+                        let s_scaled: Vec<f64> = state.s.iter().map(|si| si / state.tau).collect();
+                        scaling.unscale_s(&s_scaled)
+                    } else {
+                        vec![0.0; m]
+                    };
+                    let z_for_polish: Vec<f64> = if state.tau > 1e-8 {
+                        let z_scaled: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
+                        scaling.unscale_z(&z_scaled)
+                    } else {
+                        vec![0.0; m]
+                    };
+
+                    // Compute primal residual for projection
+                    let m_orig = orig_prob_bounds.num_constraints();
+                    let n_orig = orig_prob_bounds.num_vars();
+                    let mut rp = vec![0.0; m_orig];
+                    for i in 0..m_orig {
+                        rp[i] = -orig_prob_bounds.b[i] + s_for_polish[i];
+                    }
+                    for (&val, (row, col)) in orig_prob_bounds.A.iter() {
+                        if col < x_for_polish.len() {
+                            rp[row] += val * x_for_polish[col];
+                        }
+                    }
+
+                    if diag.enabled {
+                        eprintln!("early primal polish check at iter {}: primal_ok={} dual_ok={} gap_ok={} primal_stalling={}",
+                            iter, primal_ok, dual_ok, gap_ok, stall.primal_stalling());
+                    }
+
+                    // Use combined primal+dual polish for early termination check
+                    if let Some(polished) = polish_primal_and_dual(
+                        &orig_prob_bounds,
+                        &x_for_polish,
+                        &s_for_polish,
+                        &z_for_polish,
+                        &rp,
+                        criteria.tol_feas,
+                    ) {
+                        let mut rp_polish = vec![0.0; m_orig];
+                        let mut rd_polish = vec![0.0; n_orig];
+                        let mut px_polish = vec![0.0; n_orig];
+                        let polish_metrics = compute_unscaled_metrics(
+                            &orig_prob_bounds.A,
+                            orig_prob_bounds.P.as_ref(),
+                            &orig_prob_bounds.q,
+                            &orig_prob_bounds.b,
+                            &polished.x,
+                            &polished.s,
+                            &polished.z,
+                            &mut rp_polish,
+                            &mut rd_polish,
+                            &mut px_polish,
+                        );
+
+                        // Accept if this achieves optimality
+                        if is_optimal(&polish_metrics, &criteria) {
+                            if diag.enabled {
+                                eprintln!(
+                                    "early primal polish SUCCESS at iter {}: rel_p={:.3e}->{:.3e}, rel_d={:.3e}->{:.3e}",
+                                    iter, metrics.rel_p, polish_metrics.rel_p, metrics.rel_d, polish_metrics.rel_d
+                                );
+                            }
                             early_polish_result = Some((polished, polish_metrics));
                             term_status = Some(SolveStatus::Optimal);
                         }
@@ -647,6 +729,90 @@ pub fn solve_ipm2(
                     eprintln!("polish: rejected (primal_ok={} [{:.3e} vs {:.3e}], dual_improved={} [{:.3e} vs {:.3e}])",
                         primal_ok_after, primal_rel_after, criteria.tol_feas * 100.0,
                         dual_improved, dual_rel_after, dual_rel_before * 0.1);
+                }
+            }
+        }
+
+        // Primal projection polish: when dual/gap are good but primal is stuck
+        // This is the opposite case - project x onto active violating constraints
+        // Use combined primal+dual polish to also adjust z for the dual degradation
+        if !primal_ok && dual_ok && gap_ok {
+            if diag.enabled {
+                eprintln!("attempting combined primal+dual polish...");
+            }
+
+            // Compute primal residual rp = Ax + s - b for the projection
+            let m_orig = orig_prob_bounds.num_constraints();
+            let n_orig = orig_prob_bounds.num_vars();
+            let mut rp = vec![0.0; m_orig];
+            for i in 0..m_orig {
+                rp[i] = -orig_prob_bounds.b[i] + s[i];
+            }
+            for (&val, (row, col)) in orig_prob_bounds.A.iter() {
+                if col < x.len() {
+                    rp[row] += val * x[col];
+                }
+            }
+
+            // First try the combined primal+dual polish
+            if let Some(polished) = polish_primal_and_dual(
+                &orig_prob_bounds,
+                &x,
+                &s,
+                &z,
+                &rp,
+                criteria.tol_feas,
+            ) {
+                let mut rp_polish = vec![0.0; m_orig];
+                let mut rd_polish = vec![0.0; n_orig];
+                let mut px_polish = vec![0.0; n_orig];
+                let polish_metrics = compute_unscaled_metrics(
+                    &orig_prob_bounds.A,
+                    orig_prob_bounds.P.as_ref(),
+                    &orig_prob_bounds.q,
+                    &orig_prob_bounds.b,
+                    &polished.x,
+                    &polished.s,
+                    &polished.z,
+                    &mut rp_polish,
+                    &mut rd_polish,
+                    &mut px_polish,
+                );
+
+                if diag.enabled {
+                    eprintln!("combined polish result: rel_p={:.3e}->{:.3e} rel_d={:.3e}->{:.3e} gap_rel={:.3e}->{:.3e}",
+                        final_metrics.rel_p, polish_metrics.rel_p,
+                        final_metrics.rel_d, polish_metrics.rel_d,
+                        final_metrics.gap_rel, polish_metrics.gap_rel);
+                }
+
+                // Check if polish achieves optimality
+                if is_optimal(&polish_metrics, &criteria) {
+                    if diag.enabled {
+                        eprintln!("combined polish: achieves OPTIMAL!");
+                    }
+                    x = polished.x;
+                    s = polished.s;
+                    z = polished.z;
+                    final_metrics = polish_metrics;
+                    status = SolveStatus::Optimal;
+                } else {
+                    // Accept if both primal and dual improved
+                    let worst_before = final_metrics.rel_p.max(final_metrics.rel_d);
+                    let worst_after = polish_metrics.rel_p.max(polish_metrics.rel_d);
+
+                    if worst_after < worst_before {
+                        if diag.enabled {
+                            eprintln!("combined polish: accepted (worst {:.3e}->{:.3e})",
+                                worst_before, worst_after);
+                        }
+                        x = polished.x;
+                        s = polished.s;
+                        z = polished.z;
+                        final_metrics = polish_metrics;
+                    } else if diag.enabled {
+                        eprintln!("combined polish: rejected (no improvement)");
+                    }
                 }
             }
         }
