@@ -65,10 +65,14 @@ impl StallDetector {
             self.alpha_small_count = 0;
         }
 
-        // Dual residual stall
+        // Dual residual stall: count as stalling if either:
+        // 1. The improvement is very small (< threshold), OR
+        // 2. The residual is getting WORSE (negative improvement)
+        // This catches both "stuck" and "degrading" cases (e.g., QSHIP family)
         if self.last_dual_res.is_finite() && dual_res.is_finite() {
             let rel_impr = (self.last_dual_res - dual_res) / self.last_dual_res.max(1e-18);
-            if rel_impr.abs() < self.dual_stall_rel_impr {
+            // Stalling if improvement < threshold (includes negative = getting worse)
+            if rel_impr < self.dual_stall_rel_impr {
                 self.dual_stall_count += 1;
             } else {
                 self.dual_stall_count = 0;
@@ -120,5 +124,11 @@ impl StallDetector {
     /// when μ is already tiny). This indicates potential need for σ anti-stall cap.
     pub fn primal_stalling(&self) -> bool {
         self.primal_stall_count >= self.primal_stall_iters
+    }
+
+    /// Returns true if dual residual is stalling (not improving for several iterations).
+    /// This indicates potential need for σ anti-stall cap.
+    pub fn dual_stalling(&self) -> bool {
+        self.dual_stall_count >= self.dual_stall_iters
     }
 }

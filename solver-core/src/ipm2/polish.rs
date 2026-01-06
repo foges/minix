@@ -132,12 +132,19 @@ pub fn polish_nonneg_active_set(
         eprintln!("polish: candidate active set size={}", active.len());
     }
 
-    // Cap active set size: a huge active set makes the polish KKT ill-posed.
-    // Keep the most "active" constraints by multiplier magnitude.
-    let max_active = n.max(64);
+    // Cap active set size: the KKT system has size (n + m_eq) where m_eq = eq_rows + active.
+    // For the factorization to succeed, we need m_eq <= n (otherwise overdetermined).
+    // Reserve some slack for numerical stability: cap total constraints to 0.95*n.
+    let max_total_constraints = ((n as f64) * 0.95) as usize;
+    let max_active = if eq_rows.len() >= max_total_constraints {
+        0  // Too many equality rows already
+    } else {
+        max_total_constraints - eq_rows.len()
+    };
     if active.len() > max_active {
         if diag_enabled {
-            eprintln!("polish: capping active set from {} to {}", active.len(), max_active);
+            eprintln!("polish: capping active set from {} to {} (eq_rows={}, n={})",
+                active.len(), max_active, eq_rows.len(), n);
         }
         active.sort_by(|&a, &b| z0[b].abs().partial_cmp(&z0[a].abs()).unwrap());
         active.truncate(max_active);
@@ -628,6 +635,152 @@ pub fn polish_primal_and_dual(
     Some(PolishResult {
         x: primal_result.x,
         s: primal_result.s,
+        z,
+    })
+}
+
+/// Direct dual polish: keep x/s fixed, find z that minimizes ||A^T z - (Px + q)||.
+///
+/// For dual-stuck problems (QSHIP family), the issue is that the KKT system becomes
+/// ill-conditioned and z drifts. This function computes z directly from the dual
+/// residual equation rd = Px + q - A^T z = 0, i.e., A^T z = Px + q.
+///
+/// This is a least-squares problem: z = argmin ||A^T z - target||² where target = Px + q.
+/// Solution: z = A (A^T A)^{-1} target (using normal equations on A^T).
+pub fn polish_dual_only(
+    prob: &ProblemData,
+    x0: &[f64],
+    s0: &[f64],
+    _z0: &[f64],
+    _settings: &SolverSettings,
+) -> Option<PolishResult> {
+    let diag_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    if x0.len() != n || s0.len() != m {
+        return None;
+    }
+
+    // Only handle Zero + NonNeg cones
+    if prob.cones.iter().any(|c| !matches!(c, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. })) {
+        if diag_enabled {
+            eprintln!("dual_only_polish: unsupported cones");
+        }
+        return None;
+    }
+
+    // Compute target = Px + q (what A^T z should equal for dual feasibility)
+    let mut target = prob.q.clone();
+    if let Some(ref p) = prob.P {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    target[row] += val * x0[col];
+                }
+            }
+        }
+    }
+
+    // We want A^T z = target, where A is m×n and z is m×1.
+    // This means we're solving for z in the equation: A^T z = target
+    // Let B = A^T (n×m matrix). We want: B z = target
+    // Solution via normal equations: z = B^T (B B^T)^{-1} target = A (A^T A)^{-1} target
+    //
+    // But A^T A is n×n (can be large). For now, limit to smaller problems.
+    if n > 1000 {
+        if diag_enabled {
+            eprintln!("dual_only_polish: n={} too large", n);
+        }
+        return None;
+    }
+
+    // Build A^T A (n×n dense)
+    let mut ata = vec![vec![0.0; n]; n];
+    for col in 0..n {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            for (row, &val) in col_view.iter() {
+                // This contributes val to column col of A
+                // A^T A [i][j] = sum_k A[k][i] * A[k][j]
+                // For each (row, col) pair with value val, we add to ata[col][?]
+                // Need to iterate all entries again for the second factor
+                for col2 in 0..n {
+                    if let Some(col2_view) = prob.A.outer_view(col2) {
+                        for (row2, &val2) in col2_view.iter() {
+                            if row2 == row {
+                                ata[col][col2] += val * val2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add regularization
+    for i in 0..n {
+        ata[i][i] += 1e-10;
+    }
+
+    // Solve (A^T A) w = target for w
+    let w = match cholesky_solve(&ata, &target) {
+        Some(w) => w,
+        None => {
+            if diag_enabled {
+                eprintln!("dual_only_polish: Cholesky failed");
+            }
+            return None;
+        }
+    };
+
+    // z = A w
+    let mut z = vec![0.0; m];
+    for col in 0..n {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            for (row, &val) in col_view.iter() {
+                z[row] += val * w[col];
+            }
+        }
+    }
+
+    // Project z to satisfy cone constraints
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match *cone {
+            ConeSpec::Zero { dim } => {
+                // Zero cone: z is free (no projection needed)
+                offset += dim;
+            }
+            ConeSpec::NonNeg { dim } => {
+                // NonNeg cone: z must be >= 0
+                for i in offset..offset + dim {
+                    z[i] = z[i].max(0.0);
+                }
+                offset += dim;
+            }
+            _ => {
+                offset += cone.dim();
+            }
+        }
+    }
+
+    if diag_enabled {
+        // Compute resulting dual residual
+        let mut rd = target.clone();
+        for col in 0..n {
+            if let Some(col_view) = prob.A.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    rd[col] -= val * z[row];
+                }
+            }
+        }
+        let rd_inf = inf_norm(&rd);
+        eprintln!("dual_only_polish: |rd| after = {:.3e}", rd_inf);
+    }
+
+    Some(PolishResult {
+        x: x0.to_vec(),
+        s: s0.to_vec(),
         z,
     })
 }

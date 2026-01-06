@@ -215,6 +215,17 @@ pub fn solve_ipm2(
             }
         }
 
+        // Dual anti-stall: when dual is stalling, use a much lower σ cap to push
+        // more aggressively toward the boundary. For QSHIP-family problems, the dual
+        // drifts because the KKT is ill-conditioned; smaller σ means less centering
+        // and more progress toward the optimal face.
+        if stall.dual_stalling() {
+            step_settings.sigma_max = step_settings.sigma_max.min(0.1);
+            if diag.should_log(iter) {
+                eprintln!("dual anti-stall: capping sigma_max to 0.1");
+            }
+        }
+
         if matches!(solve_mode, SolveMode::StallRecovery) {
             step_settings.feas_weight_floor = 0.0;
             step_settings.sigma_max = 0.999;
@@ -313,29 +324,29 @@ pub fn solve_ipm2(
 
                 // Case 1: Dual stuck - try dual polish (existing logic)
                 if primal_ok && (gap_ok || gap_close) && !dual_ok && iter >= 10 {
-                    // Extract unscaled solution for polish
-                    let x_for_polish: Vec<f64> = if state.tau > 1e-8 {
-                        let x_scaled: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
-                        scaling.unscale_x(&x_scaled)
-                    } else {
-                        vec![0.0; n]
-                    };
-                    let s_for_polish: Vec<f64> = if state.tau > 1e-8 {
-                        let s_scaled: Vec<f64> = state.s.iter().map(|si| si / state.tau).collect();
-                        scaling.unscale_s(&s_scaled)
-                    } else {
-                        vec![0.0; m]
-                    };
-                    let z_for_polish: Vec<f64> = if state.tau > 1e-8 {
-                        let z_scaled: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
-                        scaling.unscale_z(&z_scaled)
-                    } else {
-                        vec![0.0; m]
-                    };
+                    // Extract unscaled solution and expand to original dimensions via postsolve
+                    // This is necessary because singleton elimination changes vector dimensions
+                    let inv_tau = if state.tau > 1e-8 { 1.0 / state.tau } else { 0.0 };
+
+                    // Unscale to x_bar, s_bar, z_bar (reduced dimensions)
+                    let x_bar: Vec<f64> = state.x.iter().enumerate()
+                        .map(|(i, &xi)| xi * inv_tau * scaling.col_scale[i])
+                        .collect();
+                    let s_bar: Vec<f64> = state.s.iter().enumerate()
+                        .map(|(i, &si)| si * inv_tau / scaling.row_scale[i])
+                        .collect();
+                    let z_bar: Vec<f64> = state.z.iter().enumerate()
+                        .map(|(i, &zi)| zi * inv_tau * scaling.row_scale[i] * scaling.cost_scale)
+                        .collect();
+
+                    // Expand to full dimensions via postsolve
+                    let x_for_polish = postsolve.recover_x(&x_bar);
+                    let s_for_polish = postsolve.recover_s(&s_bar, &x_for_polish);
+                    let z_for_polish = postsolve.recover_z(&z_bar);
 
                     if diag.enabled {
-                        eprintln!("early polish check at iter {}: primal_ok={} gap_ok={} gap_close={} dual_ok={}",
-                            iter, primal_ok, gap_ok, gap_close, dual_ok);
+                        eprintln!("early polish check at iter {}: primal_ok={} gap_ok={} gap_close={} dual_ok={} x_len={} n_orig={}",
+                            iter, primal_ok, gap_ok, gap_close, dual_ok, x_for_polish.len(), orig_prob_bounds.num_vars());
                     }
 
                     if let Some(polished) = polish_nonneg_active_set(
@@ -369,7 +380,16 @@ pub fn solve_ipm2(
 
                         // Accept if: dual improved, primal still good, and gap didn't get much worse
                         let gap_acceptable = gap_rel_after <= criteria.tol_gap_rel || gap_rel_after <= metrics.gap_rel * 2.0;
-                        if dual_rel_after < metrics.rel_d * 0.1 && primal_rel_after < criteria.tol_feas && gap_acceptable {
+                        let dual_improved = dual_rel_after < metrics.rel_d * 0.1;
+                        let primal_still_ok = primal_rel_after < criteria.tol_feas;
+
+                        if diag.enabled && iter < 20 {
+                            eprintln!("polish eval at iter {}: rel_d {:.3e} -> {:.3e} (need <{:.3e}), rel_p {:.3e} -> {:.3e}, gap_rel {:.3e} -> {:.3e}",
+                                iter, metrics.rel_d, dual_rel_after, metrics.rel_d * 0.1,
+                                metrics.rel_p, primal_rel_after, metrics.gap_rel, gap_rel_after);
+                        }
+
+                        if dual_improved && primal_still_ok && gap_acceptable {
                             if diag.enabled {
                                 eprintln!("early polish SUCCESS at iter {}: rel_d {:.3e} -> {:.3e}, rel_p {:.3e} -> {:.3e}, gap_rel {:.3e} -> {:.3e}",
                                     iter, metrics.rel_d, dual_rel_after, metrics.rel_p, primal_rel_after, metrics.gap_rel, gap_rel_after);
@@ -384,24 +404,24 @@ pub fn solve_ipm2(
                 // Case 2: Primal stuck - try primal projection polish
                 // When dual is excellent but primal is stuck (YAO-like problems)
                 if !primal_ok && dual_ok && gap_ok && iter >= 20 && stall.primal_stalling() {
-                    let x_for_polish: Vec<f64> = if state.tau > 1e-8 {
-                        let x_scaled: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
-                        scaling.unscale_x(&x_scaled)
-                    } else {
-                        vec![0.0; n]
-                    };
-                    let s_for_polish: Vec<f64> = if state.tau > 1e-8 {
-                        let s_scaled: Vec<f64> = state.s.iter().map(|si| si / state.tau).collect();
-                        scaling.unscale_s(&s_scaled)
-                    } else {
-                        vec![0.0; m]
-                    };
-                    let z_for_polish: Vec<f64> = if state.tau > 1e-8 {
-                        let z_scaled: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
-                        scaling.unscale_z(&z_scaled)
-                    } else {
-                        vec![0.0; m]
-                    };
+                    // Extract unscaled solution and expand to original dimensions via postsolve
+                    let inv_tau = if state.tau > 1e-8 { 1.0 / state.tau } else { 0.0 };
+
+                    // Unscale to x_bar, s_bar, z_bar (reduced dimensions)
+                    let x_bar: Vec<f64> = state.x.iter().enumerate()
+                        .map(|(i, &xi)| xi * inv_tau * scaling.col_scale[i])
+                        .collect();
+                    let s_bar: Vec<f64> = state.s.iter().enumerate()
+                        .map(|(i, &si)| si * inv_tau / scaling.row_scale[i])
+                        .collect();
+                    let z_bar: Vec<f64> = state.z.iter().enumerate()
+                        .map(|(i, &zi)| zi * inv_tau * scaling.row_scale[i] * scaling.cost_scale)
+                        .collect();
+
+                    // Expand to full dimensions via postsolve
+                    let x_for_polish = postsolve.recover_x(&x_bar);
+                    let s_for_polish = postsolve.recover_s(&s_bar, &x_for_polish);
+                    let z_for_polish = postsolve.recover_z(&z_bar);
 
                     // Compute primal residual for projection
                     let m_orig = orig_prob_bounds.num_constraints();
