@@ -404,8 +404,9 @@ fn run_regression_suite(
             );
         } else {
             println!(
-                "{}: OK rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
+                "{}: OK iters={} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
                 res.name,
+                res.iterations,
                 res.rel_p,
                 res.rel_d,
                 res.gap_rel,

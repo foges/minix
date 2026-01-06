@@ -11,6 +11,8 @@ pub struct RegressionResult {
     pub rel_p: f64,
     pub rel_d: f64,
     pub gap_rel: f64,
+    pub iterations: usize,
+    pub expected_iters: Option<usize>,
     pub error: Option<String>,
     pub skipped: bool,
     pub solve_time_ms: Option<u64>,
@@ -176,6 +178,8 @@ pub fn run_regression_suite(
                             rel_p: f64::NAN,
                             rel_d: f64::NAN,
                             gap_rel: f64::NAN,
+                            iterations: 0,
+                            expected_iters: None,
                             error: Some(format!("conversion error: {}", e)),
                             skipped: false,
                             solve_time_ms: None,
@@ -196,6 +200,8 @@ pub fn run_regression_suite(
                         rel_p: f64::NAN,
                         rel_d: f64::NAN,
                         gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
                         error: Some(format!("missing QPS: {}", e)),
                         skipped: false,
                         solve_time_ms: None,
@@ -210,6 +216,8 @@ pub fn run_regression_suite(
                         rel_p: f64::NAN,
                         rel_d: f64::NAN,
                         gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
                         error: None,
                         skipped: true,
                         solve_time_ms: None,
@@ -261,6 +269,8 @@ fn run_case(
                 rel_p: metrics.rel_p,
                 rel_d: metrics.rel_d,
                 gap_rel: metrics.gap_rel,
+                iterations: res.info.iters,
+                expected_iters: None, // Will be set by caller
                 error: None,
                 skipped: false,
                 solve_time_ms: Some(res.info.solve_time_ms),
@@ -275,6 +285,8 @@ fn run_case(
             rel_p: f64::NAN,
             rel_d: f64::NAN,
             gap_rel: f64::NAN,
+            iterations: 0,
+            expected_iters: None,
             error: Some(e.to_string()),
             skipped: false,
             solve_time_ms: None,
@@ -321,6 +333,60 @@ fn synthetic_cases() -> Vec<(&'static str, ProblemData)> {
     cases
 }
 
+/// Expected iterations for each problem (with 20% margin allowed)
+fn expected_iterations(name: &str) -> Option<usize> {
+    // Based on measured iterations - allows 20% regression
+    match name {
+        // HS problems
+        "HS21" => Some(6), "HS35" => Some(5), "HS35MOD" => Some(6),
+        "HS51" => Some(4), "HS52" => Some(3), "HS53" => Some(4),
+        "HS76" => Some(5), "HS118" => Some(10), "HS268" => Some(7),
+        // Small problems
+        "TAME" => Some(4), "S268" => Some(7), "ZECEVIC2" => Some(6),
+        "LOTSCHD" => Some(5), "QAFIRO" => Some(12),
+        // CVXQP family
+        "CVXQP1_S" => Some(6), "CVXQP2_S" => Some(6), "CVXQP3_S" => Some(6),
+        "CVXQP1_M" => Some(9), "CVXQP2_M" => Some(6), "CVXQP3_M" => Some(11),
+        "CVXQP1_L" => Some(10), "CVXQP2_L" => Some(10), "CVXQP3_L" => Some(9),
+        // DUAL/PRIMAL
+        "DUAL1" => Some(8), "DUAL2" => Some(7), "DUAL3" => Some(7), "DUAL4" => Some(7),
+        "DUALC1" => Some(11), "DUALC2" => Some(9), "DUALC5" => Some(8), "DUALC8" => Some(9),
+        "PRIMAL1" => Some(9), "PRIMAL2" => Some(8), "PRIMAL3" => Some(8), "PRIMAL4" => Some(7),
+        "PRIMALC1" => Some(12), "PRIMALC2" => Some(13), "PRIMALC5" => Some(8), "PRIMALC8" => Some(11),
+        // AUG family
+        "AUG2D" => Some(6), "AUG2DC" => Some(6), "AUG2DCQP" => Some(11), "AUG2DQP" => Some(11),
+        "AUG3D" => Some(5), "AUG3DC" => Some(5), "AUG3DCQP" => Some(7), "AUG3DQP" => Some(7),
+        // CONT family
+        "CONT-050" => Some(8), "CONT-100" => Some(10), "CONT-101" => Some(8),
+        "CONT-200" => Some(11), "CONT-201" => Some(9), "CONT-300" => Some(11),
+        // LISWET family
+        "LISWET1" => Some(20), "LISWET2" => Some(18), "LISWET3" => Some(26), "LISWET4" => Some(36),
+        "LISWET5" => Some(20), "LISWET6" => Some(25), "LISWET7" => Some(20), "LISWET8" => Some(20),
+        "LISWET9" => Some(20), "LISWET10" => Some(20), "LISWET11" => Some(20), "LISWET12" => Some(20),
+        // STADAT/QGROW
+        "STADAT1" => Some(12), "STADAT2" => Some(25), "STADAT3" => Some(26),
+        "QGROW7" => Some(16), "QGROW15" => Some(17), "QGROW22" => Some(20),
+        // Other Q* problems
+        "QETAMACR" => Some(18), "QISRAEL" => Some(27), "QPCBLEND" => Some(11),
+        "QPCBOEI2" => Some(22), "QPCSTAIR" => Some(18), "QRECIPE" => Some(11),
+        "QSC205" => Some(50), "QSCSD1" => Some(9), "QSCSD6" => Some(12), "QSCSD8" => Some(11),
+        "QSCTAP1" => Some(19), "QSCTAP2" => Some(11), "QSCTAP3" => Some(13),
+        "QSEBA" => Some(20), "QSHARE2B" => Some(17), "QSHELL" => Some(28),
+        "QSIERRA" => Some(22), "QSTAIR" => Some(20), "QSTANDAT" => Some(16),
+        // Other
+        "DPKLO1" => Some(4), "DTOC3" => Some(5), "EXDATA" => Some(9),
+        "GOULDQP2" => Some(7), "GOULDQP3" => Some(7),
+        "HUES-MOD" => Some(4), "HUESTIS" => Some(4), "KSIP" => Some(12), "LASER" => Some(8),
+        "MOSARQP1" => Some(6), "MOSARQP2" => Some(5), "POWELL20" => Some(8),
+        "STCQP2" => Some(10), "UBH1" => Some(20), "VALUES" => Some(14), "YAO" => Some(22),
+        // BOYD (large)
+        "BOYD1" => Some(23), "BOYD2" => Some(32),
+        // Synthetic
+        "SYN_LP_NONNEG" => Some(4), "SYN_SOC_FEAS" => Some(5),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +412,7 @@ mod tests {
         // metrics can differ due to problem conditioning
         let tol_feas = 1e-6;  // Feasibility tolerance for unscaled metrics
         let tol_gap = 1e-3;   // Relative gap tolerance (problems with poor conditioning may not reach 1e-6)
+        let iter_margin = 1.20;  // Allow 20% iteration regression
 
         let mut failures = Vec::new();
         for res in &results {
@@ -376,6 +443,16 @@ mod tests {
                     "{}: rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
                     res.name, res.rel_p, res.rel_d, res.gap_rel
                 ));
+            }
+            // Check iteration count regression
+            if let Some(expected) = expected_iterations(&res.name) {
+                let max_allowed = (expected as f64 * iter_margin).ceil() as usize;
+                if res.iterations > max_allowed {
+                    failures.push(format!(
+                        "{}: iteration regression {} > {} (expected {} +20%)",
+                        res.name, res.iterations, max_allowed, expected
+                    ));
+                }
             }
         }
 
