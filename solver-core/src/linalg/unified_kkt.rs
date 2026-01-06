@@ -239,8 +239,18 @@ mod tests {
 
     #[test]
     fn test_should_use_normal_equations() {
-        // Tall problem with only NonNeg cones - should use
+        // Normal equations is opt-in via MINIX_NORMAL_EQNS env var
+        // When not enabled, always returns false
         let cones = vec![ConeSpec::NonNeg { dim: 100 }];
+
+        // Without env var, should always be false
+        std::env::remove_var("MINIX_NORMAL_EQNS");
+        assert!(!should_use_normal_equations(10, 100, &cones));
+
+        // With env var set, check structural criteria
+        std::env::set_var("MINIX_NORMAL_EQNS", "1");
+
+        // Tall problem with only NonNeg cones - should use
         assert!(should_use_normal_equations(10, 100, &cones));
 
         // Not tall enough - should not use
@@ -253,5 +263,8 @@ mod tests {
         // n too large - should not use
         let cones_large = vec![ConeSpec::NonNeg { dim: 10000 }];
         assert!(!should_use_normal_equations(600, 10000, &cones_large));
+
+        // Clean up
+        std::env::remove_var("MINIX_NORMAL_EQNS");
     }
 }

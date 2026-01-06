@@ -145,16 +145,59 @@ fn print_diagnostics(name: &str, prob: &ProblemData, res: &SolveResult) {
         }
     }
 
-    // Print top violating components for dual residual
+    // Print top violating components for dual residual with column analysis
     let dual_ok = rel_d <= tol_feas;
     if !dual_ok {
-        println!("  top |r_d| components (signed):");
+        // Compute column densities and norms for A
+        let mut col_nnz = vec![0usize; n];
+        let mut col_norms = vec![0.0f64; n];
+        for (&val, (_row, col)) in prob.A.iter() {
+            col_nnz[col] += 1;
+            col_norms[col] = col_norms[col].max(val.abs());
+        }
+
+        // Check P diagonal entries
+        let mut p_diag = vec![0.0f64; n];
+        if let Some(ref p) = prob.P {
+            for col in 0..n {
+                if let Some(col_view) = p.outer_view(col) {
+                    for (row, &val) in col_view.iter() {
+                        if row == col {
+                            p_diag[col] = val;
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("  top |r_d| components (with structure):");
         let mut idxs: Vec<usize> = (0..n).collect();
         idxs.sort_by(|&i, &j| {
             r_d[j].abs().partial_cmp(&r_d[i].abs()).unwrap_or(std::cmp::Ordering::Equal)
         });
         for &idx in idxs.iter().take(5.min(n)) {
-            println!("    rd[{:>4}]={:+.3e}", idx, r_d[idx]);
+            // Compute A^T z contribution for this variable and analyze constraint structure
+            let mut atz_j = 0.0;
+            let mut constraint_info: Vec<(usize, f64, f64, f64)> = Vec::new(); // (row, a_val, z, s)
+            for (&val, (row, col)) in prob.A.iter() {
+                if col == idx {
+                    atz_j += val * res.z[row];
+                    constraint_info.push((row, val, res.z[row], res.s[row]));
+                }
+            }
+            println!(
+                "    rd[{:>4}]={:+.3e}  q={:+.3e}  Px={:+.3e}  A^Tz={:+.3e}  A_nnz={}  P_diag={:.2e}",
+                idx, r_d[idx], prob.q[idx], p_x[idx], atz_j, col_nnz[idx], p_diag[idx]
+            );
+            // Show constraint details for first problematic variable only
+            if idx == idxs[0] && col_nnz[idx] <= 10 {
+                for (row, a_val, z_val, s_val) in &constraint_info {
+                    println!(
+                        "      row {:>4}: A={:+.3e} z={:+.3e} s={:.3e} contrib={:+.3e}",
+                        row, a_val, z_val, s_val, a_val * z_val
+                    );
+                }
+            }
         }
     }
 

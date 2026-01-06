@@ -639,6 +639,213 @@ pub fn polish_primal_and_dual(
     })
 }
 
+/// Targeted dual adjustment for LP variables with stuck residuals.
+///
+/// For QSHIP-type problems, certain LP variables (P_diag=0) have large dual residuals
+/// because the IPM can't reach the exact vertex. This function identifies such variables
+/// and adjusts z on their sparse constraint sets to satisfy dual feasibility.
+pub fn polish_lp_dual(
+    prob: &ProblemData,
+    x0: &[f64],
+    s0: &[f64],
+    z0: &[f64],
+    _settings: &SolverSettings,
+) -> Option<PolishResult> {
+    let diag_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    if x0.len() != n || s0.len() != m || z0.len() != m {
+        return None;
+    }
+
+    // Only handle Zero + NonNeg cones
+    if prob.cones.iter().any(|c| !matches!(c, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. })) {
+        return None;
+    }
+
+    // Find LP variables (P_diag=0) with large dual residual
+    let mut p_diag = vec![0.0f64; n];
+    if let Some(ref p) = prob.P {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    if row == col {
+                        p_diag[col] = val;
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute Px
+    let mut px = vec![0.0; n];
+    if let Some(ref p) = prob.P {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    px[row] += val * x0[col];
+                }
+            }
+        }
+    }
+
+    // Compute A^T z and dual residual (rd = Px + q + A^T z for our sign convention)
+    let mut atz = vec![0.0; n];
+    for (&val, (row, col)) in prob.A.iter() {
+        atz[col] += val * z0[row];
+    }
+
+    let mut rd: Vec<f64> = (0..n).map(|j| px[j] + prob.q[j] + atz[j]).collect();
+    let rd_inf_before = rd.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+
+    // Find LP variables with large residuals
+    let rd_thresh = rd_inf_before * 0.1; // Top 10% of residuals
+    let lp_vars: Vec<usize> = (0..n)
+        .filter(|&j| p_diag[j].abs() < 1e-12 && rd[j].abs() > rd_thresh)
+        .collect();
+
+    if lp_vars.is_empty() {
+        return None;
+    }
+
+    // Collect rows that affect these LP variables
+    let mut affected_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (&val, (row, col)) in prob.A.iter() {
+        if lp_vars.contains(&col) && val.abs() > 1e-12 {
+            affected_rows.insert(row);
+        }
+    }
+
+    // Only adjust z on rows where s is essentially zero (active constraints)
+    // These are the "free" z values we can adjust
+    let active_rows: Vec<usize> = affected_rows
+        .into_iter()
+        .filter(|&row| s0[row].abs() < 1e-8)
+        .collect();
+
+    if active_rows.is_empty() || active_rows.len() > 500 {
+        return None;
+    }
+
+    if diag_enabled {
+        eprintln!("lp_dual_polish: {} LP vars with large rd, {} active rows to adjust",
+            lp_vars.len(), active_rows.len());
+    }
+
+    // Build system: for each LP var j, we want Σ_i A[i,j] * dz[i] = -rd[j]
+    // where dz[i] is the adjustment to z on active rows
+    // This is a least-squares problem: minimize ||A_sub * dz + rd_sub||²
+
+    let k = active_rows.len();
+    let num_lp = lp_vars.len();
+
+    // Build A_sub (num_lp × k) where A_sub[j, i] = A[active_rows[i], lp_vars[j]]
+    let mut a_sub: Vec<Vec<f64>> = vec![vec![0.0; k]; num_lp];
+    for (i, &row) in active_rows.iter().enumerate() {
+        for (&val, (r, col)) in prob.A.iter() {
+            if r == row {
+                if let Some(j) = lp_vars.iter().position(|&v| v == col) {
+                    a_sub[j][i] = val;
+                }
+            }
+        }
+    }
+
+    // Target: -rd for each LP var
+    let target: Vec<f64> = lp_vars.iter().map(|&j| -rd[j]).collect();
+
+    // Solve A_sub^T * dz = target via normal equations: (A_sub * A_sub^T) * dz_expanded = A_sub * target
+    // Actually we want: minimize ||A_sub * dz - target||²
+    // Normal equations: A_sub^T * A_sub * dz = A_sub^T * target
+    // Where A_sub^T is k × num_lp, so A_sub^T * A_sub is k × k
+
+    // Build A_sub^T * A_sub (k × k)
+    let mut ata = vec![vec![0.0; k]; k];
+    for i in 0..k {
+        for j in 0..=i {
+            let mut dot = 0.0;
+            for lp in 0..num_lp {
+                dot += a_sub[lp][i] * a_sub[lp][j];
+            }
+            ata[i][j] = dot;
+            ata[j][i] = dot;
+        }
+    }
+
+    // Add regularization
+    for i in 0..k {
+        ata[i][i] += 1e-8;
+    }
+
+    // Build A_sub^T * target (k-vector)
+    let mut atb = vec![0.0; k];
+    for i in 0..k {
+        for lp in 0..num_lp {
+            atb[i] += a_sub[lp][i] * target[lp];
+        }
+    }
+
+    // Solve via Cholesky
+    let dz = match cholesky_solve(&ata, &atb) {
+        Some(dz) => dz,
+        None => {
+            if diag_enabled {
+                eprintln!("lp_dual_polish: Cholesky failed");
+            }
+            return None;
+        }
+    };
+
+    // Apply adjustments to z
+    let mut z = z0.to_vec();
+    for (i, &row) in active_rows.iter().enumerate() {
+        z[row] += dz[i];
+    }
+
+    // Project z to satisfy cone constraints
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match *cone {
+            ConeSpec::Zero { dim } => {
+                offset += dim; // z free for Zero cone
+            }
+            ConeSpec::NonNeg { dim } => {
+                for i in offset..offset + dim {
+                    z[i] = z[i].max(0.0); // z >= 0 for NonNeg
+                }
+                offset += dim;
+            }
+            _ => {
+                offset += cone.dim();
+            }
+        }
+    }
+
+    // Recompute rd with new z
+    let mut atz_new = vec![0.0; n];
+    for (&val, (row, col)) in prob.A.iter() {
+        atz_new[col] += val * z[row];
+    }
+    let rd_new: Vec<f64> = (0..n).map(|j| px[j] + prob.q[j] + atz_new[j]).collect();
+    let rd_inf_after = rd_new.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+
+    if diag_enabled {
+        eprintln!("lp_dual_polish: |rd| {:.3e} -> {:.3e}", rd_inf_before, rd_inf_after);
+    }
+
+    // Only accept if we improved
+    if rd_inf_after >= rd_inf_before * 0.9 {
+        return None;
+    }
+
+    Some(PolishResult {
+        x: x0.to_vec(),
+        s: s0.to_vec(),
+        z,
+    })
+}
+
 /// Direct dual polish: keep x/s fixed, find z that minimizes ||A^T z - (Px + q)||.
 ///
 /// For dual-stuck problems (QSHIP family), the issue is that the KKT system becomes

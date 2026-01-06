@@ -22,7 +22,7 @@ pub mod workspace;
 pub use diagnostics::DiagnosticsConfig;
 pub use metrics::{UnscaledMetrics, compute_unscaled_metrics};
 pub use modes::{SolveMode, StallDetector};
-pub use polish::{polish_nonneg_active_set, polish_primal_projection, polish_primal_and_dual, polish_dual_only};
+pub use polish::{polish_nonneg_active_set, polish_primal_projection, polish_primal_and_dual, polish_dual_only, polish_lp_dual};
 pub use perf::{PerfSection, PerfTimers};
 pub use regularization::{RegularizationPolicy, RegularizationState};
 pub use solve::solve_ipm2;
