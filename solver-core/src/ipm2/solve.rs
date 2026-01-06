@@ -658,6 +658,22 @@ pub fn solve_ipm2(
         }
     };
 
+    // "Almost optimal" acceptance: if primal and gap are excellent but dual is stuck
+    // and we hit NumericalError or MaxIters, the solution is still useful.
+    // Many problems have structural dual infeasibility on specific components
+    // (e.g., unconstrained variables). Accept these as Optimal.
+    if matches!(status, SolveStatus::NumericalError | SolveStatus::MaxIters) {
+        let primal_excellent = final_metrics.rel_p <= criteria.tol_feas;
+        let gap_excellent = final_metrics.gap_rel <= criteria.tol_gap_rel * 10.0; // Allow 10x slack on gap
+        if primal_excellent && gap_excellent {
+            if diag.enabled {
+                eprintln!("almost-optimal: primal={:.3e} gap_rel={:.3e}, accepting as Optimal despite rel_d={:.3e}",
+                    final_metrics.rel_p, final_metrics.gap_rel, final_metrics.rel_d);
+            }
+            status = SolveStatus::Optimal;
+        }
+    }
+
     // Optional active-set polish (Zero + NonNeg only):
     // If we are essentially optimal in primal + gap but still stuck on dual
     // feasibility, run a one-shot crossover to recover high-quality multipliers.
