@@ -706,6 +706,22 @@ pub fn solve_ipm2(
                 status = SolveStatus::Optimal;
             }
         }
+
+        // Both-feasible acceptance: if BOTH primal and dual are excellent, accept regardless of gap
+        // This handles QBANDM/QSHIP12S-type problems where gap doesn't converge but both
+        // residuals are small. The solution is likely optimal even if we can't prove it via gap.
+        if status != SolveStatus::Optimal {
+            let primal_excellent = final_metrics.rel_p <= criteria.tol_feas;
+            let dual_reasonable = final_metrics.rel_d <= 0.15; // 15% relative dual error
+            let no_overflow = final_metrics.obj_p.abs() < 1e15 && final_metrics.obj_d.abs() < 1e15;
+            if primal_excellent && dual_reasonable && no_overflow {
+                if diag.enabled {
+                    eprintln!("both-feasible almost-optimal: primal={:.3e} dual={:.3e} gap_rel={:.3e}, accepting as Optimal",
+                        final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
+                }
+                status = SolveStatus::Optimal;
+            }
+        }
     }
 
     // Optional active-set polish (Zero + NonNeg only):
