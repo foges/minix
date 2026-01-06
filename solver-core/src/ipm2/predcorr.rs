@@ -297,19 +297,20 @@ fn compute_dtau(
     tau: f64,
     denom_scale: f64,
 ) -> Result<f64, String> {
-    if !numerator.is_finite() || !denominator.is_finite() || !tau.is_finite() {
+    if !numerator.is_finite() || !denominator.is_finite() || !tau.is_finite() || !denom_scale.is_finite() {
         return Err("dtau inputs not finite".to_string());
     }
     if tau <= 0.0 {
         return Err(format!("tau non-positive (tau={:.3e})", tau));
     }
 
+    // If the denominator is ill-conditioned, treat the update as unreliable and
+    // fall back to a no-op step for tau. This is more robust than failing the
+    // entire iteration, and mirrors the common IPM practice of dampening or
+    // skipping scalar updates when the underlying 2x2 system is nearly singular.
     let scale = denom_scale.max(1.0);
     if denominator.abs() <= 1e-10 * scale {
-        return Err(format!(
-            "dtau denominator ill-conditioned (denom={:.3e}, scale={:.3e})",
-            denominator, scale
-        ));
+        return Ok(0.0);
     }
 
     let raw_dtau = numerator / denominator;

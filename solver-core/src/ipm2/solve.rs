@@ -159,7 +159,9 @@ pub fn solve_ipm2(
     let mut status = SolveStatus::NumericalError; // Will be overwritten
     let mut iter = 0;
     let mut consecutive_failures = 0;
+    let mut numeric_recovery_level: usize = 0;
     const MAX_CONSECUTIVE_FAILURES: usize = 3;
+    const MAX_NUMERIC_RECOVERY_LEVEL: usize = 6;
 
     // Adaptive refinement: track previous dual residual to detect stagnation
     let mut prev_rel_d: f64 = f64::INFINITY;
@@ -195,6 +197,23 @@ pub fn solve_ipm2(
             }
         }
 
+        // If we recently hit numerical failures, temporarily ramp up regularization and
+        // iterative refinement. This often turns a hard failure into a slow-but-robust step.
+        if numeric_recovery_level > 0 {
+            let bump_factor = 10.0_f64.powi(numeric_recovery_level as i32);
+            reg_state.static_reg_eff =
+                (reg_state.static_reg_eff * bump_factor).min(reg_policy.static_reg_max);
+            reg_state.refine_iters = (reg_state.refine_iters + 2 * numeric_recovery_level)
+                .min(reg_policy.max_refine_iters);
+
+            if diag.should_log(iter) {
+                eprintln!(
+                    "numeric recovery: level={} static_reg={:.3e} refine_iters={}",
+                    numeric_recovery_level, reg_state.static_reg_eff, reg_state.refine_iters
+                );
+            }
+        }
+
         if (kkt.static_reg() - reg_state.static_reg_eff).abs() > 0.0 {
             kkt.set_static_reg(reg_state.static_reg_eff)
                 .map_err(|e| format!("KKT reg update failed: {}", e))?;
@@ -226,6 +245,11 @@ pub fn solve_ipm2(
             }
         }
 
+        // Numeric recovery mode: use conservative step parameters
+        if numeric_recovery_level > 0 {
+            step_settings.feas_weight_floor = 0.0;
+            step_settings.sigma_max = 0.999;
+        }
         if matches!(solve_mode, SolveMode::StallRecovery) {
             step_settings.feas_weight_floor = 0.0;
             step_settings.sigma_max = 0.999;
@@ -254,10 +278,15 @@ pub fn solve_ipm2(
         let step_result = match step_result {
             Ok(result) => {
                 consecutive_failures = 0;
+                numeric_recovery_level = 0;
                 result
             }
-            Err(_e) => {
+            Err(e) => {
                 consecutive_failures += 1;
+                numeric_recovery_level = (numeric_recovery_level + 1).min(MAX_NUMERIC_RECOVERY_LEVEL);
+                if diag.enabled {
+                    eprintln!("predictor-corrector step failed at iter {}: {}", iter, e);
+                }
 
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     status = SolveStatus::NumericalError;
@@ -277,6 +306,7 @@ pub fn solve_ipm2(
 
         if !mu.is_finite() || mu > 1e15 {
             consecutive_failures += 1;
+            numeric_recovery_level = (numeric_recovery_level + 1).min(MAX_NUMERIC_RECOVERY_LEVEL);
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                 status = SolveStatus::NumericalError;
                 break;
