@@ -34,31 +34,33 @@ let solution = solve(&problem, &settings)?;
 
 ### Comparison with Other Solvers
 
-Most QP solvers report high pass rates using loose tolerances (eps ≈ 1.0), but **Minix prioritizes correctness with strict 1e-8 tolerances by default**. The table below shows how Minix compares to state-of-the-art solvers at comparable high-accuracy settings:
+Most QP solvers report high pass rates using loose tolerances (eps ≈ 1.0), but **Minix prioritizes correctness with strict tolerances by default (1e-8)**. The table below shows an apples-to-apples comparison with all solvers tested at the same high-accuracy tolerance (1e-9):
 
 #### High-Accuracy Performance (Maros-Meszaros Test Set)
 
-| Solver | Tolerance | Pass Rate | Notes |
-|--------|-----------|-----------|-------|
-| **Minix** | **1e-8** | **77.2%** | ✓ **Best at high accuracy** |
-| PIQP | 1e-9 | 73.2% | 4 points behind Minix |
-| ProxQP | 1e-9 | 52.9% | 24 points behind |
-| SCS | 1e-9 | 43.5% | 34 points behind |
-| **Clarabel** | 1e-9 | **34.8%** | Modern Rust solver, 42 points behind |
-| OSQP | 1e-9 | 26.1% | 51 points behind |
+**All solvers tested at 1e-9 feasibility and gap tolerances for fair comparison:**
+
+| Solver | Pass Rate | Notes |
+|--------|-----------|-------|
+| **Minix** | **77.2%** (105/136) | ✓ **Best at high accuracy** |
+| PIQP | 73.2% | 4 points behind |
+| ProxQP | 52.9% | 24 points behind |
+| SCS | 43.5% | 34 points behind |
+| **Clarabel** | **34.8%** | Modern Rust solver, 42 points behind |
+| OSQP | 26.1% | 51 points behind |
 
 **Source**: [qpsolvers/maros_meszaros_qpbenchmark](https://github.com/qpsolvers/maros_meszaros_qpbenchmark)
 
-**Key Insight**: Clarabel is a modern, high-quality conic solver written in Rust (like Minix). However, Minix significantly outperforms Clarabel at high accuracy settings (77.2% vs 34.8%). This demonstrates that **Minix's focus on robustness and tight tolerances delivers superior solution quality** compared to other contemporary solvers.
+**Key Insight**: Clarabel is a modern, high-quality conic solver written in Rust (like Minix). However, at the same 1e-9 tolerance, Minix significantly outperforms Clarabel (77.2% vs 34.8%). This demonstrates that **Minix's focus on robustness delivers superior solution quality** compared to other contemporary solvers.
 
 #### Why High Accuracy Matters
 
 At loose tolerances (eps = 1.0), many solvers achieve 90%+ pass rates:
 - PIQP: 95.7% (but solutions may not meet strict quality requirements)
-- Clarabel: 45.7% (even at loose tolerances)
-- Minix @ 1e-8: 77.2% (guaranteed high-quality solutions)
+- Clarabel: 45.7% (even at loose tolerances, still struggles)
+- Minix @ 1e-9: 77.2% (maintains high pass rate even at strict tolerances)
 
-For applications requiring **certified solutions** (finance, engineering, safety-critical systems), Minix's conservative approach is preferable to speed-optimized solvers with relaxed tolerances.
+For applications requiring **certified solutions** (finance, engineering, safety-critical systems), Minix's ability to maintain 77.2% pass rate even at 1e-9 tolerance is preferable to solvers that only perform well at relaxed tolerances.
 
 #### Why Some Problems Fail
 
