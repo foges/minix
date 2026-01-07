@@ -226,6 +226,8 @@ pub fn solve_ipm2(
 
         // σ anti-stall: when primal is stalling (rel_p not improving for several iterations
         // when μ is already tiny), cap σ to prevent over-centering which preserves the stall
+        // ABLATION NOTE: Tested removing this - no measurable impact on Maros-Meszaros suite
+        // Keeping it as it may help edge cases not covered by the benchmark
         if stall.primal_stalling() && mu < 1e-10 {
             step_settings.sigma_max = step_settings.sigma_max.min(0.5);
             if diag.should_log(iter) {
@@ -237,6 +239,7 @@ pub fn solve_ipm2(
         // more aggressively toward the boundary. For QSHIP-family problems, the dual
         // drifts because the KKT is ill-conditioned; smaller σ means less centering
         // and more progress toward the optimal face.
+        // ABLATION NOTE: Tested removing this - no measurable impact on Maros-Meszaros suite
         if stall.dual_stalling() {
             step_settings.sigma_max = step_settings.sigma_max.min(0.1);
             if diag.should_log(iter) {
