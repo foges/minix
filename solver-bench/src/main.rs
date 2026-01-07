@@ -1,5 +1,6 @@
 //! Benchmarking CLI for minix solver.
 
+mod conic_benchmarks;
 mod maros_meszaros;
 mod qps;
 mod regression;
