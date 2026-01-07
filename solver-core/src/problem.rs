@@ -202,6 +202,11 @@ pub struct SolverSettings {
     /// Faster for well-posed problems but loses infeasibility detection.
     /// Falls back to HSDE automatically if divergence detected.
     pub direct_mode: bool,
+
+    /// Enable constraint conditioning (detect and fix ill-conditioned rows).
+    /// Helps with problems that have nearly-parallel constraints or extreme coefficient ratios.
+    /// None = use default (true), Some(false) = disable.
+    pub enable_conditioning: Option<bool>,
 }
 
 impl Default for SolverSettings {
@@ -228,6 +233,7 @@ impl Default for SolverSettings {
             enable_gpu: false,
             warm_start: None,
             direct_mode: false,  // Opt-in for now
+            enable_conditioning: None,  // Defaults to true
         }
     }
 }
@@ -237,6 +243,10 @@ impl Default for SolverSettings {
 pub enum SolveStatus {
     /// Optimal solution found
     Optimal,
+
+    /// Almost optimal - meets reduced accuracy thresholds (like Clarabel)
+    /// Tolerances: gap=5e-5, feas=1e-4 (vs strict: gap=1e-8, feas=1e-8)
+    AlmostOptimal,
 
     /// Primal problem is infeasible (certificate available)
     PrimalInfeasible,
@@ -261,10 +271,11 @@ impl fmt::Display for SolveStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SolveStatus::Optimal => write!(f, "Optimal"),
+            SolveStatus::AlmostOptimal => write!(f, "AlmostOptimal"),
             SolveStatus::PrimalInfeasible => write!(f, "Primal Infeasible"),
             SolveStatus::DualInfeasible => write!(f, "Dual Infeasible"),
             SolveStatus::Unbounded => write!(f, "Unbounded"),
-            SolveStatus::MaxIters => write!(f, "Maximum Iterations"),
+            SolveStatus::MaxIters => write!(f, "MaxIters"),
             SolveStatus::TimeLimit => write!(f, "Time Limit"),
             SolveStatus::NumericalError => write!(f, "Numerical Error"),
         }

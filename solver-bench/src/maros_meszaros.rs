@@ -240,6 +240,8 @@ pub struct BenchmarkSummary {
     pub total: usize,
     /// Problems solved to optimality
     pub optimal: usize,
+    /// Problems solved to almost optimal (reduced accuracy)
+    pub almost_optimal: usize,
     /// Problems hitting max iterations
     pub max_iters: usize,
     /// Problems with numerical errors
@@ -250,6 +252,8 @@ pub struct BenchmarkSummary {
     pub total_time_s: f64,
     /// Geometric mean of iterations (for solved problems)
     pub geom_mean_iters: f64,
+    /// Geometric mean of solve times (shifted, for solved problems)
+    pub geom_mean_time_ms: f64,
 }
 
 /// Get the cache directory for benchmark problems
@@ -463,6 +467,7 @@ pub fn run_full_suite(
 
         let status_str = match result.status {
             SolveStatus::Optimal => "✓",
+            SolveStatus::AlmostOptimal => "~",
             SolveStatus::MaxIters => "M",
             SolveStatus::NumericalError => "N",
             _ => "?",
@@ -484,12 +489,15 @@ pub fn run_full_suite(
 pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
     let total = results.len();
     let mut optimal = 0;
+    let mut almost_optimal = 0;
     let mut max_iters = 0;
     let mut numerical_errors = 0;
     let mut parse_errors = 0;
     let mut total_time_s = 0.0;
     let mut iter_log_sum = 0.0;
     let mut iter_count = 0;
+    let mut time_log_sum = 0.0;
+    let mut time_count = 0;
 
     for r in results {
         total_time_s += r.solve_time_ms / 1000.0;
@@ -506,6 +514,22 @@ pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
                     iter_log_sum += (r.iterations as f64).ln();
                     iter_count += 1;
                 }
+                // Shifted geometric mean for time (shift by 1.0 ms for robustness)
+                if r.solve_time_ms > 0.0 {
+                    time_log_sum += (r.solve_time_ms + 1.0).ln();
+                    time_count += 1;
+                }
+            }
+            SolveStatus::AlmostOptimal => {
+                almost_optimal += 1;
+                if r.iterations > 0 {
+                    iter_log_sum += (r.iterations as f64).ln();
+                    iter_count += 1;
+                }
+                if r.solve_time_ms > 0.0 {
+                    time_log_sum += (r.solve_time_ms + 1.0).ln();
+                    time_count += 1;
+                }
             }
             SolveStatus::MaxIters => max_iters += 1,
             SolveStatus::NumericalError => numerical_errors += 1,
@@ -519,14 +543,23 @@ pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
         0.0
     };
 
+    // Shifted geometric mean: exp(mean(log(t + shift))) - shift
+    let geom_mean_time_ms = if time_count > 0 {
+        (time_log_sum / time_count as f64).exp() - 1.0
+    } else {
+        0.0
+    };
+
     BenchmarkSummary {
         total,
         optimal,
+        almost_optimal,
         max_iters,
         numerical_errors,
         parse_errors,
         total_time_s,
         geom_mean_iters,
+        geom_mean_time_ms,
     }
 }
 
@@ -539,11 +572,19 @@ pub fn print_summary(summary: &BenchmarkSummary) {
     println!("Optimal:             {} ({:.1}%)",
              summary.optimal,
              100.0 * summary.optimal as f64 / summary.total as f64);
+    println!("AlmostOptimal:       {} ({:.1}%)",
+             summary.almost_optimal,
+             100.0 * summary.almost_optimal as f64 / summary.total as f64);
+    let combined = summary.optimal + summary.almost_optimal;
+    println!("Combined (Opt+Almost): {} ({:.1}%)",
+             combined,
+             100.0 * combined as f64 / summary.total as f64);
     println!("Max iterations:      {}", summary.max_iters);
     println!("Numerical errors:    {}", summary.numerical_errors);
     println!("Parse errors:        {}", summary.parse_errors);
     println!("Total time:          {:.2}s", summary.total_time_s);
     println!("Geom mean iters:     {:.1}", summary.geom_mean_iters);
+    println!("Geom mean time:      {:.1}ms", summary.geom_mean_time_ms);
     println!("{}", "=".repeat(60));
 }
 
@@ -556,6 +597,7 @@ pub fn print_results_table(results: &[BenchmarkResult]) {
     for r in results {
         let status_str = match r.status {
             SolveStatus::Optimal => "Optimal",
+            SolveStatus::AlmostOptimal => "AlmostOpt",
             SolveStatus::MaxIters => "MaxIter",
             SolveStatus::NumericalError => "NumErr",
             SolveStatus::PrimalInfeasible => "PrimInf",

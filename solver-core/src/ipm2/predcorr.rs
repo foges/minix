@@ -1359,6 +1359,10 @@ fn compute_step_size(
     fraction: f64,
 ) -> f64 {
     let mut alpha = f64::INFINITY;
+    let mut alpha_p_min = f64::INFINITY;
+    let mut alpha_d_min = f64::INFINITY;
+    let mut blocking_p_idx = None;
+    let mut blocking_d_idx = None;
     let mut offset = 0usize;
 
     for cone in cones.iter() {
@@ -1386,12 +1390,37 @@ fn compute_step_size(
         let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
         let alpha_d = cone.step_to_boundary_dual(z_slice, dz_slice);
 
-        if alpha_p.is_finite() {
-            alpha = alpha.min(alpha_p.max(0.0));
+        if alpha_p.is_finite() && alpha_p < alpha_p_min {
+            alpha_p_min = alpha_p.max(0.0);
+            // Find which index is blocking in this cone
+            for i in 0..dim {
+                let idx = offset + i;
+                if ds_slice[i] < 0.0 {
+                    let ratio = -s_slice[i] / ds_slice[i];
+                    if (ratio - alpha_p).abs() < 1e-10 * (ratio.abs() + 1.0) {
+                        blocking_p_idx = Some((idx, s_slice[i], ds_slice[i]));
+                        break;
+                    }
+                }
+            }
         }
-        if alpha_d.is_finite() {
-            alpha = alpha.min(alpha_d.max(0.0));
+
+        if alpha_d.is_finite() && alpha_d < alpha_d_min {
+            alpha_d_min = alpha_d.max(0.0);
+            // Find which index is blocking in this cone
+            for i in 0..dim {
+                let idx = offset + i;
+                if dz_slice[i] < 0.0 {
+                    let ratio = -z_slice[i] / dz_slice[i];
+                    if (ratio - alpha_d).abs() < 1e-10 * (ratio.abs() + 1.0) {
+                        blocking_d_idx = Some((idx, z_slice[i], dz_slice[i]));
+                        break;
+                    }
+                }
+            }
         }
+
+        alpha = alpha.min(alpha_p_min).min(alpha_d_min);
 
         if alpha == 0.0 {
             break;
@@ -1400,11 +1429,29 @@ fn compute_step_size(
         offset += dim;
     }
 
-    if alpha.is_finite() {
+    let alpha_final = if alpha.is_finite() {
         (fraction * alpha).min(1.0)
     } else {
         1.0
+    };
+
+    // Log blocking info when step size is very small
+    if diagnostics_enabled() && alpha_final < 1e-8 {
+        if let Some((idx, s, ds)) = blocking_p_idx {
+            eprintln!(
+                "  BLOCK primal: idx={} s={:.3e} ds={:.3e} alpha_p_raw={:.3e} would_be={:.3e}",
+                idx, s, ds, alpha_p_min, s + alpha_p_min * ds
+            );
+        }
+        if let Some((idx, z, dz)) = blocking_d_idx {
+            eprintln!(
+                "  BLOCK dual: idx={} z={:.3e} dz={:.3e} alpha_d_raw={:.3e} would_be={:.3e}",
+                idx, z, dz, alpha_d_min, z + alpha_d_min * dz
+            );
+        }
     }
+
+    alpha_final
 }
 
 /// Compute μ_aff = (s_aff · z_aff + τ_aff κ_aff) / (ν + 1) after affine step.

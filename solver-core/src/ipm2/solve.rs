@@ -47,6 +47,31 @@ pub fn solve_ipm2(
     let orig_n = orig_prob.num_vars();
     let _orig_m = orig_prob_bounds.num_constraints();
 
+    // Constraint conditioning: DISABLED (harmful - see _planning/v15/conditioning_results.md)
+    // Row scaling interferes with Ruiz equilibration and decreases pass rate (108→104).
+    // Detection code kept for analysis. Enable with SolverSettings.enable_conditioning=true.
+    let mut prob = prob;
+    if settings.enable_conditioning.unwrap_or(false) {
+        let cond_stats = crate::presolve::condition::analyze_conditioning(&prob);
+        if settings.verbose {
+            eprintln!(
+                "conditioning: parallel_pairs={} extreme_ratio_rows={} max_cosine={:.3e} max_ratio={:.3e}",
+                cond_stats.parallel_pairs,
+                cond_stats.extreme_ratio_rows,
+                cond_stats.max_cosine_sim,
+                cond_stats.max_coeff_ratio
+            );
+        }
+
+        // Apply row scaling if we detect severe issues
+        if cond_stats.extreme_ratio_rows > 0 || cond_stats.max_coeff_ratio > 1e8 {
+            let _row_scales = crate::presolve::condition::apply_row_scaling(&mut prob);
+            if settings.verbose {
+                eprintln!("conditioning: applied row scaling");
+            }
+        }
+    }
+
     // Apply Ruiz equilibration
     let (a_scaled, p_scaled, q_scaled, b_scaled, scaling) = equilibrate(
         &prob.A,
@@ -310,6 +335,15 @@ pub fn solve_ipm2(
         let mu_old = mu;
         mu = step_result.mu_new;
 
+        // Log μ decomposition when μ is large (for debugging QFORPLAN-type problems)
+        if diag.should_log(iter) && mu > 1e10 {
+            let (mu_sz, mu_tk) = state.mu_decomposition();
+            eprintln!(
+                "large mu at iter {}: mu={:.3e} mu_sz={:.3e} mu_tk={:.3e} ratio_sz/tk={:.2e} tau={:.3e} kappa={:.3e}",
+                iter, mu, mu_sz, mu_tk, mu_sz / mu_tk.max(1e-100), state.tau, state.kappa
+            );
+        }
+
         // Check for μ explosion (more than 100x growth without residual progress)
         if mu.is_finite() && mu_old.is_finite() && mu > mu_old * 100.0 && mu > 1e-8 {
             // Compute residual norms to see if we're making progress
@@ -377,10 +411,94 @@ pub fn solve_ipm2(
             {
                 term_status = Some(status);
             } else {
-                // Early polish check: if primal and gap are good but dual is stuck,
-                // try polish now rather than waiting for max_iter
+                // Note: Don't check is_almost_optimal() here - it would exit early and skip polish!
+                // We check for AlmostOptimal at the end, after polish has been attempted.
                 let primal_ok = metrics.rp_inf <= criteria.tol_feas * metrics.primal_scale;
                 let dual_ok = metrics.rd_inf <= criteria.tol_feas * metrics.dual_scale;
+
+                // Dual recovery: When primal is excellent but dual is severely stuck,
+                // try solving for dual only via least-squares (avoids ill-conditioned KKT)
+                // This handles QSHIP family and similar "step collapse" problems
+                // Relaxed thresholds: rel_p < 1e-5 (was 1e-6), rel_d > 0.05 (was 0.1), iter >= 10 (was 20)
+                // Retry every 10 iterations to catch persistent dual issues
+                let should_try_recovery = primal_ok
+                    && metrics.rel_p < 1e-5
+                    && metrics.rel_d > 0.05
+                    && iter >= 10
+                    && (iter - 10) % 10 == 0;  // Try at iters 10, 20, 30, 40...
+
+                if should_try_recovery {
+                    let inv_tau = if state.tau > 1e-8 { 1.0 / state.tau } else { 0.0 };
+
+                    // Unscale to x_bar, s_bar (reduced dimensions)
+                    let x_bar: Vec<f64> = state.x.iter().enumerate()
+                        .map(|(i, &xi)| xi * inv_tau * scaling.col_scale[i])
+                        .collect();
+                    let s_bar: Vec<f64> = state.s.iter().enumerate()
+                        .map(|(i, &si)| si * inv_tau / scaling.row_scale[i])
+                        .collect();
+
+                    // Expand to full dimensions via postsolve
+                    let x_for_recovery = postsolve.recover_x(&x_bar);
+                    let s_for_recovery = postsolve.recover_s(&s_bar, &x_for_recovery);
+
+                    if diag.enabled {
+                        eprintln!("dual_recovery attempt at iter {}: rel_p={:.3e} rel_d={:.3e}",
+                            iter, metrics.rel_p, metrics.rel_d);
+                    }
+
+                    if let Some(recovered) = crate::ipm2::polish::recover_dual_from_primal(
+                        &orig_prob_bounds,
+                        &x_for_recovery,
+                        &s_for_recovery,
+                        settings,
+                    ) {
+                        // Evaluate recovered solution
+                        let mut rp_rec = vec![0.0; orig_prob_bounds.num_constraints()];
+                        let mut rd_rec = vec![0.0; orig_prob_bounds.num_vars()];
+                        let mut px_rec = vec![0.0; orig_prob_bounds.num_vars()];
+                        let rec_metrics = compute_unscaled_metrics(
+                            &orig_prob_bounds.A,
+                            orig_prob_bounds.P.as_ref(),
+                            &orig_prob_bounds.q,
+                            &orig_prob_bounds.b,
+                            &recovered.x,
+                            &recovered.s,
+                            &recovered.z,
+                            &mut rp_rec,
+                            &mut rd_rec,
+                            &mut px_rec,
+                        );
+
+                        // Accept if dual improved significantly without worsening primal
+                        // Use 0.5x improvement threshold (was 0.1x which was too strict)
+                        let dual_improved = rec_metrics.rel_d < metrics.rel_d * 0.5;
+                        let primal_still_ok = rec_metrics.rel_p < criteria.tol_feas;
+                        let gap_acceptable = rec_metrics.gap_rel <= criteria.tol_gap_rel ||
+                                            rec_metrics.gap_rel <= metrics.gap_rel * 2.0;
+
+                        if dual_improved && primal_still_ok {
+                            if diag.enabled {
+                                eprintln!("dual_recovery SUCCESS: rel_d {:.3e} -> {:.3e}",
+                                    metrics.rel_d, rec_metrics.rel_d);
+                            }
+
+                            // Check if this makes the solution optimal
+                            if is_optimal(&rec_metrics, &criteria) {
+                                // Store solution and terminate
+                                early_polish_result = Some((recovered, rec_metrics));
+                                status = SolveStatus::Optimal;
+                                break;
+                            }
+                        } else if diag.enabled {
+                            eprintln!("dual_recovery REJECTED: dual_improved={} primal_ok={} rel_d={:.3e}",
+                                dual_improved, primal_still_ok, rec_metrics.rel_d);
+                        }
+                    }
+                }
+
+                // Early polish check: if primal and gap are good but dual is stuck,
+                // try polish now rather than waiting for max_iter
                 let gap_scale_abs = metrics.obj_p.abs().min(metrics.obj_d.abs()).max(1.0);
                 let gap_ok_abs = metrics.gap <= criteria.tol_gap * gap_scale_abs;
                 let gap_ok = gap_ok_abs || metrics.gap_rel <= criteria.tol_gap_rel;
@@ -1062,6 +1180,12 @@ pub fn solve_ipm2(
 
     let (primal_res, dual_res, gap) = (final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
 
+    // Final check: if we hit MaxIters but meet AlmostOptimal thresholds, upgrade status
+    // This check happens AFTER polish, so we've given the solver every chance to reach Optimal
+    if status == SolveStatus::MaxIters && is_almost_optimal(&final_metrics) {
+        status = SolveStatus::AlmostOptimal;
+    }
+
     Ok(SolveResult {
         status,
         x,
@@ -1245,6 +1369,24 @@ fn is_optimal(metrics: &crate::ipm2::UnscaledMetrics, criteria: &TerminationCrit
     let gap_scale_abs = metrics.obj_p.abs().min(metrics.obj_d.abs()).max(1.0);
     let gap_ok_abs = metrics.gap <= criteria.tol_gap * gap_scale_abs;
     let gap_ok = gap_ok_abs || metrics.gap_rel <= criteria.tol_gap_rel;
+
+    primal_ok && dual_ok && gap_ok
+}
+
+/// Check if solution meets reduced accuracy thresholds (AlmostOptimal, like Clarabel)
+/// Clarabel reduced: gap_abs=5e-5, gap_rel=5e-5, feas=1e-4 (vs full: 1e-8/1e-8/1e-8)
+fn is_almost_optimal(metrics: &crate::ipm2::UnscaledMetrics) -> bool {
+    const REDUCED_TOL_FEAS: f64 = 1e-4;
+    const REDUCED_TOL_GAP_ABS: f64 = 5e-5;
+    const REDUCED_TOL_GAP_REL: f64 = 5e-5;
+
+    // Use same style as is_optimal() for consistency
+    let primal_ok = metrics.rp_inf <= REDUCED_TOL_FEAS * metrics.primal_scale;
+    let dual_ok = metrics.rd_inf <= REDUCED_TOL_FEAS * metrics.dual_scale;
+
+    let gap_scale_abs = metrics.obj_p.abs().min(metrics.obj_d.abs()).max(1.0);
+    let gap_ok_abs = metrics.gap <= REDUCED_TOL_GAP_ABS * gap_scale_abs;
+    let gap_ok = gap_ok_abs || metrics.gap_rel <= REDUCED_TOL_GAP_REL;
 
     primal_ok && dual_ok && gap_ok
 }

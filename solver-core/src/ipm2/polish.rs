@@ -1040,3 +1040,146 @@ fn cholesky_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 
     Some(x)
 }
+
+/// Recover dual variables (z) given a fixed primal solution (x, s).
+///
+/// This is for the "excellent primal, terrible dual" endgame where:
+/// - rel_p < 1e-6 (primal is converged)
+/// - rel_d > 1.0 (dual is stuck or exploding)
+///
+/// Instead of solving the full KKT system (which is ill-conditioned), we:
+/// 1. Fix x and s at their current values
+/// 2. Solve for z by minimizing the stationarity residual:
+///    minimize ||Px + q + A'z||^2 + rho ||z||^2
+/// 3. Project z onto cone constraints
+///
+/// This uses SPD normal equations instead of the saddle-point KKT system,
+/// which is much more stable when the primal is essentially optimal.
+pub fn recover_dual_from_primal(
+    prob: &ProblemData,
+    x: &[f64],
+    s: &[f64],
+    settings: &SolverSettings,
+) -> Option<PolishResult> {
+    let diag_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    if x.len() != n || s.len() != m {
+        if diag_enabled {
+            eprintln!("dual_recovery: dimension mismatch");
+        }
+        return None;
+    }
+
+    // Compute Px
+    let mut px = vec![0.0; n];
+    if let Some(ref p) = prob.P {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    if row == col {
+                        px[row] += val * x[col];
+                    } else {
+                        px[row] += val * x[col];
+                        px[col] += val * x[row]; // symmetric
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute residual = Px + q
+    let mut res: Vec<f64> = (0..n).map(|j| px[j] + prob.q[j]).collect();
+
+    // We want to solve: minimize ||res + A'z||^2 + rho ||z||^2
+    // Taking derivative w.r.t. z: A * (res + A'z) + rho * z = 0
+    // Rearranging: (A*A' + rho*I) z = -A * res
+    //
+    // Build normal equations: (A*A' + rho*I) z = b
+    // where b = -A * res
+
+    let rho = 1e-6; // Regularization parameter
+
+    // Compute b = -A * res (m-dimensional)
+    let mut b = vec![0.0; m];
+    for (&val, (row, col)) in prob.A.iter() {
+        b[row] -= val * res[col];
+    }
+
+    // Build A*A' + rho*I as dense matrix (only works for small-medium m)
+    if m > 5000 {
+        if diag_enabled {
+            eprintln!("dual_recovery: problem too large (m={})", m);
+        }
+        return None;
+    }
+
+    let mut aat = vec![vec![0.0; m]; m];
+
+    // Compute A*A'
+    for col in 0..n {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            let entries: Vec<(usize, f64)> = col_view.iter().map(|(r, &v)| (r, v)).collect();
+            for &(i, val_i) in &entries {
+                for &(j, val_j) in &entries {
+                    if i <= j {
+                        aat[i][j] += val_i * val_j;
+                    }
+                }
+            }
+        }
+    }
+
+    // Add regularization rho*I and fill lower triangle
+    for i in 0..m {
+        aat[i][i] += rho;
+        for j in (i+1)..m {
+            aat[j][i] = aat[i][j]; // symmetric
+        }
+    }
+
+    // Solve using Cholesky
+    let z_raw = cholesky_solve(&aat, &b)?;
+
+    // Project z onto cone constraints
+    let mut z = z_raw.clone();
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match cone {
+            ConeSpec::Zero { dim } => {
+                // Zero cone: z is free, no projection needed
+                offset += dim;
+            }
+            ConeSpec::NonNeg { dim } => {
+                // NonNeg cone: z >= 0
+                for i in offset..(offset + dim) {
+                    z[i] = z[i].max(0.0);
+                }
+                offset += dim;
+            }
+            _ => {
+                if diag_enabled {
+                    eprintln!("dual_recovery: unsupported cone type {:?}", cone);
+                }
+                return None; // Only support Zero and NonNeg for now
+            }
+        }
+    }
+
+    if diag_enabled {
+        // Compute recovered stationarity residual
+        let mut atz = vec![0.0; n];
+        for (&val, (row, col)) in prob.A.iter() {
+            atz[col] += val * z[row];
+        }
+        let rd_norm = (0..n).map(|j| (px[j] + prob.q[j] + atz[j]).abs()).fold(0.0, f64::max);
+        eprintln!("dual_recovery: recovered rd_norm={:.3e}", rd_norm);
+    }
+
+    Some(PolishResult {
+        x: x.to_vec(),
+        s: s.to_vec(),
+        z,
+    })
+}

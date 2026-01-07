@@ -43,7 +43,7 @@ impl Default for TerminationCriteria {
         Self {
             tol_feas: 1e-8,
             tol_gap: 1e-8,
-            tol_gap_rel: 1e-3,  // 0.1% relative gap tolerance
+            tol_gap_rel: 1e-8,  // Match Clarabel: was 1e-3 (too loose!)
             tol_infeas: 1e-8,
             tau_min: 1e-8,
             max_iter: 200,

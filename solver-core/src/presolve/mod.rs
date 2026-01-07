@@ -6,6 +6,7 @@ pub mod ruiz;
 pub mod singleton;
 pub mod bounds;
 pub mod eliminate;
+pub mod condition;
 
 use crate::problem::ProblemData;
 use crate::presolve::bounds::{PresolveResult, shift_bounds_and_eliminate_fixed_with_postsolve};
