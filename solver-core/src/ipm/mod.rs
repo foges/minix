@@ -284,6 +284,11 @@ pub fn solve_ipm(
             mu = compute_mu(&state, barrier_degree);
         }
 
+        // Normalize tau+kappa to prevent HSDE drift (keep tau+kappa near 2.0)
+        // This prevents kappa explosion on problems like QFORPLAN
+        // Use tau+kappa normalization instead of tau-only to bound both variables
+        state.normalize_tau_kappa_if_needed(0.5, 50.0, 2.0);
+
         if diagnostics_enabled() {
             let min_s = min_slice(&state.s);
             let min_z = min_slice(&state.z);
