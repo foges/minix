@@ -132,12 +132,19 @@ pub fn polish_nonneg_active_set(
         eprintln!("polish: candidate active set size={}", active.len());
     }
 
-    // Cap active set size: a huge active set makes the polish KKT ill-posed.
-    // Keep the most "active" constraints by multiplier magnitude.
-    let max_active = n.max(64);
+    // Cap active set size: the KKT system has size (n + m_eq) where m_eq = eq_rows + active.
+    // For the factorization to succeed, we need m_eq <= n (otherwise overdetermined).
+    // Reserve some slack for numerical stability: cap total constraints to 0.95*n.
+    let max_total_constraints = ((n as f64) * 0.95) as usize;
+    let max_active = if eq_rows.len() >= max_total_constraints {
+        0  // Too many equality rows already
+    } else {
+        max_total_constraints - eq_rows.len()
+    };
     if active.len() > max_active {
         if diag_enabled {
-            eprintln!("polish: capping active set from {} to {}", active.len(), max_active);
+            eprintln!("polish: capping active set from {} to {} (eq_rows={}, n={})",
+                active.len(), max_active, eq_rows.len(), n);
         }
         active.sort_by(|&a, &b| z0[b].abs().partial_cmp(&z0[a].abs()).unwrap());
         active.truncate(max_active);
@@ -312,4 +319,517 @@ fn compute_slack(prob: &ProblemData, x: &[f64]) -> Vec<f64> {
     }
     debug_assert_eq!(s.len(), m);
     s
+}
+
+/// Primal projection polish: project x onto active constraints with large violations.
+///
+/// This handles the case where dual/gap are converged but primal residual is stuck
+/// on a few active constraints. We find a minimum-norm correction Δx such that
+/// A_active * (x + Δx) = b_active for those constraints.
+///
+/// Returns `Some(PolishResult)` if successful, `None` otherwise.
+pub fn polish_primal_projection(
+    prob: &ProblemData,
+    x0: &[f64],
+    s0: &[f64],
+    z0: &[f64],
+    rp: &[f64],
+    tol_feas: f64,
+) -> Option<PolishResult> {
+    let diag_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    if x0.len() != n || s0.len() != m || z0.len() != m || rp.len() != m {
+        return None;
+    }
+
+    // Only handle Zero + NonNeg cones
+    if prob.cones.iter().any(|c| !matches!(c, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. })) {
+        return None;
+    }
+
+    // Find rows that are:
+    // 1. Active (s ≈ 0)
+    // 2. Have significant primal violation (|rp| close to the max violation)
+    //
+    // The key insight: we only want to project onto the rows that dominate the
+    // primal residual, not all rows with small slack. Use the max |rp| to filter.
+    let rp_max = rp.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+    let rp_thresh = rp_max * 0.9; // Only rows with |rp| >= 90% of max
+    let s_thresh = tol_feas * 0.001; // Very small slack = active (s < 1e-11)
+
+    let mut violating_active: Vec<usize> = (0..m)
+        .filter(|&i| s0[i].abs() < s_thresh && rp[i].abs() >= rp_thresh)
+        .collect();
+
+    if violating_active.is_empty() {
+        if diag_enabled {
+            eprintln!("primal_polish: no violating active constraints");
+        }
+        return None;
+    }
+
+    // Sort by violation magnitude (largest first) and take top rows
+    // Using fewer rows means smaller Δx, which means less dual disruption
+    violating_active.sort_by(|&a, &b| {
+        rp[b].abs().partial_cmp(&rp[a].abs()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Adaptive row limit: start conservative (16 rows) to minimize dual disruption
+    // The caller can iterate with more rows if needed, but we found empirically
+    // that fixing ~15-20 rows balances primal improvement vs dual degradation
+    let max_rows = 16; // Power of 2 for potential SIMD alignment benefit
+    if violating_active.len() > max_rows {
+        violating_active.truncate(max_rows);
+        if diag_enabled {
+            eprintln!("primal_polish: limiting to top {} violating rows", max_rows);
+        }
+    }
+
+    let k = violating_active.len();
+    if diag_enabled {
+        eprintln!("primal_polish: {} violating active constraints", k);
+    }
+
+    // Build A_active (k × n) as dense rows
+    // Each row is the constraint coefficients for a violating row
+    let mut a_rows: Vec<Vec<f64>> = vec![vec![0.0; n]; k];
+    for (&val, (row, col)) in prob.A.iter() {
+        if let Some(idx) = violating_active.iter().position(|&r| r == row) {
+            a_rows[idx][col] = val;
+        }
+    }
+
+    // Build rhs = -rp_active (the residual we want to eliminate)
+    let rhs: Vec<f64> = violating_active.iter().map(|&i| -rp[i]).collect();
+
+    // Solve min ||Δx||² s.t. A_active * Δx = rhs
+    // Solution: Δx = A^T * (A * A^T)^{-1} * rhs
+    //
+    // First compute G = A * A^T (k × k dense)
+    let mut g = vec![vec![0.0; k]; k];
+    for i in 0..k {
+        for j in 0..=i {
+            let dot: f64 = (0..n).map(|c| a_rows[i][c] * a_rows[j][c]).sum();
+            g[i][j] = dot;
+            g[j][i] = dot;
+        }
+    }
+
+    // Add small regularization for numerical stability
+    for i in 0..k {
+        g[i][i] += 1e-12;
+    }
+
+    // Solve G * y = rhs using Cholesky (G is SPD)
+    let y = match cholesky_solve(&g, &rhs) {
+        Some(y) => y,
+        None => {
+            if diag_enabled {
+                eprintln!("primal_polish: Cholesky solve failed");
+            }
+            return None;
+        }
+    };
+
+    // Δx = A^T * y
+    let mut dx = vec![0.0; n];
+    for (i, &yi) in y.iter().enumerate() {
+        for j in 0..n {
+            dx[j] += a_rows[i][j] * yi;
+        }
+    }
+
+    // Check correction magnitude - don't apply huge corrections
+    let dx_norm = dx.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let x_norm = x0.iter().map(|x| x * x).sum::<f64>().sqrt().max(1.0);
+    if dx_norm > 0.1 * x_norm {
+        if diag_enabled {
+            eprintln!("primal_polish: correction too large ({:.3e} vs {:.3e}), rejecting", dx_norm, x_norm);
+        }
+        return None;
+    }
+
+    // Apply correction
+    let mut x = x0.to_vec();
+    for i in 0..n {
+        x[i] += dx[i];
+    }
+
+    // Recompute s = b - Ax
+    let s = compute_slack(prob, &x);
+
+    // Keep z unchanged (dual is already good)
+    let z = z0.to_vec();
+
+    if diag_enabled {
+        // Verify improvement
+        let new_rp: Vec<f64> = (0..m).map(|i| prob.b[i] - s[i] - {
+            let mut ax_i = 0.0;
+            for (&val, (row, col)) in prob.A.iter() {
+                if row == i {
+                    ax_i += val * x[col];
+                }
+            }
+            ax_i
+        }).collect();
+        let new_rp_inf = inf_norm(&new_rp);
+        let old_rp_inf = inf_norm(rp);
+        eprintln!("primal_polish: |rp| {:.3e} -> {:.3e}, |dx|={:.3e}", old_rp_inf, new_rp_inf, dx_norm);
+    }
+
+    Some(PolishResult { x, s, z })
+}
+
+/// Combined primal + dual polish.
+///
+/// First applies primal projection to fix primal residuals, then computes a dual
+/// correction to mitigate the dual degradation caused by changing x.
+///
+/// The dual residual after primal correction is rd_new = P*x_new + q - A^T*z.
+/// We want to find Δz such that A^T*Δz ≈ P*Δx to minimize dual degradation.
+pub fn polish_primal_and_dual(
+    prob: &ProblemData,
+    x0: &[f64],
+    s0: &[f64],
+    z0: &[f64],
+    rp: &[f64],
+    tol_feas: f64,
+) -> Option<PolishResult> {
+    let diag_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    // First, get the primal correction
+    let primal_result = polish_primal_projection(prob, x0, s0, z0, rp, tol_feas)?;
+
+    // Compute Δx from primal correction
+    let dx: Vec<f64> = primal_result.x.iter()
+        .zip(x0.iter())
+        .map(|(&xp, &x0)| xp - x0)
+        .collect();
+
+    // Compute P*Δx (the dual residual change)
+    let mut p_dx = vec![0.0; n];
+    if let Some(ref p) = prob.P {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    p_dx[row] += val * dx[col];
+                }
+            }
+        }
+    }
+
+    let p_dx_norm = p_dx.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if p_dx_norm < 1e-14 {
+        // No dual correction needed
+        return Some(primal_result);
+    }
+
+    if diag_enabled {
+        eprintln!("dual_polish: |P*dx|={:.3e}", p_dx_norm);
+    }
+
+    // Solve for Δz: A^T*Δz = P*Δx  (n equations, m unknowns)
+    // Minimum-norm solution: Δz = A * (A^T*A)^{-1} * (P*Δx)
+    //
+    // But A^T*A is n×n dense which is expensive. For now, use a simplified approach:
+    // Only adjust z for rows where the constraint is active (s ≈ 0).
+    //
+    // For active row i: z[i] adjustment affects rd via -A[i,:] (the i-th row of A).
+    // We want: -Σ_i A[i,j]*Δz[i] ≈ P*Δx[j] for each j.
+    //
+    // This is still a least-squares problem but over active rows only.
+    let s_thresh = tol_feas * 0.001;
+    let active_rows: Vec<usize> = (0..m)
+        .filter(|&i| s0[i].abs() < s_thresh)
+        .collect();
+
+    if active_rows.is_empty() || active_rows.len() > 500 {
+        // Too many active rows, skip dual correction
+        if diag_enabled {
+            eprintln!("dual_polish: skipping, active_rows={}", active_rows.len());
+        }
+        return Some(primal_result);
+    }
+
+    let k = active_rows.len();
+    if diag_enabled {
+        eprintln!("dual_polish: {} active rows for dual correction", k);
+    }
+
+    // Build A_active^T (n × k) and then compute (A_active * A_active^T)^{-1} * A_active * p_dx
+    // Build A_active as k×n dense
+    let mut a_active: Vec<Vec<f64>> = vec![vec![0.0; n]; k];
+    for (&val, (row, col)) in prob.A.iter() {
+        if let Some(idx) = active_rows.iter().position(|&r| r == row) {
+            a_active[idx][col] = val;
+        }
+    }
+
+    // Compute A_active * p_dx (k-vector)
+    let a_pdx: Vec<f64> = (0..k)
+        .map(|i| (0..n).map(|j| a_active[i][j] * p_dx[j]).sum())
+        .collect();
+
+    // Compute G = A_active * A_active^T (k × k)
+    let mut g = vec![vec![0.0; k]; k];
+    for i in 0..k {
+        for j in 0..=i {
+            let dot: f64 = (0..n).map(|c| a_active[i][c] * a_active[j][c]).sum();
+            g[i][j] = dot;
+            g[j][i] = dot;
+        }
+    }
+
+    // Add regularization
+    for i in 0..k {
+        g[i][i] += 1e-10;
+    }
+
+    // Solve G * y = A_active * p_dx
+    let y = cholesky_solve(&g, &a_pdx)?;
+
+    // Δz for active rows: Δz[active_rows[i]] = y[i]
+    let mut dz = vec![0.0; m];
+    for (i, &row) in active_rows.iter().enumerate() {
+        dz[row] = y[i];
+    }
+
+    // Apply dual correction
+    let mut z = primal_result.z.clone();
+    for i in 0..m {
+        z[i] += dz[i];
+    }
+
+    // Ensure z stays non-negative for NonNeg cones
+    // (This is important - z must be in the dual cone)
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match *cone {
+            ConeSpec::Zero { dim } => {
+                // z can be anything for Zero cone (it's the free dual)
+                offset += dim;
+            }
+            ConeSpec::NonNeg { dim } => {
+                // z must be >= 0 for NonNeg cone
+                for i in offset..offset + dim {
+                    z[i] = z[i].max(0.0);
+                }
+                offset += dim;
+            }
+            _ => {
+                // Skip for other cones
+                offset += cone.dim();
+            }
+        }
+    }
+
+    if diag_enabled {
+        let dz_norm = dz.iter().map(|x| x * x).sum::<f64>().sqrt();
+        eprintln!("dual_polish: |dz|={:.3e}", dz_norm);
+    }
+
+    Some(PolishResult {
+        x: primal_result.x,
+        s: primal_result.s,
+        z,
+    })
+}
+
+/// Direct dual polish: keep x/s fixed, find z that minimizes ||A^T z - (Px + q)||.
+///
+/// For dual-stuck problems (QSHIP family), the issue is that the KKT system becomes
+/// ill-conditioned and z drifts. This function computes z directly from the dual
+/// residual equation rd = Px + q - A^T z = 0, i.e., A^T z = Px + q.
+///
+/// This is a least-squares problem: z = argmin ||A^T z - target||² where target = Px + q.
+/// Solution: z = A (A^T A)^{-1} target (using normal equations on A^T).
+pub fn polish_dual_only(
+    prob: &ProblemData,
+    x0: &[f64],
+    s0: &[f64],
+    _z0: &[f64],
+    _settings: &SolverSettings,
+) -> Option<PolishResult> {
+    let diag_enabled = std::env::var("MINIX_DIAGNOSTICS").is_ok();
+    let n = prob.num_vars();
+    let m = prob.num_constraints();
+
+    if x0.len() != n || s0.len() != m {
+        return None;
+    }
+
+    // Only handle Zero + NonNeg cones
+    if prob.cones.iter().any(|c| !matches!(c, ConeSpec::Zero { .. } | ConeSpec::NonNeg { .. })) {
+        if diag_enabled {
+            eprintln!("dual_only_polish: unsupported cones");
+        }
+        return None;
+    }
+
+    // Compute target = Px + q (what A^T z should equal for dual feasibility)
+    let mut target = prob.q.clone();
+    if let Some(ref p) = prob.P {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    target[row] += val * x0[col];
+                }
+            }
+        }
+    }
+
+    // We want A^T z = target, where A is m×n and z is m×1.
+    // This means we're solving for z in the equation: A^T z = target
+    // Let B = A^T (n×m matrix). We want: B z = target
+    // Solution via normal equations: z = B^T (B B^T)^{-1} target = A (A^T A)^{-1} target
+    //
+    // But A^T A is n×n (can be large). For now, limit to smaller problems.
+    if n > 1000 {
+        if diag_enabled {
+            eprintln!("dual_only_polish: n={} too large", n);
+        }
+        return None;
+    }
+
+    // Build A^T A (n×n dense)
+    let mut ata = vec![vec![0.0; n]; n];
+    for col in 0..n {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            for (row, &val) in col_view.iter() {
+                // This contributes val to column col of A
+                // A^T A [i][j] = sum_k A[k][i] * A[k][j]
+                // For each (row, col) pair with value val, we add to ata[col][?]
+                // Need to iterate all entries again for the second factor
+                for col2 in 0..n {
+                    if let Some(col2_view) = prob.A.outer_view(col2) {
+                        for (row2, &val2) in col2_view.iter() {
+                            if row2 == row {
+                                ata[col][col2] += val * val2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add regularization
+    for i in 0..n {
+        ata[i][i] += 1e-10;
+    }
+
+    // Solve (A^T A) w = target for w
+    let w = match cholesky_solve(&ata, &target) {
+        Some(w) => w,
+        None => {
+            if diag_enabled {
+                eprintln!("dual_only_polish: Cholesky failed");
+            }
+            return None;
+        }
+    };
+
+    // z = A w
+    let mut z = vec![0.0; m];
+    for col in 0..n {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            for (row, &val) in col_view.iter() {
+                z[row] += val * w[col];
+            }
+        }
+    }
+
+    // Project z to satisfy cone constraints
+    let mut offset = 0;
+    for cone in &prob.cones {
+        match *cone {
+            ConeSpec::Zero { dim } => {
+                // Zero cone: z is free (no projection needed)
+                offset += dim;
+            }
+            ConeSpec::NonNeg { dim } => {
+                // NonNeg cone: z must be >= 0
+                for i in offset..offset + dim {
+                    z[i] = z[i].max(0.0);
+                }
+                offset += dim;
+            }
+            _ => {
+                offset += cone.dim();
+            }
+        }
+    }
+
+    if diag_enabled {
+        // Compute resulting dual residual
+        let mut rd = target.clone();
+        for col in 0..n {
+            if let Some(col_view) = prob.A.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    rd[col] -= val * z[row];
+                }
+            }
+        }
+        let rd_inf = inf_norm(&rd);
+        eprintln!("dual_only_polish: |rd| after = {:.3e}", rd_inf);
+    }
+
+    Some(PolishResult {
+        x: x0.to_vec(),
+        s: s0.to_vec(),
+        z,
+    })
+}
+
+/// Simple Cholesky solve for small dense SPD systems
+fn cholesky_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+    let n = a.len();
+    if n == 0 || b.len() != n {
+        return None;
+    }
+
+    // Cholesky factorization: A = L * L^T
+    let mut l = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = a[i][j];
+            for k in 0..j {
+                sum -= l[i][k] * l[j][k];
+            }
+            if i == j {
+                if sum <= 0.0 {
+                    return None; // Not positive definite
+                }
+                l[i][j] = sum.sqrt();
+            } else {
+                l[i][j] = sum / l[j][j];
+            }
+        }
+    }
+
+    // Forward solve: L * y = b
+    let mut y = vec![0.0; n];
+    for i in 0..n {
+        let mut sum = b[i];
+        for j in 0..i {
+            sum -= l[i][j] * y[j];
+        }
+        y[i] = sum / l[i][i];
+    }
+
+    // Backward solve: L^T * x = y
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut sum = y[i];
+        for j in (i + 1)..n {
+            sum -= l[j][i] * x[j];
+        }
+        x[i] = sum / l[i][i];
+    }
+
+    Some(x)
 }

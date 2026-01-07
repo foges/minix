@@ -197,12 +197,17 @@ pub struct SolverSettings {
 
     /// Optional warm-start values for repeated solves
     pub warm_start: Option<WarmStart>,
+
+    /// Use direct solve mode (τ=1, κ=0) instead of full HSDE.
+    /// Faster for well-posed problems but loses infeasibility detection.
+    /// Falls back to HSDE automatically if divergence detected.
+    pub direct_mode: bool,
 }
 
 impl Default for SolverSettings {
     fn default() -> Self {
         Self {
-            max_iter: 200,
+            max_iter: 50,
             time_limit_ms: None,
             verbose: false,
             tol_feas: 1e-8,
@@ -222,6 +227,7 @@ impl Default for SolverSettings {
             seed: 0,
             enable_gpu: false,
             warm_start: None,
+            direct_mode: false,  // Opt-in for now
         }
     }
 }

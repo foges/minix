@@ -36,7 +36,7 @@ enum Commands {
         #[arg(long)]
         limit: Option<usize>,
         /// Maximum iterations per problem
-        #[arg(long, default_value = "200")]
+        #[arg(long, default_value = "50")]
         max_iter: usize,
         /// Run a single problem by name
         #[arg(long)]
@@ -56,7 +56,7 @@ enum Commands {
     /// Run regression suite (local QPS cache + synthetic cases)
     Regression {
         /// Maximum iterations per problem
-        #[arg(long, default_value = "200")]
+        #[arg(long, default_value = "50")]
         max_iter: usize,
         /// Require cached QPS files (fail if missing)
         #[arg(long)]
@@ -261,11 +261,17 @@ fn run_maros_meszaros(
     show_table: bool,
     solver: SolverChoice,
 ) {
+    // Check for direct mode via environment variable
+    let direct_mode = std::env::var("MINIX_DIRECT_MODE")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+
     let settings = SolverSettings {
         verbose: false,
         max_iter,
         tol_feas: 1e-8,
         tol_gap: 1e-8,
+        direct_mode,
         ..Default::default()
     };
 
