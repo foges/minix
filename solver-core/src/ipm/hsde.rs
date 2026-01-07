@@ -293,6 +293,47 @@ impl HsdeState {
 
         true
     }
+
+    /// Normalize so that τ + κ ≈ target (default 2.0).
+    ///
+    /// This is an alternative normalization strategy that keeps both τ and κ
+    /// in a sane range. Use when τ-only normalization leads to κ explosion.
+    ///
+    /// Returns true if normalization was applied.
+    pub fn normalize_tau_kappa_if_needed(&mut self, lo: f64, hi: f64, target: f64) -> bool {
+        let sum = self.tau + self.kappa;
+        if !sum.is_finite() || sum <= 0.0 {
+            return false;
+        }
+        if sum >= lo && sum <= hi {
+            return false;
+        }
+
+        let scale = target / sum;
+
+        for v in &mut self.x {
+            *v *= scale;
+        }
+        for v in &mut self.z {
+            *v *= scale;
+        }
+        for v in &mut self.s {
+            *v *= scale;
+        }
+
+        self.tau *= scale;
+        self.kappa *= scale;
+
+        true
+    }
+
+    /// Compute μ decomposition: (s·z component, τκ component)
+    /// Useful for diagnosing which part is causing μ explosion.
+    pub fn mu_decomposition(&self) -> (f64, f64) {
+        let sz: f64 = self.s.iter().zip(self.z.iter()).map(|(si, zi)| si * zi).sum();
+        let tau_kappa = self.tau * self.kappa;
+        (sz, tau_kappa)
+    }
 }
 
 /// HSDE residuals.

@@ -11,10 +11,9 @@ use crate::ipm::hsde::{HsdeResiduals, HsdeState, compute_mu, compute_residuals};
 use crate::ipm::termination::TerminationCriteria;
 use crate::ipm2::{
     DiagnosticsConfig, IpmWorkspace, PerfSection, PerfTimers, RegularizationPolicy, SolveMode,
-    StallDetector, compute_unscaled_metrics, polish_nonneg_active_set, polish_primal_projection,
+    StallDetector, compute_unscaled_metrics, polish_nonneg_active_set,
     polish_primal_and_dual, polish_lp_dual,
 };
-use crate::ipm2::polish::PolishResult;
 use crate::ipm2::predcorr::predictor_corrector_step_in_place;
 use crate::linalg::kkt_trait::KktSolverTrait;
 use crate::linalg::unified_kkt::UnifiedKktSolver;
@@ -46,7 +45,7 @@ pub fn solve_ipm2(
     let n = prob.num_vars();
     let m = prob.num_constraints();
     let orig_n = orig_prob.num_vars();
-    let orig_m = orig_prob_bounds.num_constraints();
+    let _orig_m = orig_prob_bounds.num_constraints();
 
     // Apply Ruiz equilibration
     let (a_scaled, p_scaled, q_scaled, b_scaled, scaling) = equilibrate(
@@ -302,7 +301,37 @@ pub fn solve_ipm2(
             }
         };
 
+        // Merit function check: reject steps that cause μ explosion without residual improvement.
+        // This prevents HSDE scaling ray runaway (QFORPLAN-type pathology).
+        // Only trigger when μ explodes massively (100x+) - 10x is too aggressive and hurts normal convergence.
+        let mu_old = mu;
         mu = step_result.mu_new;
+
+        // Check for μ explosion (more than 100x growth without residual progress)
+        if mu.is_finite() && mu_old.is_finite() && mu > mu_old * 100.0 && mu > 1e-8 {
+            // Compute residual norms to see if we're making progress
+            compute_residuals(&scaled_prob, &state, &mut residuals);
+            let r_x_norm: f64 = residuals.r_x.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+            let r_z_norm: f64 = residuals.r_z.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+            let res_norm = r_x_norm.max(r_z_norm);
+
+            // If residuals are large (not making good progress), this is a bad step
+            // Use 0.1 threshold (was 0.01 which was too aggressive)
+            if res_norm > 0.1 {
+                consecutive_failures += 1;
+                numeric_recovery_level = (numeric_recovery_level + 1).min(MAX_NUMERIC_RECOVERY_LEVEL);
+                if diag.enabled {
+                    let (mu_sz, mu_tk) = state.mu_decomposition();
+                    eprintln!(
+                        "merit reject: mu {:.3e} -> {:.3e} ({}x), res_norm={:.3e}, tau={:.3e}, kappa={:.3e}, mu_sz={:.3e}, mu_tk={:.3e}",
+                        mu_old, mu, mu / mu_old, res_norm, state.tau, state.kappa, mu_sz, mu_tk
+                    );
+                }
+                // Restore state to interior and continue
+                state.push_to_interior(&cones, 1e-2);
+                mu = compute_mu(&state, barrier_degree);
+            }
+        }
 
         if !mu.is_finite() || mu > 1e15 {
             consecutive_failures += 1;
@@ -323,6 +352,10 @@ pub fn solve_ipm2(
             // Recompute mu after normalization (s,z,τ,κ all scaled)
             mu = compute_mu(&state, barrier_degree);
         }
+
+        // Note: τ+κ normalization was tried but it interferes with infeasibility detection
+        // (driving τ too small). Stick with τ-only normalization which preserves the
+        // invariant τ ≈ 1 that the infeasibility check relies on.
 
         let mut term_status = None;
         let metrics = {
@@ -727,7 +760,63 @@ pub fn solve_ipm2(
         // Relax gap requirement: try polish even if gap is up to 100x tolerance
         // (consistent with early polish check - we'll only accept if result is good)
         let gap_close = final_metrics.gap_rel <= criteria.tol_gap_rel * 100.0;
-        if primal_ok && (gap_ok || gap_close) && !dual_ok {
+
+        // Don't attempt active-set polish when dual is severely bad (rel_d > 100x tolerance).
+        // The KKT system becomes numerically unstable and leads to quasi-definite failures.
+        // For QFFFFF80-type problems, skip directly to the more robust LP dual polish.
+        let dual_severely_bad = final_metrics.rel_d > criteria.tol_feas * 100.0;
+
+        // When dual is severely bad, skip active-set polish and go straight to LP dual polish
+        if primal_ok && (gap_ok || gap_close) && !dual_ok && dual_severely_bad {
+            if diag.enabled {
+                eprintln!("skipping active-set polish (dual severely bad: rel_d={:.3e} > {:.3e}), trying LP dual polish...",
+                    final_metrics.rel_d, criteria.tol_feas * 100.0);
+            }
+            // Try LP dual polish which is more robust for severely degraded dual
+            let mut z_current = z.clone();
+            for _pass in 0..5 {
+                if let Some(polished) = polish_lp_dual(
+                    &orig_prob_bounds,
+                    &x,
+                    &s,
+                    &z_current,
+                    settings,
+                ) {
+                    let mut rp_polish = vec![0.0; orig_prob_bounds.num_constraints()];
+                    let mut rd_polish = vec![0.0; orig_prob_bounds.num_vars()];
+                    let mut px_polish = vec![0.0; orig_prob_bounds.num_vars()];
+                    let polish_metrics = compute_unscaled_metrics(
+                        &orig_prob_bounds.A,
+                        orig_prob_bounds.P.as_ref(),
+                        &orig_prob_bounds.q,
+                        &orig_prob_bounds.b,
+                        &polished.x,
+                        &polished.s,
+                        &polished.z,
+                        &mut rp_polish,
+                        &mut rd_polish,
+                        &mut px_polish,
+                    );
+
+                    if polish_metrics.rel_d < final_metrics.rel_d {
+                        z_current = polished.z.clone();
+                        z = polished.z;
+                        final_metrics = polish_metrics;
+
+                        if is_optimal(&final_metrics, &criteria) {
+                            status = SolveStatus::Optimal;
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if primal_ok && (gap_ok || gap_close) && !dual_ok && !dual_severely_bad {
             if diag.enabled {
                 eprintln!("attempting polish (gap_ok={}, gap_close={})...", gap_ok, gap_close);
             }

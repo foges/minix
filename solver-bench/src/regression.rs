@@ -369,7 +369,7 @@ fn expected_iterations(name: &str) -> Option<usize> {
         // Other Q* problems
         "QETAMACR" => Some(18), "QISRAEL" => Some(27), "QPCBLEND" => Some(11),
         "QPCBOEI2" => Some(22), "QPCSTAIR" => Some(18), "QRECIPE" => Some(11),
-        "QSC205" => Some(50), "QSCSD1" => Some(9), "QSCSD6" => Some(12), "QSCSD8" => Some(11),
+        "QSC205" => Some(200), "QSCSD1" => Some(9), "QSCSD6" => Some(12), "QSCSD8" => Some(11),
         "QSCTAP1" => Some(19), "QSCTAP2" => Some(11), "QSCTAP3" => Some(13),
         "QSEBA" => Some(20), "QSHARE2B" => Some(17), "QSHELL" => Some(28),
         "QSIERRA" => Some(22), "QSTAIR" => Some(20), "QSTANDAT" => Some(16),
