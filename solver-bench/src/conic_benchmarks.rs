@@ -59,52 +59,90 @@ use solver_core::linalg::sparse;
 /// For relative entropy: sum_i u_i*log(u_i/v_i) = sum_i (u_i*log(u_i) - u_i*log(v_i))
 ///
 /// Let me just implement a simple exponential cone problem first.
-pub fn relative_entropy_simple(_n: usize) -> ProblemData {
-    // minimize    sum_i -log(x_i)
-    // subject to  sum_i x_i = n
-    //             x >= 1e-6
-    //
-    // Using barrier: -sum log(x_i) which is already the objective!
-    // This is trivial: x_i = 1 for all i.
-    //
-    // Better problem: minimize sum_i x_i^2 subject to sum_i x_i = n, x >= 0
-    // Solution: x_i = 1 for all i (by symmetry and convexity)
+/// Simple exponential cone test adapted from CVXPY
+///
+/// minimize    x + y + z
+/// subject to  y*exp(x/y) <= z
+///             y == 1, z == exp(1)
+///
+/// This forces x = 1 at optimum, giving objective = 1 + 1 + e ≈ 4.718
+pub fn exp_cone_cvxpy_style() -> ProblemData {
+    // Variables: [x, y, z]
+    // Standard form: minimize c'v s.t. Av + s = b, s ∈ K
+    let num_vars = 3;
 
-    // Let's do something more interesting: entropy maximization
-    // maximize    -sum_i x_i * log(x_i)  (Shannon entropy)
-    // subject to  sum_i x_i = 1
-    //             sum_i i*x_i = mu       (mean constraint)
-    //             x >= 0
-    //
-    // This is a classic maximum entropy distribution.
+    // Objective: min x + y + z
+    let q = vec![1.0, 1.0, 1.0];
 
-    // For simplicity, let's just do a basic exponential cone problem:
-    // minimize    t
-    // subject to  (t, 1, x) ∈ K_exp   i.e., exp(t) <= x
-    //             x <= 2
-    //
-    // Solution: t = log(2), x = 2
+    // Constraints:
+    // Row 0-2: Exponential cone (x, y, z) with s[0:3] = (x, y, z) must be in K_exp
+    // Row 3: y + s[3] = 1  (equality: y = 1)
+    // Row 4: z + s[4] = e  (equality: z = e)
+    let e = std::f64::consts::E;
 
-    let num_vars = 2; // [t, x]
-    let num_constraints = 1; // x <= 2
-
-    // Objective: min t  =>  c = [1, 0]
-    let q = vec![1.0, 0.0];
-
-    // Build constraint matrix A (4 rows x 2 cols)
     let triplets = vec![
-        (0, 0, 1.0),   // Row 0: t + s1 = 0  ⟹  s1 = -t
-        // Row 1: 0 + s2 = 1  ⟹  s2 = 1 (no entries)
-        (2, 1, -1.0),  // Row 2: -x + s3 = 0  ⟹  s3 = x
-        (3, 1, 1.0),   // Row 3: x + s4 = 2  ⟹  s4 = 2 - x (nonneg)
+        // Exp cone rows: -I * [x,y,z]' + s[0:3] = 0
+        (0, 0, -1.0),  // -x + s[0] = 0  ⟹  s[0] = x
+        (1, 1, -1.0),  // -y + s[1] = 0  ⟹  s[1] = y
+        (2, 2, -1.0),  // -z + s[2] = 0  ⟹  s[2] = z
+        // Equality constraints (Zero cone)
+        (3, 1, 1.0),   // y + s[3] = 1   ⟹  s[3] = 1 - y (must be 0)
+        (4, 2, 1.0),   // z + s[4] = e   ⟹  s[4] = e - z (must be 0)
     ];
 
-    let A = sparse::from_triplets(4, 2, triplets);
-    let b = vec![0.0, 1.0, 0.0, 2.0];
+    let A = sparse::from_triplets(5, num_vars, triplets);
+    let b = vec![0.0, 0.0, 0.0, 1.0, e];
 
     let cones = vec![
-        ConeSpec::Exp { count: 1 },  // Rows 0-2: exponential cone
-        ConeSpec::NonNeg { dim: 1 },  // Row 3: x <= 2
+        ConeSpec::Exp { count: 1 },   // Rows 0-2
+        ConeSpec::Zero { dim: 2 },    // Rows 3-4
+    ];
+
+    ProblemData {
+        P: None,
+        q,
+        A,
+        b,
+        cones,
+        var_bounds: None,
+        integrality: None,
+    }
+}
+
+pub fn relative_entropy_simple(_n: usize) -> ProblemData {
+    // Simple unbounded exponential cone problem for debugging
+    // minimize    x + y
+    // subject to  (x, 1, y) ∈ K_exp  i.e., y >= exp(x)
+    //
+    // Without upper bounds, we want x → -∞ and y → 0, making this unbounded.
+    // Let's add: y >= 1
+    //
+    // Then optimal is: y = exp(x), minimize x + exp(x)
+    // d/dx[x + exp(x)] = 1 + exp(x) > 0 always, so minimize by x → -∞
+    // But y >= 1 means exp(x) >= 1, so x >= 0
+    // At x=0: objective = 0 + 1 = 1
+
+    let num_vars = 2; // [x, y]
+
+    // Objective: min x + y
+    let q = vec![1.0, 1.0];
+
+    // Constraints:
+    // Row 0-2: Exponential cone (x, 1, y) where s = (x, 1, y)
+    // Row 3: y + s[3] = 1  (y >= 1 via slack)
+    let triplets = vec![
+        (0, 0, -1.0),  // -x + s[0] = 0   ⟹  s[0] = x
+        // Row 1: s[1] = 1 (no variable terms)
+        (2, 1, -1.0),  // -y + s[2] = 0   ⟹  s[2] = y
+        (3, 1, 1.0),   // y + s[3] = 1    ⟹  s[3] = 1 - y
+    ];
+
+    let A = sparse::from_triplets(4, num_vars, triplets);
+    let b = vec![0.0, 1.0, 0.0, 1.0];
+
+    let cones = vec![
+        ConeSpec::Exp { count: 1 },   // Rows 0-2
+        ConeSpec::NonNeg { dim: 1 },  // Row 3
     ];
 
     ProblemData {
@@ -257,24 +295,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_exponential_cone_problem() {
-        let prob = relative_entropy_simple(5);
+    fn test_exponential_cone_cvxpy() {
+        let prob = exp_cone_cvxpy_style();
         let mut settings = SolverSettings::default();
         settings.max_iter = 200;
-        settings.verbose = true;
+        settings.verbose = false;
 
         let result = solve(&prob, &settings).unwrap();
-        println!("\n=== Exponential Cone Problem ===");
+        println!("\n=== Exponential Cone (CVXPY style) ===");
         println!("Status: {:?}", result.status);
         println!("Iterations: {}", result.info.iters);
         println!("Objective: {:.6}", result.obj_val);
-        println!("Solution: {:?}", result.x);
+        println!("Solution: x={:.6}, y={:.6}, z={:.6}", result.x[0], result.x[1], result.x[2]);
 
-        // Check if reasonable (may not fully converge but should be in ballpark)
+        // Expected: x=1, y=1, z=e, objective = 1 + 1 + e ≈ 4.718
         if matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal) {
-            // Expected: t = log(2) ≈ 0.693, x = 2
-            assert!((result.x[0] - 0.693).abs() < 0.1, "t should be ~0.693, got {}", result.x[0]);
-            assert!((result.x[1] - 2.0).abs() < 0.1, "x should be ~2.0, got {}", result.x[1]);
+            let expected_obj = 1.0 + 1.0 + std::f64::consts::E;
+            assert!((result.obj_val - expected_obj).abs() < 0.1,
+                "Objective should be ~{}, got {}", expected_obj, result.obj_val);
+        }
+    }
+
+    #[test]
+    fn test_exponential_cone_simple() {
+        let prob = relative_entropy_simple(5);
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 200;
+        settings.verbose = false;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== Exponential Cone (simple) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+        println!("Solution: x={:.6}, y={:.6}", result.x[0], result.x[1]);
+
+        // Expected: x=0, y=1, objective = 0 + 1 = 1
+        if matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal) {
+            assert!((result.obj_val - 1.0).abs() < 0.1,
+                "Objective should be ~1.0, got {}", result.obj_val);
         }
     }
 

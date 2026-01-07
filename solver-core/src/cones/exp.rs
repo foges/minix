@@ -396,3 +396,102 @@ fn mat3_to_row_major(m: &Matrix3<f64>) -> [f64; 9] {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exp_primal_interior() {
+        // Test basic interior points
+        // K_exp = {(x,y,z) : z >= y*exp(x/y), y > 0}
+
+        // (0, 1, 2): z=2 >= 1*exp(0) = 1 ✓
+        assert!(exp_primal_interior(&[0.0, 1.0, 2.0]));
+
+        // (-1, 1, 0.5): z=0.5 >= 1*exp(-1) = 0.368 ✓
+        assert!(exp_primal_interior(&[-1.0, 1.0, 0.5]));
+
+        // (1, 1, 3): z=3 >= 1*exp(1) = 2.718 ✓
+        assert!(exp_primal_interior(&[1.0, 1.0, 3.0]));
+
+        // Boundary: (0, 1, 1): z=1 = 1*exp(0) = 1 (should fail)
+        assert!(!exp_primal_interior(&[0.0, 1.0, 1.0]));
+
+        // Outside: (0, 1, 0.5): z=0.5 < 1*exp(0) = 1 ✗
+        assert!(!exp_primal_interior(&[0.0, 1.0, 0.5]));
+    }
+
+    #[test]
+    fn test_exp_dual_interior() {
+        // Dual cone: K_exp^* = {(u,v,w) : u < 0, w*exp(v/u - 1) >= -u}
+        // Equivalently: w >= -u * exp(v/u - 1)
+        //             : ln(w) >= ln(-u) + v/u - 1
+
+        // (-1, 0, 1): w=1, -u=1, v/u=0
+        //   ln(1) >= ln(1) + 0 - 1
+        //   0 >= -1 ✓
+        assert!(exp_dual_interior(&[-1.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn test_exp_barrier_grad() {
+        // Test that gradient is computed correctly
+        let s = [0.0, 1.0, 2.0];
+        let mut grad = [0.0; 3];
+        exp_barrier_grad_block(&s, &mut grad);
+
+        println!("grad at ({}, {}, {}) = {:?}", s[0], s[1], s[2], grad);
+
+        // Gradient should be finite
+        assert!(grad.iter().all(|&v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_exp_step_to_boundary() {
+        let cone = ExpCone::new(1);
+
+        // Interior point: (-0.693, 1.0, 2.0)
+        // This corresponds to (t, y, x) where x = 2, exp(-t) = 2, so t = -ln(2) ≈ -0.693
+        let s = [-0.693, 1.0, 2.0];
+        assert!(exp_primal_interior(&s));
+
+        // Try a step that increases x (should be OK since we're in interior)
+        let ds = [0.0, 0.0, 0.1];
+        let alpha = cone.step_to_boundary_primal(&s, &ds);
+
+        println!("alpha_s = {}", alpha);
+        assert!(alpha > 0.0, "Step in positive direction should be possible");
+    }
+
+    #[test]
+    fn test_problem_point() {
+        // Test the specific point from our benchmark problem
+        // Variables: [t, x]
+        // Slack: s = [-t, 1, x, 2-x]
+        // Cone: (s[0:3]) ∈ K_exp, s[3] ∈ K_+
+
+        // Try t=0, x=1.5
+        let t = 0.0;
+        let x = 1.5;
+        let s_exp = [-t, 1.0, x];
+
+        println!("Testing point: t={}, x={}", t, x);
+        println!("  Exp cone slack: {:?}", s_exp);
+        println!("  Is interior? {}", exp_primal_interior(&s_exp));
+
+        assert!(exp_primal_interior(&s_exp), "Point should be interior");
+
+        // Now try optimal point: t = -ln(2), x = 2
+        let t_opt = -(2.0_f64.ln());
+        let x_opt = 2.0;
+        let s_opt = [-t_opt, 1.0, x_opt];
+
+        println!("\nOptimal point: t={}, x={}", t_opt, x_opt);
+        println!("  Exp cone slack: {:?}", s_opt);
+        println!("  Should be on boundary (not interior)");
+
+        // This should be on the boundary, not interior
+        // Because x = exp(-t) → x = exp(-(-ln(2))) = exp(ln(2)) = 2
+    }
+}
