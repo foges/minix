@@ -248,8 +248,10 @@ impl ConeKernel for SocCone {
         }
 
         // Solve aα² + bα + c = 0
-        // If a ≈ 0, linear case: α = -c/b
-        if a.abs() < 1e-12 {
+        // If a ≈ 0 relative to other coefficients, use linear case: α = -c/b
+        let coef_scale = a.abs().max(b.abs()).max(c.abs()).max(1.0);
+        if a.abs() < 1e-12 * coef_scale {
+            // Linear case: aα² term is negligible relative to bα + c
             if b < 0.0 {
                 return -c / b;
             } else {
@@ -260,14 +262,41 @@ impl ConeKernel for SocCone {
         // Quadratic formula: α = (-b ± √(b² - 4ac)) / (2a)
         let discriminant = b * b - 4.0 * a * c;
 
-        if discriminant < 0.0 {
-            // No real roots: direction points into interior
+        // Due to floating point precision, discriminant can be slightly negative
+        // when mathematically it should be zero (or very small positive).
+        // Use a relative tolerance based on the magnitude of b² and 4ac.
+        let disc_scale = (b * b).abs().max((4.0 * a * c).abs()).max(1e-300);
+        let disc_tol = 1e-12 * disc_scale;
+
+        if discriminant < -disc_tol {
+            // Definitely no real roots: direction points into interior
             return f64::INFINITY;
         }
 
-        let sqrt_disc = discriminant.sqrt();
-        let alpha1 = (-b - sqrt_disc) / (2.0 * a);
-        let alpha2 = (-b + sqrt_disc) / (2.0 * a);
+        // Clamp small negative discriminants to zero
+        let sqrt_disc = discriminant.max(0.0).sqrt();
+
+        // Use Citardauq formula to avoid catastrophic cancellation.
+        // Standard formula (-b ± √disc) / 2a loses precision when b ≈ ±√disc.
+        // Instead, compute one root directly and the other via c = a*α1*α2.
+        let (alpha1, alpha2) = if b >= 0.0 {
+            // b positive: -b - √disc has no cancellation (both negative)
+            let q = -0.5 * (b + sqrt_disc);
+            if q.abs() < 1e-300 {
+                // Degenerate case: both roots are ~0
+                (0.0, 0.0)
+            } else {
+                (q / a, c / q)
+            }
+        } else {
+            // b negative: -b + √disc has no cancellation (both positive)
+            let q = -0.5 * (b - sqrt_disc);
+            if q.abs() < 1e-300 {
+                (0.0, 0.0)
+            } else {
+                (q / a, c / q)
+            }
+        };
 
         // We want the smallest positive root
         let mut alpha_max = f64::INFINITY;
@@ -493,5 +522,100 @@ mod tests {
 
         assert!(cone.is_interior_primal(&s));
         assert!(cone.is_interior_dual(&z));
+    }
+
+    #[test]
+    fn test_soc_step_citardauq_edge_case() {
+        // Test case where standard quadratic formula would lose precision
+        // due to catastrophic cancellation: b ≈ √discriminant
+        let cone = SocCone::new(3);
+
+        // Construct a case where b and √disc are nearly equal
+        // s = (2.0, 0.5, 0.5), ds = (-1.0, 0.5, 0.5)
+        // This creates a case where we're moving toward the boundary
+        let s = vec![2.0, 0.5, 0.5];
+        let ds = vec![-1.0, 0.5, 0.5];
+
+        let alpha = cone.step_to_boundary_primal(&s, &ds);
+
+        // Verify result is positive and finite
+        assert!(alpha > 0.0);
+        assert!(alpha < 100.0);
+
+        // Verify that s + alpha*ds is on the boundary (t = ||x||)
+        let t_new = s[0] + alpha * ds[0];
+        let x_new: Vec<f64> = (1..3).map(|i| s[i] + alpha * ds[i]).collect();
+        let x_norm = (x_new[0] * x_new[0] + x_new[1] * x_new[1]).sqrt();
+
+        // Should be on or very close to boundary
+        assert!((t_new - x_norm).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_soc_step_scaled_problem() {
+        // Test that relative threshold works for scaled problems
+        // Scale all coefficients by 1e8
+        let cone = SocCone::new(3);
+
+        let scale = 1e8;
+        let s = vec![2.0 * scale, 0.0, 0.0];
+        let ds = vec![-1.0 * scale, 1.0 * scale, 0.0];
+
+        let alpha = cone.step_to_boundary_primal(&s, &ds);
+
+        // Should get α = 1 (same as unscaled case)
+        assert!((alpha - 1.0).abs() < 1e-8);
+
+        // Verify boundary
+        let t_new = s[0] + alpha * ds[0];
+        let x_new = s[1] + alpha * ds[1];
+        assert!((t_new - x_new.abs()).abs() < 1e-6 * scale);
+    }
+
+    #[test]
+    fn test_soc_step_tiny_quadratic_coef() {
+        // Test linear case detection when a ≈ 0 relative to other coefficients
+        let cone = SocCone::new(3);
+
+        // Case where the quadratic term is negligible
+        // s = (10.0, 1.0, 0.0), ds = (0.0, -1.0, 0.0)
+        // dt = 0, dx = (-1, 0), so a = dt² - ||dx||² = -1
+        // This is not the linear case, but let's construct one
+
+        // For linear case: we need dt² ≈ ||dx||²
+        // s = (10.0, 0.0, 0.0), ds = (1.0, 1.0, 0.0)
+        // dt = 1, ||dx||² = 1, a = 1-1 = 0 (exactly linear)
+        let s = vec![10.0, 0.0, 0.0];
+        let ds = vec![1.0, 1.0, 0.0];
+
+        let alpha = cone.step_to_boundary_primal(&s, &ds);
+
+        // Moving (10,0,0) by α*(1,1,0) gives (10+α, α, 0)
+        // Boundary at t = ||x||, so 10+α = α, which is impossible
+        // Actually, t > ||x|| always in this direction, so α = ∞
+        assert_eq!(alpha, f64::INFINITY);
+    }
+
+    #[test]
+    fn test_soc_step_boundary_cases() {
+        let cone = SocCone::new(3);
+
+        // Case: already on boundary (should return 0)
+        let s_boundary = vec![1.0, 1.0, 0.0]; // t = ||x|| = 1
+        let ds = vec![-1.0, 0.0, 0.0]; // moving into exterior
+        let alpha = cone.step_to_boundary_primal(&s_boundary, &ds);
+        assert_eq!(alpha, 0.0);
+
+        // Case: moving tangent to cone surface (along boundary)
+        // At (2, √2, √2), ||x|| = √(2+2) = 2 = t (on boundary)
+        let sqrt2 = 2.0f64.sqrt();
+        let s_boundary2 = vec![2.0, sqrt2, sqrt2];
+        // Direction d = (1, √2/2, √2/2): new t = 2+α, new ||x|| = √((√2+α√2/2)²*2) = 2+α
+        // So t = ||x|| for all α - this is tangent to the cone surface
+        let ds2 = vec![1.0, sqrt2 / 2.0, sqrt2 / 2.0];
+        let alpha2 = cone.step_to_boundary_primal(&s_boundary2, &ds2);
+        // Tangent direction: stays on boundary, so α = ∞ (never hits boundary again)
+        // or α = 0 depending on numerical precision at the boundary
+        assert!(alpha2.is_infinite() || alpha2 == 0.0);
     }
 }

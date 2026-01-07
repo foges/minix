@@ -50,7 +50,7 @@ impl ScalingBlock {
                 out[2] = h[6] * v[0] + h[7] * v[1] + h[8] * v[2];
             }
             ScalingBlock::SocStructured { w } => {
-                // H(w) v = P(w) v (quadratic representation)
+                // H(w) v = P(w) v
                 nt::quad_rep_apply(w, v, out);
             }
             ScalingBlock::PsdStructured { w_factor, n } => {
@@ -100,11 +100,10 @@ impl ScalingBlock {
                 out[2] = h_inv[6] * v[0] + h_inv[7] * v[1] + h_inv[8] * v[2];
             }
             ScalingBlock::SocStructured { w } => {
-                // H(w)^{-1} v = P(w^{-1}) v
-                // First compute w_inv = jordan_inv(w)
-                let mut w_inv = vec![0.0; w.len()];
+                // H(w)^{-1} v = P(w)^{-1} v
+                let n = w.len();
+                let mut w_inv = vec![0.0; n];
                 nt::jordan_inv_apply(w, &mut w_inv);
-                // Then apply P(w_inv) to v
                 nt::quad_rep_apply(&w_inv, v, out);
             }
             ScalingBlock::PsdStructured { w_factor, n } => {
@@ -121,5 +120,26 @@ impl ScalingBlock {
                 mat_to_svec(&out_mat, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScalingBlock;
+
+    #[test]
+    fn test_soc_scaling_apply() {
+        let block = ScalingBlock::SocStructured {
+            w: vec![1.0, 0.0, 0.0],
+        };
+
+        let v = vec![2.0, -1.0, 4.0];
+        let mut out = vec![0.0; 3];
+        block.apply(&v, &mut out);
+
+        // For w = (1,0,0), P(w) is identity, so H v = v.
+        assert!((out[0] - 2.0).abs() < 1e-12);
+        assert!((out[1] + 1.0).abs() < 1e-12);
+        assert!((out[2] - 4.0).abs() < 1e-12);
     }
 }

@@ -328,6 +328,9 @@ pub struct SolveInfo {
 
     /// Number of dynamic regularization bumps applied
     pub reg_dynamic_bumps: u64,
+
+    /// Total backtracks in centrality line search
+    pub line_search_backtracks: u64,
 }
 
 impl ProblemData {

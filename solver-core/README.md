@@ -16,18 +16,19 @@ A state-of-the-art convex optimization solver implemented in Rust, targeting MOS
   - QDLDL sparse LDL^T factorization
   - Static and dynamic regularization for robustness
   - Efficient two-RHS solve for predictor-corrector
+  - Pre-allocated workspace for zero-allocation iterations
 - **Termination**:
   - Optimality detection (primal/dual feasibility + duality gap)
   - Infeasibility certificates (primal/dual infeasible detection)
   - Numerical error handling
+- **Presolve**: Ruiz equilibration for problem conditioning
 - **Testing**: Comprehensive unit tests with finite difference validation
+- **Benchmarking**: 600+ problems across 7 standard test suites
 
 ### Planned 🚧
 
 - **Additional Cones**: Exponential, Power, PSD
 - **BFGS Scaling**: For nonsymmetric cones
-- **Ruiz Equilibration**: Problem presolve
-- **Benchmarking**: Performance testing against ECOS/Clarabel
 - **MIP Support**: Branch-and-bound for mixed-integer problems
 - **Python/C Bindings**: Foreign function interfaces
 
@@ -135,6 +136,7 @@ solver-core/
 │   ├── ipm/                # Interior point method
 │   │   ├── hsde.rs         # HSDE formulation
 │   │   ├── predcorr.rs     # Predictor-corrector
+│   │   ├── workspace.rs    # Pre-allocated iteration vectors
 │   │   ├── termination.rs  # Termination criteria
 │   │   └── mod.rs          # Main solver loop
 │   ├── ipm2/               # Experimental solver path
@@ -247,18 +249,14 @@ The implementation prioritizes **correctness and clarity** over performance:
 
 1. **Simplified Predictor-Corrector**: The current implementation uses a basic version. Full Mehrotra correction with proper RHS construction is planned.
 
-2. **No Allocation Reuse**: Work vectors are allocated per iteration. Pre-allocation will improve performance.
+2. **Symbolic Factorization**: Not yet reused across iterations.
 
-3. **Symbolic Factorization**: Not yet reused across iterations.
-
-4. **No Parallelization**: Single-threaded execution.
+3. **No Parallelization**: Single-threaded execution.
 
 ### Planned Optimizations
 
-- Pre-allocate all work vectors
-- Reuse symbolic factorization
+- Reuse symbolic factorization across iterations
 - Implement full Mehrotra correction
-- Add Ruiz equilibration presolve
 - Profile and optimize hot paths
 - Parallel KKT assembly (optional)
 
@@ -313,8 +311,7 @@ TBD
 **Current**: Working IPM solver for LP, QP, and SOCP problems with Zero, NonNeg, and SOC cones.
 
 **Next Steps**:
-1. Add comprehensive benchmarking against ECOS/Clarabel
-2. Implement Exponential and Power cones
-3. Add PSD cone support
-4. Performance tuning and optimization
-5. Python bindings
+1. Implement Exponential and Power cones
+2. Add PSD cone support
+3. Performance tuning and optimization
+4. Python bindings

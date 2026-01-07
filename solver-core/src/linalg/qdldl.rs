@@ -226,6 +226,13 @@ impl QdldlSolver {
         let a_i = mat.indices();
         let a_x_orig = mat.data();
 
+        // If matrix structure changed (different nnz), invalidate cached diag positions
+        // and redo symbolic factorization to ensure consistency
+        if self.a_x_work.len() != a_x_orig.len() {
+            self.diag_positions = None;
+            self.symbolic_factorization(mat)?;
+        }
+
         // Ensure a_x workspace is allocated
         if self.a_x_work.len() != a_x_orig.len() {
             self.a_x_work.resize(a_x_orig.len(), 0.0);

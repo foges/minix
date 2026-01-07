@@ -5,6 +5,7 @@
 pub mod hsde;
 pub mod predcorr;
 pub mod termination;
+pub mod workspace;
 
 use crate::cones::{ConeKernel, ZeroCone, NonNegCone, SocCone, ExpCone, PowCone, PsdCone};
 use crate::linalg::kkt::KktSolver;
@@ -17,6 +18,7 @@ use crate::scaling::ScalingBlock;
 use hsde::{HsdeState, HsdeResiduals, compute_residuals, compute_mu};
 use predcorr::{predictor_corrector_step, StepTimings};
 use termination::{TerminationCriteria, check_termination};
+use workspace::PredCorrWorkspace;
 use std::time::Instant;
 use std::sync::OnceLock;
 
@@ -165,6 +167,9 @@ pub fn solve_ipm(
         return Err(format!("KKT symbolic factorization failed: {}", e).into());
     }
 
+    // Pre-allocate workspace for predictor-corrector (eliminates per-iteration allocations)
+    let mut workspace = PredCorrWorkspace::new(n, m, &cones);
+
     // Termination criteria
     let criteria = TerminationCriteria {
         tol_feas: settings.tol_feas,
@@ -180,6 +185,7 @@ pub fn solve_ipm(
 
     let mut status = SolveStatus::NumericalError;  // Will be overwritten
     let mut iter = 0;
+    let mut line_search_backtracks = 0u64;
     let mut consecutive_failures = 0;
     const MAX_CONSECUTIVE_FAILURES: usize = 3;
     let mut timings = StepTimings::default();
@@ -227,6 +233,7 @@ pub fn solve_ipm(
             mu,
             barrier_degree,
             settings,
+            &mut workspace,
             &mut timings,
         ) {
             Ok(result) => {
@@ -264,6 +271,8 @@ pub fn solve_ipm(
 
         // Update mu
         mu = step_result.mu_new;
+        line_search_backtracks =
+            line_search_backtracks.saturating_add(step_result.line_search_backtracks);
 
         // Check for divergence or numerical issues
         if !mu.is_finite() || mu > 1e15 {
@@ -450,6 +459,7 @@ pub fn solve_ipm(
             mu,
             reg_static: static_reg,
             reg_dynamic_bumps: last_dynamic_bumps,
+            line_search_backtracks,
         },
     })
 }

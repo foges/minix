@@ -1069,7 +1069,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 ScalingBlock::Zero { dim } => *dim,
                 ScalingBlock::Diagonal { d } => d.len(),
                 ScalingBlock::Dense3x3 { .. } => 3,
-                ScalingBlock::SocStructured { w } => w.len(),
+                ScalingBlock::SocStructured { w, .. } => w.len(),
                 ScalingBlock::PsdStructured { n, .. } => n * (n + 1) / 2,
             };
 

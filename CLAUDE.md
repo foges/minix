@@ -6,7 +6,7 @@ Rust implementation of an interior-point method (IPM) solver for convex conic op
 
 ```
 solver-core/     # Core IPM solver implementation
-solver-bench/    # Benchmark runner (Maros-Meszaros QP test set)
+solver-bench/    # Benchmark runner (Maros-Meszaros QP test set + regression suite)
 solver-py/       # Python bindings via PyO3
 solver-mip/      # Mixed-integer extension (future)
 solver-ffi/      # C FFI bindings (future)
@@ -41,6 +41,7 @@ python -c "import minix; print(minix.version())"
 ## Key Modules in solver-core
 
 - `ipm/predcorr.rs` - Predictor-corrector IPM main loop
+- `ipm/workspace.rs` - Pre-allocated workspace for iteration vectors
 - `ipm/hsde.rs` - Homogeneous self-dual embedding utilities
 - `cones/` - Cone implementations (zero, nonneg, SOC, PSD, exp)
 - `linalg/kkt.rs` - KKT system assembly and solve
@@ -58,9 +59,7 @@ subject to  Ax + s = b
 ```
 where K is a Cartesian product of cones (Zero, NonNeg, SOC, PSD, Exp).
 
-## Known Issues (from analysis2.md)
+## Known Issues
 
 1. Ruiz scaling doesn't preserve SOC geometry (needs block-aware scaling)
 2. HSDE tau/kappa updates are frozen (tau=1)
-3. SOC Mehrotra correction uses NonNeg formula
-4. `push_to_interior` doesn't handle SOC properly
