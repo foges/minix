@@ -165,9 +165,6 @@ pub struct SolverSettings {
     /// Minimum pivot threshold for dynamic regularization
     pub dynamic_reg_min_pivot: f64,
 
-    /// Number of threads for parallel operations (0 = auto)
-    pub threads: usize,
-
     /// Iterative refinement steps for KKT solves
     pub kkt_refine_iters: usize,
 
@@ -188,12 +185,6 @@ pub struct SolverSettings {
 
     /// Max backtracking steps for centrality line search
     pub line_search_max_iters: usize,
-
-    /// Random seed for deterministic heuristics
-    pub seed: u64,
-
-    /// Enable GPU acceleration (future)
-    pub enable_gpu: bool,
 
     /// Optional warm-start values for repeated solves
     pub warm_start: Option<WarmStart>,
@@ -221,7 +212,6 @@ impl Default for SolverSettings {
             ruiz_iters: 10,
             static_reg: 1e-8,
             dynamic_reg_min_pivot: 1e-13,
-            threads: 0,  // Auto-detect
             kkt_refine_iters: 2,
             feas_weight_floor: 0.05,
             mcc_iters: 0,
@@ -229,8 +219,6 @@ impl Default for SolverSettings {
             centrality_gamma: 10.0,
             sigma_max: 0.999,
             line_search_max_iters: 0,
-            seed: 0,
-            enable_gpu: false,
             warm_start: None,
             direct_mode: false,  // Opt-in for now
             enable_conditioning: None,  // Defaults to true
