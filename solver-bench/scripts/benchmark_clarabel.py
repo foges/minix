@@ -183,7 +183,32 @@ def parse_qps(path):
     return n, m, P, q, A, b, row_types, bounds
 
 
-def solve_problem(name, max_iter=50, tol=1e-8):
+def save_results(path, results):
+    """Save intermediate results."""
+    total = len(results)
+    optimal = sum(1 for r in results if r["status"] == "Optimal")
+    almost = sum(1 for r in results if r["status"] == "AlmostOptimal")
+    times = [r["solve_time_ms"] for r in results if r["status"] in ["Optimal", "AlmostOptimal"]]
+    geom_mean_time = np.exp(np.mean(np.log([t + 1.0 for t in times]))) - 1.0 if times else 0.0
+
+    summary = {
+        "total": total,
+        "optimal": optimal,
+        "almost_optimal": almost,
+        "geom_mean_time_ms": geom_mean_time
+    }
+
+    output = {
+        "solver_name": "Clarabel",
+        "results": results,
+        "summary": summary
+    }
+
+    with open(path, 'w') as f:
+        json.dump(output, f, indent=2)
+
+
+def solve_problem(name, max_iter=50, tol=1e-9):
     """Solve a single problem with Clarabel."""
     qps_path = os.path.expanduser(f"~/.cache/minix-bench/maros-meszaros/{name}.QPS")
 
@@ -305,10 +330,17 @@ def main():
     parser.add_argument("--export", required=True, help="Path to export JSON results")
     parser.add_argument("--limit", type=int, help="Limit number of problems")
     parser.add_argument("--max-iter", type=int, default=50, help="Max iterations")
-    parser.add_argument("--tol", type=float, default=1e-8, help="Tolerance")
+    parser.add_argument("--tol", type=float, default=1e-9, help="Tolerance")
+    parser.add_argument("--skip-large", action="store_true", help="Skip large problems that may cause OOM")
     args = parser.parse_args()
 
-    problems = MM_PROBLEMS[:args.limit] if args.limit else MM_PROBLEMS
+    # Skip problematic large problems if requested
+    skip_list = ["BOYD1", "BOYD2", "CONT-300"] if args.skip_large else []
+
+    problems = [p for p in MM_PROBLEMS if p not in skip_list]
+    if args.limit:
+        problems = problems[:args.limit]
+
     results = []
 
     print(f"Running Clarabel on {len(problems)} problems...")
@@ -335,33 +367,21 @@ def main():
 
         results.append(result)
 
+        # Save intermediate results every 10 problems
+        if i % 10 == 0:
+            save_results(args.export, results)
+
     print("=" * 60)
 
-    # Compute summary
-    total = len(results)
+    # Final save
+    save_results(args.export, results)
+
+    # Print summary
     optimal = sum(1 for r in results if r["status"] == "Optimal")
     almost = sum(1 for r in results if r["status"] == "AlmostOptimal")
-
-    # Geometric mean for solved problems
+    total = len(results)
     times = [r["solve_time_ms"] for r in results if r["status"] in ["Optimal", "AlmostOptimal"]]
     geom_mean_time = np.exp(np.mean(np.log([t + 1.0 for t in times]))) - 1.0 if times else 0.0
-
-    summary = {
-        "total": total,
-        "optimal": optimal,
-        "almost_optimal": almost,
-        "geom_mean_time_ms": geom_mean_time
-    }
-
-    # Export
-    output = {
-        "solver_name": "Clarabel",
-        "results": results,
-        "summary": summary
-    }
-
-    with open(args.export, 'w') as f:
-        json.dump(output, f, indent=2)
 
     print(f"\nResults exported to: {args.export}")
     print(f"Pass rate: {optimal} + {almost} = {optimal + almost}/{total} ({100.0*(optimal+almost)/total:.1f}%)")

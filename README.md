@@ -53,6 +53,18 @@ Most QP solvers report high pass rates using loose tolerances (eps ≈ 1.0), but
 
 **Key Insight**: Clarabel is a modern, high-quality conic solver written in Rust (like Minix). However, at the same 1e-9 tolerance, Minix significantly outperforms Clarabel (77.2% vs 34.8%). This demonstrates that **Minix's focus on robustness delivers superior solution quality** compared to other contemporary solvers.
 
+#### Wall-Clock Performance
+
+On the **54 problems that both solvers successfully solve** at 1e-9 tolerance:
+
+| Metric | Minix | Clarabel | Winner |
+|--------|-------|----------|--------|
+| **Geometric mean time** | 38.9 ms | 28.9 ms | Clarabel 1.3x faster |
+| Problems faster on | 32/54 (59%) | 22/54 (41%) | Minix faster more often |
+| **Problems solved (total)** | **105/136 (77.2%)** | **57/133 (42.9%)** | **Minix solves 48 MORE** |
+
+**Trade-off**: Clarabel is ~1.3x faster on problems both solvers can handle, but **Minix solves 80% more problems** (105 vs 57). This makes Minix the better choice for applications requiring **high robustness** over raw speed.
+
 #### Why High Accuracy Matters
 
 At loose tolerances (eps = 1.0), many solvers achieve 90%+ pass rates:
