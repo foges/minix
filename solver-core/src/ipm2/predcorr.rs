@@ -9,7 +9,7 @@
 
 use std::any::Any;
 
-use crate::cones::{ConeKernel, NonNegCone, SocCone, ExpCone, PowCone, PsdCone};
+use crate::cones::{ConeKernel, NonNegCone, SocCone, ExpCone, PowCone, PsdCone, exp_dual_map_block, exp_central_ok, exp_third_order_correction};
 use crate::ipm::hsde::{compute_mu, HsdeResiduals, HsdeState};
 use crate::ipm2::{IpmWorkspace, PerfSection, PerfTimers};
 use crate::ipm2::workspace::SocScratch;
@@ -751,10 +751,44 @@ pub fn predictor_corrector_step_in_place(
                 kkt.update_numeric(prob.P.as_ref(), &prob.A, &ws.scaling)
                     .map_err(|e| format!("KKT update failed: {}", e))?;
             }
-            let factor = {
+
+            // P1.2: Try factorization with shift-and-retry for quasi-definiteness failures
+            let factor_result = {
                 let _g = timers.scoped(PerfSection::Factorization);
                 kkt.factorize()
-                    .map_err(|e| format!("KKT factorization failed: {}", e))?
+            };
+
+            let factor = match factor_result {
+                Ok(f) => f,
+                Err(e) => {
+                    // Check if this is a quasi-definiteness failure
+                    let is_qd_failure = e.to_string().contains("not quasi-definite");
+
+                    if is_qd_failure && retries < MAX_REG_RETRIES {
+                        // P1.2: Increase regularization and retry for quasi-definiteness failures
+                        let current_reg = kkt.static_reg();
+                        let next_reg = if current_reg < 1e-10 {
+                            1e-10  // Start with small shift if reg is tiny
+                        } else {
+                            (current_reg * 100.0).min(MAX_STATIC_REG)
+                        };
+
+                        if diagnostics_enabled() {
+                            eprintln!(
+                                "P1.2: quasi-definite failure, retry {} with reg {:.3e} -> {:.3e}",
+                                retries + 1, current_reg, next_reg
+                            );
+                        }
+
+                        kkt.set_static_reg(next_reg)
+                            .map_err(|e| format!("KKT reg update failed: {}", e))?;
+                        retries += 1;
+                        continue; // Retry factorization
+                    } else {
+                        // Not a QD failure, or exhausted retries - propagate error
+                        return Err(format!("KKT factorization failed: {}", e).into());
+                    }
+                }
             };
 
             let bumps = kkt.dynamic_bumps();
@@ -915,7 +949,12 @@ pub fn predictor_corrector_step_in_place(
         cones,
     );
     let sigma_cap = settings.sigma_max.min(0.999);
-    let sigma = compute_centering_parameter(alpha_aff, mu, mu_aff, barrier_degree).min(sigma_cap);
+    let sigma = compute_centering_parameter(
+        alpha_aff,
+        mu,
+        mu_aff,
+        barrier_degree,
+    ).min(sigma_cap);
 
     // ======================================================================
     // Step 5: Combined corrector step (+ step size, with stall recovery)
@@ -971,6 +1010,11 @@ pub fn predictor_corrector_step_in_place(
                 let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
                 let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
 
+                // TODO: Implement analytical third-order correction for exponential cones
+                // Research shows this requires a complex analytical formula (not finite differences).
+                // See: _planning/v16/third_order_correction_analysis.md
+                // Expected benefit: 3-10x iteration reduction (from 50-200 to 10-30 iters)
+
                 if is_soc {
                     if let ScalingBlock::SocStructured { w } = &ws.scaling[cone_idx] {
                         let z_slice = &state.z[offset..offset + dim];
@@ -1020,7 +1064,12 @@ pub fn predictor_corrector_step_in_place(
                             let s_i = state.s[i];
                             let z_i = state.z[i];
                             let mu_i = s_i * z_i;
-                            let z_safe = z_i.max(1e-14);
+                            // FIX: Handle negative z (for nonsymmetric cones)
+                            let z_safe = if z_i.abs() < 1e-14 {
+                                1e-14 * z_i.signum()
+                            } else {
+                                z_i
+                            };
 
                             // Bound the Mehrotra correction to prevent numerical blow-up
                             let ds_dz = ws.ds_aff[i] * ws.dz_aff[i];
@@ -1032,24 +1081,96 @@ pub fn predictor_corrector_step_in_place(
                         }
                     }
                 } else {
-                    // Mehrotra correction for NonNeg cone
-                    // Use bounded correction to prevent numerical blow-up near boundaries
-                    for i in offset..offset + dim {
-                        let s_i = state.s[i];
-                        let z_i = state.z[i];
-                        let mu_i = s_i * z_i;
-                        let z_safe = z_i.max(1e-14);
+                    // Check if this is a nonsymmetric cone (Dense3x3 = Exp/Pow)
+                    let is_nonsym = matches!(ws.scaling[cone_idx], ScalingBlock::Dense3x3 { .. });
 
-                        // Mehrotra correction term with bounding
-                        let ds_dz = ws.ds_aff[i] * ws.dz_aff[i];
-                        let correction_bound = mu_i.abs().max(target_mu * 0.1);
-                        let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
+                    if is_nonsym {
+                        // For nonsymmetric cones (Exp/Pow), use barrier-based complementarity
+                        // Complementarity is: s + μ ∇f^*(z) ≈ 0
+                        // So the corrector shift is: d_s = s + σ μ ∇f^*(z)
 
-                        // MCC delta if present
-                        let delta = if is_nonneg && has_mcc { ws.mcc_delta[i] } else { 0.0 };
+                        // Process each 3D block
+                        for block in 0..(dim / 3) {
+                            let block_offset = offset + 3 * block;
+                            let s_block = [
+                                state.s[block_offset],
+                                state.s[block_offset + 1],
+                                state.s[block_offset + 2],
+                            ];
+                            let z_block = [
+                                state.z[block_offset],
+                                state.z[block_offset + 1],
+                                state.z[block_offset + 2],
+                            ];
 
-                        let w_base = mu_i + ds_dz_bounded;
-                        ws.d_s_comb[i] = (w_base - target_mu - delta) / z_safe;
+                            // Compute ∇f^*(z) via dual map for this exp cone block
+                            // The dual map solves ∇f(x) + z = 0, then ∇f^*(z) = -x
+                            let mut x = [0.0; 3];
+                            let mut h_star = [0.0; 9];
+                            exp_dual_map_block(&z_block, &mut x, &mut h_star);
+                            let grad_fstar = [-x[0], -x[1], -x[2]];
+
+                            // Extract affine directions for this block
+                            let ds_aff_block = [
+                                ws.ds_aff[block_offset],
+                                ws.ds_aff[block_offset + 1],
+                                ws.ds_aff[block_offset + 2],
+                            ];
+                            let dz_aff_block = [
+                                ws.dz_aff[block_offset],
+                                ws.dz_aff[block_offset + 1],
+                                ws.dz_aff[block_offset + 2],
+                            ];
+
+                            // Compute third-order correction η
+                            let eta = exp_third_order_correction(
+                                &z_block,
+                                &ds_aff_block,
+                                &dz_aff_block,
+                                &x,
+                                &h_star,
+                            );
+
+                            // Barrier-based corrector with third-order correction:
+                            // d_s = s + σ μ ∇f^*(z) + η
+                            for j in 0..3 {
+                                let i = block_offset + j;
+                                ws.d_s_comb[i] = s_block[j] + sigma * target_mu * grad_fstar[j] + eta[j];
+                            }
+
+                            // Diagnostic logging
+                            if std::env::var("MINIX_EXP_DEBUG").is_ok() {
+                                eprintln!("Exp cone block {} corrector:", block);
+                                eprintln!("  s = {:?}", s_block);
+                                eprintln!("  z = {:?}", z_block);
+                                eprintln!("  ∇f^*(z) = {:?}", grad_fstar);
+                                eprintln!("  sigma = {:.3e}, mu = {:.3e}", sigma, target_mu);
+                                eprintln!("  d_s_comb = [{:.3e}, {:.3e}, {:.3e}]",
+                                    ws.d_s_comb[block_offset],
+                                    ws.d_s_comb[block_offset + 1],
+                                    ws.d_s_comb[block_offset + 2]
+                                );
+                            }
+                        }
+                    } else {
+                        // Mehrotra correction for NonNeg cones
+                        for i in offset..offset + dim {
+                            let s_i = state.s[i];
+                            let z_i = state.z[i];
+                            let mu_i = s_i * z_i;
+                            let z_safe = z_i.max(1e-14);
+
+                            // Mehrotra correction term with bounding
+                            let ds_dz = ws.ds_aff[i] * ws.dz_aff[i];
+                            let correction_bound = mu_i.abs().max(target_mu * 0.1);
+                            let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
+
+                            // MCC delta if present
+                            let delta = if is_nonneg && has_mcc { ws.mcc_delta[i] } else { 0.0 };
+
+                            let w_base = mu_i + ds_dz_bounded;
+                            ws.d_s_comb[i] = (w_base - target_mu - delta) / z_safe;
+                        }
                     }
                 }
 
@@ -1157,6 +1278,22 @@ pub fn predictor_corrector_step_in_place(
         alpha = (0.99 * alpha).min(1.0);
         alpha_pre_ls = alpha;
 
+        // Proximity-based step size reduction (experimental)
+        // This helps keep iterates close to the central path, reducing iteration count
+        if settings.use_proximity_step_control {
+            alpha = apply_proximity_step_control(
+                state,
+                &ws.ds,
+                &ws.dz,
+                dtau,
+                dkappa,
+                cones,
+                barrier_degree,
+                alpha,
+                0.95,  // proximity threshold
+            );
+        }
+
         if settings.line_search_max_iters > 0
             && settings.centrality_gamma > settings.centrality_beta
             && settings.centrality_beta > 0.0
@@ -1218,6 +1355,68 @@ pub fn predictor_corrector_step_in_place(
                     ls_reported = true;
                 }
                 alpha *= 0.5;
+            }
+        }
+
+        // Exp cone central neighborhood check (P0.5)
+        // Backtrack if the step would violate the central neighborhood condition
+        if std::env::var("MINIX_EXP_CENTRAL_CHECK").is_ok() {
+            let theta = 0.3; // centrality parameter (0.1 to 0.5 typical)
+            let mut offset = 0usize;
+            let max_backtrack = 10;
+
+            for _ in 0..max_backtrack {
+                let mut central_ok = true;
+
+                for cone in cones.iter() {
+                    let dim = cone.dim();
+                    if dim == 0 {
+                        offset += dim;
+                        continue;
+                    }
+
+                    // Check if this is an exp cone (3D blocks)
+                    if (&**cone as &dyn std::any::Any).downcast_ref::<ExpCone>().is_some() {
+                        // Check each 3D block
+                        for block in 0..(dim / 3) {
+                            let block_offset = offset + 3 * block;
+                            let s_trial = [
+                                state.s[block_offset] + alpha * ws.ds[block_offset],
+                                state.s[block_offset + 1] + alpha * ws.ds[block_offset + 1],
+                                state.s[block_offset + 2] + alpha * ws.ds[block_offset + 2],
+                            ];
+                            let z_trial = [
+                                state.z[block_offset] + alpha * ws.dz[block_offset],
+                                state.z[block_offset + 1] + alpha * ws.dz[block_offset + 1],
+                                state.z[block_offset + 2] + alpha * ws.dz[block_offset + 2],
+                            ];
+
+                            if !exp_central_ok(&s_trial, &z_trial, target_mu, theta) {
+                                central_ok = false;
+                                if diagnostics_enabled() {
+                                    eprintln!(
+                                        "exp central check fail: block={} alpha={:.3e} theta={:.2}",
+                                        block, alpha, theta
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    offset += dim;
+                    if !central_ok {
+                        break;
+                    }
+                }
+
+                if central_ok {
+                    break;
+                }
+
+                // Backtrack
+                alpha *= 0.7;
+                offset = 0; // reset for next iteration
             }
         }
 
@@ -1522,4 +1721,144 @@ fn compute_centering_parameter(
     };
 
     sigma.max(sigma_min).min(sigma_max)
+}
+
+/// Adaptive centering parameter that reduces centering when close to convergence.
+///
+/// This allows the solver to take more aggressive steps (less centering) when
+/// residuals and complementarity gap are small, speeding up convergence.
+fn compute_centering_parameter_adaptive(
+    alpha_aff: f64,
+    mu: f64,
+    mu_aff: f64,
+    barrier_degree: usize,
+    residuals: &HsdeResiduals,
+) -> f64 {
+    if barrier_degree == 0 {
+        return 0.0;
+    }
+
+    // Base centering parameter (Mehrotra's formula)
+    let sigma_base = if mu_aff.is_finite() && mu_aff > 0.0 && mu.is_finite() && mu > 0.0 {
+        let ratio = (mu_aff / mu).max(0.0);
+        ratio.powi(3)
+    } else {
+        (1.0 - alpha_aff).powi(3)
+    };
+
+    // Adaptive sigma_min based on progress
+    // When close to convergence (small mu and small residuals), use smaller sigma_min
+    // to allow less aggressive centering
+    let r_x_norm = residuals.r_x.iter().map(|&x| x.abs()).fold(0.0_f64, f64::max);
+    let r_z_norm = residuals.r_z.iter().map(|&x| x.abs()).fold(0.0_f64, f64::max);
+    let res_norm = r_x_norm.max(r_z_norm).max(residuals.r_tau.abs());
+
+    // Compute adaptive sigma_min:
+    // - Far from convergence (res > 1e-4 or mu > 1e-4): sigma_min = 1e-3 (standard)
+    // - Close to convergence (res < 1e-6 and mu < 1e-6): sigma_min = 1e-5 (aggressive)
+    // - In between: interpolate
+    let sigma_min = if res_norm > 1e-4 || mu > 1e-4 {
+        1e-3  // Standard centering far from optimum
+    } else if res_norm < 1e-6 && mu < 1e-6 {
+        1e-5  // Aggressive (less centering) near optimum
+    } else {
+        // Interpolate between 1e-5 and 1e-3 based on progress
+        let progress = ((res_norm.max(mu) - 1e-6) / (1e-4 - 1e-6)).clamp(0.0, 1.0);
+        1e-5 + progress * (1e-3 - 1e-5)
+    };
+
+    let sigma_max = 0.999;
+    sigma_base.max(sigma_min).min(sigma_max)
+}
+
+/// Apply proximity-based step size control to keep iterates close to central path.
+///
+/// This function reduces the step size if the trial iterate would have a large
+/// proximity metric (neighborhood parameter), which indicates being far from
+/// the central path.
+///
+/// The proximity metric used is:
+///   proximity = ||s ⊙ z - μe||_∞ / μ
+///
+/// If proximity > threshold, we reduce alpha until proximity <= threshold.
+fn apply_proximity_step_control(
+    state: &HsdeState,
+    ds: &[f64],
+    dz: &[f64],
+    dtau: f64,
+    dkappa: f64,
+    cones: &[Box<dyn ConeKernel>],
+    barrier_degree: usize,
+    alpha_init: f64,
+    proximity_threshold: f64,
+) -> f64 {
+    let mut alpha = alpha_init;
+    let backtrack_factor = 0.8;
+    let max_backtrack = 10;
+
+    for _ in 0..max_backtrack {
+        // Compute trial iterate
+        let tau_trial = state.tau + alpha * dtau;
+        let kappa_trial = state.kappa + alpha * dkappa;
+        let mut s_dot_z_trial = 0.0;
+
+        let mut offset = 0;
+        for cone in cones.iter() {
+            let dim = cone.dim();
+            if dim == 0 || cone.barrier_degree() == 0 {
+                offset += dim;
+                continue;
+            }
+
+            for i in 0..dim {
+                let idx = offset + i;
+                let s_trial = state.s[idx] + alpha * ds[idx];
+                let z_trial = state.z[idx] + alpha * dz[idx];
+                s_dot_z_trial += s_trial * z_trial;
+            }
+
+            offset += dim;
+        }
+
+        // Compute trial mu
+        let mu_trial = (s_dot_z_trial + tau_trial * kappa_trial) / (barrier_degree as f64 + 1.0);
+
+        if !mu_trial.is_finite() || mu_trial <= 0.0 {
+            alpha *= backtrack_factor;
+            continue;
+        }
+
+        // Compute proximity (infinity norm of (s⊙z - μe) / μ)
+        let mut proximity = 0.0_f64;
+        offset = 0;
+
+        for cone in cones.iter() {
+            let dim = cone.dim();
+            if dim == 0 || cone.barrier_degree() == 0 {
+                offset += dim;
+                continue;
+            }
+
+            for i in 0..dim {
+                let idx = offset + i;
+                let s_trial = state.s[idx] + alpha * ds[idx];
+                let z_trial = state.z[idx] + alpha * dz[idx];
+                let complementarity = s_trial * z_trial;
+                let deviation = (complementarity - mu_trial).abs() / mu_trial;
+                proximity = proximity.max(deviation);
+            }
+
+            offset += dim;
+        }
+
+        if proximity <= proximity_threshold {
+            return alpha;
+        }
+
+        // Reduce step size and try again
+        alpha *= backtrack_factor;
+    }
+
+    // If we exhausted backtracks, return the reduced alpha
+    alpha
 }

@@ -1,0 +1,134 @@
+diff --git a/solver-core/src/ipm2/solve.rs b/solver-core/src/ipm2/solve.rs
+--- a/solver-core/src/ipm2/solve.rs
++++ b/solver-core/src/ipm2/solve.rs
+@@ -45,3 +45,5 @@
+-    let orig_prob = prob.clone();
+-    let orig_prob_bounds = orig_prob.with_bounds_as_constraints();
+-    let orig_m = orig_prob_bounds.num_constraints();
++    let orig_prob = prob.clone();
++    // For diagnostics: distinguish original rows from bound-derived rows.
++    let orig_m = orig_prob.num_constraints();
++    let orig_prob_bounds = orig_prob.with_bounds_as_constraints();
++    let full_m = orig_prob_bounds.num_constraints();
+@@ -315,29 +317,34 @@
+-    let final_metrics = if let Some(ref postsolve) = postsolve {
++    let (final_metrics, rp_report, rd_report) = if let Some(ref postsolve) = postsolve {
+         // Recover x,s,z in original problem space for reporting.
+         let mut x_orig = vec![0.0; orig_prob_bounds.n];
+         let mut s_orig = vec![0.0; orig_prob_bounds.m];
+         let mut z_orig = vec![0.0; orig_prob_bounds.m];
+         postsolve.recover_xyz(&w.x, &w.s, &w.z, &mut x_orig, &mut s_orig, &mut z_orig);
+ 
+         let mut rp_orig = vec![0.0; orig_prob_bounds.m];
+         let mut rd_orig = vec![0.0; orig_prob_bounds.n];
+         let mut px_orig = vec![0.0; orig_prob_bounds.n];
+-        compute_unscaled_metrics(
++        let metrics = compute_unscaled_metrics(
+             &orig_prob_bounds.A,
+             orig_prob_bounds.P.as_ref(),
+             &orig_prob_bounds.q,
+             &orig_prob_bounds.b,
+             &x_orig,
+             &s_orig,
+             &z_orig,
+             &mut rp_orig,
+             &mut rd_orig,
+             &mut px_orig,
+-        )
++        );
++
++        (metrics, rp_orig, rd_orig)
+     } else {
+         let mut rp = vec![0.0; prob.m];
+         let mut rd = vec![0.0; prob.n];
+         let mut px = vec![0.0; prob.n];
+-        compute_unscaled_metrics(
++        let metrics = compute_unscaled_metrics(
+             &prob.A,
+             prob.P.as_ref(),
+             &prob.q,
+             &prob.b,
+             &w.x,
+             &w.s,
+             &w.z,
+             &mut rp,
+             &mut rd,
+             &mut px,
+-        )
++        );
++
++        (metrics, rp, rd)
+     };
+@@ -355,6 +362,44 @@
+         eprintln!(
+             "  r_p_inf={:.3e} (scale {:.3e}), r_d_inf={:.3e} (scale {:.3e})",
+             final_metrics.rp_inf,
+             final_metrics.primal_scale,
+             final_metrics.rd_inf,
+             final_metrics.dual_scale,
+         );
+         eprintln!(
+             "  rel_p={:.3e}, rel_d={:.3e}",
+             final_metrics.rel_p, final_metrics.rel_d
+         );
++
++        if !primal_ok {
++            eprintln!("  top |r_p| rows (signed) [row/{}] (kind=orig|bound):", full_m);
++            let mut idxs: Vec<usize> = (0..rp_report.len()).collect();
++            idxs.sort_by(|&i, &j| {
++                rp_report[j]
++                    .abs()
++                    .partial_cmp(&rp_report[i].abs())
++                    .unwrap_or(std::cmp::Ordering::Equal)
++            });
++            for &idx in idxs.iter().take(5.min(idxs.len())) {
++                let kind = if idx < orig_m { "orig" } else { "bound" };
++                eprintln!(
++                    "    rp[{idx:>4}]={val:+.3e}  {kind}",
++                    val = rp_report[idx]
++                );
++            }
++        }
++
++        if !dual_ok {
++            eprintln!("  top |r_d| components (signed):");
++            let mut idxs: Vec<usize> = (0..rd_report.len()).collect();
++            idxs.sort_by(|&i, &j| {
++                rd_report[j]
++                    .abs()
++                    .partial_cmp(&rd_report[i].abs())
++                    .unwrap_or(std::cmp::Ordering::Equal)
++            });
++            for &idx in idxs.iter().take(5.min(idxs.len())) {
++                eprintln!("    rd[{idx:>4}]={val:+.3e}", val = rd_report[idx]);
++            }
++        }
++
++        // NOTE: if the max primal violations are concentrated in `kind=bound`,
++        // it strongly suggests either (a) a bounds postsolve inconsistency or (b)
++        // a singleton-elimination interaction with reg/refinement.
+         eprintln!(
+             "  gap={:.3e}, gap_rel={:.3e}, obj_p={:.3e}, obj_d={:.3e}",
+             final_metrics.gap,
+             final_metrics.gap_rel,
+             final_metrics.obj_p,
+             final_metrics.obj_d,
+         );
+     }
+ 
+     Ok(Solution {
+         x,
+         s,
+         z,
+         status,
+         iterations: iters_done,
+         metrics: final_metrics,
+     })
+ }
+
+diff --git a/solver-core/src/ipm2/solve_normal.rs b/solver-core/src/ipm2/solve_normal.rs
+--- a/solver-core/src/ipm2/solve_normal.rs
++++ b/solver-core/src/ipm2/solve_normal.rs
+@@ -158,1 +158,1 @@
+-                    let correction = ds_aff[idx] * dz_aff[idx] / z_safe;
++                    let _correction = ds_aff[idx] * dz_aff[idx] / z_safe;

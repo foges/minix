@@ -2,14 +2,15 @@ use sprs::TriMat;
 
 use crate::postsolve::{PostsolveMap, RemovedRow, RemovedRowKind, RowMap};
 use crate::presolve::bounds::PresolveResult;
-use crate::presolve::singleton::detect_singleton_rows;
+use crate::presolve::singleton::detect_singleton_rows_cone_aware;
 use crate::problem::{ConeSpec, ProblemData, VarBound};
 
 pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
     let n = prob.num_vars();
     let m = prob.num_constraints();
 
-    let singletons = detect_singleton_rows(&prob.A);
+    // Use cone-aware singleton detection to avoid eliminating rows from multi-dimensional cones
+    let singletons = detect_singleton_rows_cone_aware(&prob.A, &prob.cones);
     if singletons.singleton_rows.is_empty() {
         return PresolveResult {
             problem: prob.clone(),

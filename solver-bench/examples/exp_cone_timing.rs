@@ -73,6 +73,7 @@ fn main() {
         let mut settings = SolverSettings::default();
         settings.verbose = false;
         settings.max_iter = max_iter;
+        settings.use_proximity_step_control = false;  // Disabled
 
         // Warmup run
         let _ = solve(&prob, &settings);

@@ -1,0 +1,104 @@
+diff -ruN /mnt/data/minix_extracted_before/solver-core/src/ipm2/predcorr.rs /mnt/data/minix_extracted/solver-core/src/ipm2/predcorr.rs
+--- /mnt/data/minix_extracted_before/solver-core/src/ipm2/predcorr.rs	2026-01-06 18:58:09.537793974 +0000
++++ /mnt/data/minix_extracted/solver-core/src/ipm2/predcorr.rs	2026-01-06 18:59:21.996097046 +0000
+@@ -297,19 +297,20 @@
+     tau: f64,
+     denom_scale: f64,
+ ) -> Result<f64, String> {
+-    if !numerator.is_finite() || !denominator.is_finite() || !tau.is_finite() {
++    if !numerator.is_finite() || !denominator.is_finite() || !tau.is_finite() || !denom_scale.is_finite() {
+         return Err("dtau inputs not finite".to_string());
+     }
+     if tau <= 0.0 {
+         return Err(format!("tau non-positive (tau={:.3e})", tau));
+     }
+ 
++    // If the denominator is ill-conditioned, treat the update as unreliable and
++    // fall back to a no-op step for tau. This is more robust than failing the
++    // entire iteration, and mirrors the common IPM practice of dampening or
++    // skipping scalar updates when the underlying 2x2 system is nearly singular.
+     let scale = denom_scale.max(1.0);
+     if denominator.abs() <= 1e-10 * scale {
+-        return Err(format!(
+-            "dtau denominator ill-conditioned (denom={:.3e}, scale={:.3e})",
+-            denominator, scale
+-        ));
++        return Ok(0.0);
+     }
+ 
+     let raw_dtau = numerator / denominator;
+diff -ruN /mnt/data/minix_extracted_before/solver-core/src/ipm2/solve.rs /mnt/data/minix_extracted/solver-core/src/ipm2/solve.rs
+--- /mnt/data/minix_extracted_before/solver-core/src/ipm2/solve.rs	2026-01-06 18:58:09.538295704 +0000
++++ /mnt/data/minix_extracted/solver-core/src/ipm2/solve.rs	2026-01-06 19:07:08.663526874 +0000
+@@ -157,7 +157,9 @@
+     let mut status = SolveStatus::NumericalError; // Will be overwritten
+     let mut iter = 0;
+     let mut consecutive_failures = 0;
++    let mut numeric_recovery_level: usize = 0;
+     const MAX_CONSECUTIVE_FAILURES: usize = 3;
++const MAX_NUMERIC_RECOVERY_LEVEL: usize = 6;
+ 
+     // Adaptive refinement: track previous dual residual to detect stagnation
+     let mut prev_rel_d: f64 = f64::INFINITY;
+@@ -192,6 +194,25 @@
+                 reg_policy.enter_polish(&mut reg_state);
+             }
+         }
++        // If we recently hit numerical failures (e.g., KKT factorization issues), temporarily
++        // ramp up regularization and iterative refinement. This often turns a hard failure
++        // into a slow-but-robust step that we can later polish.
++        if numeric_recovery_level > 0 {
++            let bump_factor = 10.0_f64.powi(numeric_recovery_level as i32);
++            reg_state.static_reg_eff =
++                (reg_state.static_reg_eff * bump_factor).min(reg_policy.static_reg_max);
++            reg_state.refine_iters = (reg_state.refine_iters + 2 * numeric_recovery_level)
++                .min(reg_policy.max_refine_iters);
++
++            if diag.should_log(iter) {
++                eprintln!(
++                    "numeric recovery: level={} static_reg={:.3e} refine_iters={}",
++                    numeric_recovery_level, reg_state.static_reg_eff, reg_state.refine_iters
++                );
++            }
++        }
++
++
+ 
+         if (kkt.static_reg() - reg_state.static_reg_eff).abs() > 0.0 {
+             kkt.set_static_reg(reg_state.static_reg_eff)
+@@ -203,6 +224,10 @@
+         step_settings.kkt_refine_iters = reg_state.refine_iters;
+         step_settings.feas_weight_floor = settings.feas_weight_floor;
+         step_settings.sigma_max = settings.sigma_max;
++        if numeric_recovery_level > 0 {
++            step_settings.feas_weight_floor = 0.0;
++            step_settings.sigma_max = 0.999;
++        }
+         if matches!(solve_mode, SolveMode::StallRecovery) {
+             step_settings.feas_weight_floor = 0.0;
+             step_settings.sigma_max = 0.999;
+@@ -231,10 +256,15 @@
+         let step_result = match step_result {
+             Ok(result) => {
+                 consecutive_failures = 0;
++                numeric_recovery_level = 0;
+                 result
+             }
+-            Err(_e) => {
++            Err(e) => {
+                 consecutive_failures += 1;
++                numeric_recovery_level = (numeric_recovery_level + 1).min(MAX_NUMERIC_RECOVERY_LEVEL);
++                if diag.enabled {
++                    eprintln!("predictor-corrector step failed at iter {}: {}", iter, e);
++                }
+ 
+                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                     status = SolveStatus::NumericalError;
+@@ -254,6 +284,7 @@
+ 
+         if !mu.is_finite() || mu > 1e15 {
+             consecutive_failures += 1;
++            numeric_recovery_level = (numeric_recovery_level + 1).min(MAX_NUMERIC_RECOVERY_LEVEL);
+             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                 status = SolveStatus::NumericalError;
+                 break;

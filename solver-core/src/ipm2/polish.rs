@@ -192,13 +192,53 @@ pub fn polish_nonneg_active_set(
             }
             return None;
         }
-        let factor = match kkt.factorize() {
-            Ok(f) => f,
-            Err(e) => {
-                if diag_enabled {
-                    eprintln!("polish pass {}: KKT factorize failed: {:?}", pass, e);
+
+        // P1.2: Retry factorization with increased regularization on quasi-definiteness failures
+        let factor = {
+            const MAX_POLISH_RETRIES: usize = 3;
+            let mut retry_count = 0;
+            let mut current_reg = polish_static_reg;
+
+            loop {
+                let factor_result = kkt.factorize();
+
+                match factor_result {
+                    Ok(f) => break f,
+                    Err(e) => {
+                        let is_qd_failure = e.to_string().contains("not quasi-definite");
+
+                        if is_qd_failure && retry_count < MAX_POLISH_RETRIES {
+                            // Increase regularization and retry
+                            current_reg = if current_reg < 1e-10 {
+                                1e-10
+                            } else {
+                                (current_reg * 100.0).min(1e-4)  // Cap at 1e-4 for polish
+                            };
+
+                            if diag_enabled {
+                                eprintln!(
+                                    "polish pass {}: P1.2 quasi-definite failure, retry {} with reg {:.3e}",
+                                    pass, retry_count + 1, current_reg
+                                );
+                            }
+
+                            if kkt.set_static_reg(current_reg).is_err() {
+                                if diag_enabled {
+                                    eprintln!("polish pass {}: failed to update regularization", pass);
+                                }
+                                return None;
+                            }
+
+                            retry_count += 1;
+                        } else {
+                            // Not a QD failure, or exhausted retries
+                            if diag_enabled {
+                                eprintln!("polish pass {}: KKT factorize failed: {:?}", pass, e);
+                            }
+                            return None;
+                        }
+                    }
                 }
-                return None;
             }
         };
 

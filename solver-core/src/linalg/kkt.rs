@@ -300,7 +300,8 @@ fn update_dense_block_in_place(
     let mut pos_idx = 0usize;
     for col in 0..3 {
         for row in 0..=col {
-            let mut val = -h[row * 3 + col];
+            let h_val = h[row * 3 + col];
+            let mut val = -h_val;
             if row == col {
                 val -= 2.0 * static_reg;
             }

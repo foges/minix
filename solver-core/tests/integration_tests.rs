@@ -4,7 +4,7 @@
 //! on various problem types.
 
 use solver_core::{solve, ProblemData, ConeSpec, SolverSettings, SolveStatus};
-use solver_core::cones::{PsdCone, ExpCone};
+use solver_core::cones::{PsdCone, ExpCone, ConeKernel};
 use solver_core::linalg::sparse;
 
 #[test]
@@ -56,19 +56,19 @@ fn test_simple_lp() {
     println!("x = {:?}", result.x);
     println!("obj = {}", result.obj_val);
 
+    // CRITICAL: Only accept Optimal or AlmostOptimal status
+    // MaxIters means the solver FAILED to converge
     assert!(matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::MaxIters
-    ));
+        SolveStatus::Optimal | SolveStatus::AlmostOptimal
+    ), "Expected Optimal/AlmostOptimal, got {:?}", result.status);
 
     // Check that solution is approximately optimal
-    if result.status == SolveStatus::Optimal {
-        let sum = result.x[0] + result.x[1];
-        assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: {}", sum);
-        assert!(result.x[0] >= -0.1);
-        assert!(result.x[1] >= -0.1);
-        assert!((result.obj_val - 1.0).abs() < 0.1);
-    }
+    let sum = result.x[0] + result.x[1];
+    assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: {}", sum);
+    assert!(result.x[0] >= -0.1);
+    assert!(result.x[1] >= -0.1);
+    assert!((result.obj_val - 1.0).abs() < 0.1);
 }
 
 #[test]
@@ -120,16 +120,14 @@ fn test_lp_with_inequality() {
 
     assert!(matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::MaxIters
-    ));
+        SolveStatus::Optimal | SolveStatus::AlmostOptimal
+    ), "Expected Optimal/AlmostOptimal, got {:?}", result.status);
 
     // Check that solution is approximately optimal (x1 + x2 = 1, x >= 0)
-    if result.status == SolveStatus::Optimal {
-        assert!((result.x[0] + result.x[1] - 1.0).abs() < 0.1);
-        assert!(result.x[0] >= -0.1);
-        assert!(result.x[1] >= -0.1);
-        assert!((result.obj_val - (-1.0)).abs() < 0.1);
-    }
+    assert!((result.x[0] + result.x[1] - 1.0).abs() < 0.1);
+    assert!(result.x[0] >= -0.1);
+    assert!(result.x[1] >= -0.1);
+    assert!((result.obj_val - (-1.0)).abs() < 0.1);
 }
 
 #[test]
@@ -187,16 +185,14 @@ fn test_simple_qp() {
 
     assert!(matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::MaxIters
-    ));
+        SolveStatus::Optimal | SolveStatus::AlmostOptimal
+    ), "Expected Optimal/AlmostOptimal, got {:?}", result.status);
 
     // Check constraint is satisfied (approximately)
-    if result.status == SolveStatus::Optimal {
-        let sum = result.x[0] + result.x[1];
-        assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: x1 + x2 = {}", sum);
-        // Optimal is x = [0.5, 0.5], obj = 1.25
-        assert!((result.obj_val - 1.25).abs() < 0.1, "Objective value unexpected: {}", result.obj_val);
-    }
+    let sum = result.x[0] + result.x[1];
+    assert!((sum - 1.0).abs() < 0.1, "Constraint not satisfied: x1 + x2 = {}", sum);
+    // Optimal is x = [0.5, 0.5], obj = 1.25
+    assert!((result.obj_val - 1.25).abs() < 0.1, "Objective value unexpected: {}", result.obj_val);
 }
 
 #[test]
@@ -237,8 +233,8 @@ fn test_nonneg_cone() {
 
     assert!(matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::MaxIters
-    ));
+        SolveStatus::Optimal | SolveStatus::AlmostOptimal
+    ), "Expected Optimal/AlmostOptimal, got {:?}", result.status);
 }
 
 #[test]
@@ -294,14 +290,14 @@ fn test_small_soc() {
     println!("obj = {}", result.obj_val);
 
     // SOC support is partial - KKT assembly for SOC structured scaling needs work
-    // Accept NumericalError for now
+    // Accept NumericalError for now, but NOT MaxIters (that means failed to converge)
     assert!(matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::MaxIters | SolveStatus::NumericalError
-    ));
+        SolveStatus::Optimal | SolveStatus::AlmostOptimal | SolveStatus::NumericalError
+    ), "Expected Optimal/AlmostOptimal/NumericalError, got {:?}", result.status);
 
     // Check that solution is approximately correct (t ≈ 1, obj ≈ 1)
-    if result.status == SolveStatus::Optimal {
+    if matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal) {
         assert!((result.x[0] - 1.0).abs() < 0.2, "Expected t ≈ 1, got {}", result.x[0]);
         assert!((result.obj_val - 1.0).abs() < 0.2, "Expected obj ≈ 1, got {}", result.obj_val);
     }

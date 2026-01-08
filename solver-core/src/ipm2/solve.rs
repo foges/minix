@@ -200,10 +200,37 @@ pub fn solve_ipm2(
     // This avoids regularization drift on problems with extreme cost_scale.
     let reg_scale = 1.0;
 
-    while iter < settings.max_iter {
+    // P1.1: Progress-based iteration budget for large problems
+    let is_large_problem = (prob.num_vars() > 50_000) || (prob.num_constraints() > 50_000);
+    let base_max_iter = settings.max_iter;
+    let extended_max_iter = if is_large_problem { 200 } else { base_max_iter };
+    let mut effective_max_iter = base_max_iter;
+
+    // Track recent progress for large problems
+    const PROGRESS_WINDOW: usize = 8;
+    let mut recent_rel_p: Vec<f64> = Vec::with_capacity(PROGRESS_WINDOW);
+    let mut recent_rel_d: Vec<f64> = Vec::with_capacity(PROGRESS_WINDOW);
+    let mut recent_gap_rel: Vec<f64> = Vec::with_capacity(PROGRESS_WINDOW);
+
+    while iter < effective_max_iter {
         {
             let _g = timers.scoped(PerfSection::Residuals);
             compute_residuals(&scaled_prob, &state, &mut residuals);
+        }
+
+        // Verbose iteration logging via MINIX_ITER_LOG env var
+        if std::env::var("MINIX_ITER_LOG").is_ok() && (iter >= 25 && iter <= 30 || iter % 10 == 0) {
+            let mu = compute_mu(&state, barrier_degree);
+            let mut rp_temp = vec![0.0; m];
+            let mut rd_temp = vec![0.0; n];
+            let mut px_temp = vec![0.0; n];
+            let unscaled = compute_unscaled_metrics(
+                &prob.A, prob.P.as_ref(), &prob.q, &prob.b,
+                &state.x, &state.s, &state.z,
+                &mut rp_temp, &mut rd_temp, &mut px_temp,
+            );
+            eprintln!("Iter {:3}: r_p={:.3e} r_d={:.3e} gap={:.3e} gap_rel={:.3e} mu={:.3e}",
+                iter, unscaled.rel_p, unscaled.rel_d, unscaled.gap, unscaled.gap_rel, mu);
         }
 
         reg_state.static_reg_eff = reg_policy
@@ -669,6 +696,43 @@ pub fn solve_ipm2(
             }
             metrics
         };
+
+        // P1.1: Track progress for large problems
+        if is_large_problem {
+            // Add current metrics to progress tracking
+            if recent_rel_p.len() >= PROGRESS_WINDOW {
+                recent_rel_p.remove(0);
+                recent_rel_d.remove(0);
+                recent_gap_rel.remove(0);
+            }
+            recent_rel_p.push(metrics.rel_p);
+            recent_rel_d.push(metrics.rel_d);
+            recent_gap_rel.push(metrics.gap_rel);
+
+            // Check if we should extend iteration budget
+            // Conditions: (1) hit base limit, (2) have full window, (3) making progress
+            if iter >= base_max_iter && recent_rel_p.len() == PROGRESS_WINDOW && effective_max_iter == base_max_iter {
+                // Measure progress: compare current metrics to oldest in window
+                let oldest_rel_p = recent_rel_p[0];
+                let oldest_rel_d = recent_rel_d[0];
+                let oldest_gap_rel = recent_gap_rel[0];
+
+                // Progress if ANY metric improved by at least 5% (0.95x or better)
+                let rel_p_progress = metrics.rel_p < oldest_rel_p * 0.95;
+                let rel_d_progress = metrics.rel_d < oldest_rel_d * 0.95;
+                let gap_rel_progress = metrics.gap_rel < oldest_gap_rel * 0.95;
+
+                if rel_p_progress || rel_d_progress || gap_rel_progress {
+                    effective_max_iter = extended_max_iter;
+                    if diag.enabled {
+                        eprintln!(
+                            "P1.1: extending max_iter to {} for large problem (progress detected: rel_p={} rel_d={} gap={})",
+                            extended_max_iter, rel_p_progress, rel_d_progress, gap_rel_progress
+                        );
+                    }
+                }
+            }
+        }
 
         if diag.should_log(iter) {
             let min_s = state.s.iter().copied().fold(f64::INFINITY, f64::min);

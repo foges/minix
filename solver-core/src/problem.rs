@@ -198,6 +198,11 @@ pub struct SolverSettings {
     /// Helps with problems that have nearly-parallel constraints or extreme coefficient ratios.
     /// None = use default (true), Some(false) = disable.
     pub enable_conditioning: Option<bool>,
+
+    /// Use proximity-based step size control to keep iterates near central path.
+    /// This can reduce iteration count at the cost of more step size computation.
+    /// Experimental feature - may help with exponential cones.
+    pub use_proximity_step_control: bool,
 }
 
 impl Default for SolverSettings {
@@ -206,9 +211,9 @@ impl Default for SolverSettings {
             max_iter: 50,
             time_limit_ms: None,
             verbose: false,
-            tol_feas: 1e-8,
-            tol_gap: 1e-8,
-            tol_infeas: 1e-8,
+            tol_feas: 1e-9,
+            tol_gap: 1e-9,
+            tol_infeas: 1e-9,
             ruiz_iters: 10,
             static_reg: 1e-8,
             dynamic_reg_min_pivot: 1e-13,
@@ -222,6 +227,7 @@ impl Default for SolverSettings {
             warm_start: None,
             direct_mode: false,  // Opt-in for now
             enable_conditioning: None,  // Defaults to true
+            use_proximity_step_control: false,  // Experimental, opt-in
         }
     }
 }

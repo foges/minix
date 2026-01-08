@@ -1,0 +1,819 @@
+# All MaxIters Failures - Last 5 Iterations + Diagnostics (v17)
+Date: 2026-01-08
+Tolerance: 1e-9
+Max iterations: 50
+
+### BOYD1
+iter   45 mu=1.025e-7 alpha=3.336e-1 alpha_sz=3.370e-1 min_s=0.000e0 min_z=-4.630e0 sigma=9.913e-1 rel_p=2.499e-14 rel_d=8.177e-4 gap_rel=3.589e-6
+iter   46 mu=8.482e-8 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.605e0 sigma=9.867e-1 rel_p=2.416e-14 rel_d=8.131e-4 gap_rel=3.568e-6
+iter   47 mu=7.919e-8 alpha=3.619e-1 alpha_sz=3.656e-1 min_s=0.000e0 min_z=-4.579e0 sigma=9.615e-1 rel_p=2.885e-14 rel_d=8.081e-4 gap_rel=3.547e-6
+iter   48 mu=6.826e-8 alpha=7.403e-1 alpha_sz=7.478e-1 min_s=0.000e0 min_z=-4.513e0 sigma=9.507e-1 rel_p=1.887e-14 rel_d=7.949e-4 gap_rel=3.528e-6
+iter   49 mu=5.839e-8 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.471e0 sigma=9.763e-1 rel_p=6.462e-15 rel_d=7.865e-4 gap_rel=3.501e-6
+Diagnostics for BOYD1:
+  r_p_inf=2.423e-2 (scale 3.750e12), r_d_inf=2.093e2 (scale 2.662e5)
+  rel_p=6.462e-15, rel_d=7.865e-4
+  top |r_d| components (with structure):
+    rd[93260]=-2.093e2  q=-6.000e0  Px=+5.490e1  A^Tz=-2.583e2  A_nnz=9  P_diag=6.00e0
+    rd[93257]=-8.460e1  q=-6.000e0  Px=+6.604e1  A^Tz=-1.446e2  A_nnz=9  P_diag=6.00e0
+    rd[93259]=-8.241e1  q=-6.000e0  Px=+4.354e1  A^Tz=-1.199e2  A_nnz=9  P_diag=6.00e0
+    rd[93255]=-8.038e1  q=-6.000e0  Px=+7.057e1  A^Tz=-1.449e2  A_nnz=9  P_diag=6.00e0
+    rd[93256]=-7.018e1  q=-6.000e0  Px=+5.005e1  A^Tz=-1.142e2  A_nnz=9  P_diag=6.00e0
+  gap=2.161e2, gap_rel=3.501e-6, obj_p=-6.173e7, obj_d=-6.173e7
+Status:     MaxIters
+Variables:  93261
+Constraints:93279
+Iterations: 50
+Objective:  -6.173043e7
+Final μ:    5.838618e-8
+Time:       4873.929 ms
+
+### BOYD2
+iter   45 mu=9.116e-7 alpha=5.719e-1 alpha_sz=5.777e-1 min_s=0.000e0 min_z=-4.776e-4 sigma=3.645e-1 rel_p=1.477e-14 rel_d=2.977e-1 gap_rel=6.990e-4
+iter   46 mu=1.824e-7 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.778e-4 sigma=1.921e-1 rel_p=3.806e-15 rel_d=2.976e-1 gap_rel=1.399e-4
+iter   47 mu=5.924e-8 alpha=6.973e-1 alpha_sz=7.043e-1 min_s=0.000e0 min_z=-4.777e-4 sigma=3.169e-2 rel_p=2.797e-15 rel_d=2.975e-1 gap_rel=4.546e-5
+iter   48 mu=6.289e-8 alpha=3.478e-1 alpha_sz=3.513e-1 min_s=0.000e0 min_z=-4.774e-4 sigma=9.980e-1 rel_p=4.749e-15 rel_d=2.975e-1 gap_rel=4.546e-5
+iter   49 mu=7.192e-8 alpha=9.869e-1 alpha_sz=9.969e-1 min_s=0.000e0 min_z=-4.769e-4 sigma=9.990e-1 rel_p=4.280e-15 rel_d=2.975e-1 gap_rel=4.548e-5
+Diagnostics for BOYD2:
+  r_p_inf=9.245e-4 (scale 2.160e11), r_d_inf=4.174e1 (scale 1.403e2)
+  rel_p=4.280e-15, rel_d=2.975e-1
+  top |r_d| components (with structure):
+    rd[26767]=+4.174e1  q=+0.000e0  Px=+0.000e0  A^Tz=+4.174e1  A_nnz=5  P_diag=0.00e0
+    rd[26773]=+4.174e1  q=+0.000e0  Px=+0.000e0  A^Tz=+4.174e1  A_nnz=5  P_diag=0.00e0
+    rd[26774]=+4.174e1  q=+0.000e0  Px=+0.000e0  A^Tz=+4.174e1  A_nnz=5  P_diag=0.00e0
+    rd[27682]=-1.120e1  q=+0.000e0  Px=+0.000e0  A^Tz=-1.120e1  A_nnz=5  P_diag=0.00e0
+    rd[28016]=-1.034e1  q=+0.000e0  Px=+0.000e0  A^Tz=-1.034e1  A_nnz=5  P_diag=0.00e0
+  gap=2.578e-1, gap_rel=4.548e-5, obj_p=5.669e3, obj_d=5.669e3
+Status:     MaxIters
+Variables:  93263
+Constraints:279794
+Iterations: 50
+Objective:  5.669002e3
+Final μ:    7.192299e-8
+Time:       3379.356 ms
+
+### CONT-300
+Diagnostics for CONT-300:
+  r_p_inf=9.339e-9 (scale 2.937e1), r_d_inf=3.407e-16 (scale 9.803e0)
+  rel_p=3.180e-10, rel_d=3.475e-17
+  gap=4.877e-9, gap_rel=4.877e-9, obj_p=1.915e-1, obj_d=1.915e-1
+Status:     Optimal
+Variables:  90597
+Constraints:271492
+Iterations: 12
+Objective:  1.915123e-1
+Final μ:    4.255443e-11
+Time:       18260.456 ms
+
+### CVXQP1_L
+Diagnostics for CVXQP1_L:
+  r_p_inf=2.726e-9 (scale 2.210e1), r_d_inf=1.077e-7 (scale 4.068e7)
+  rel_p=1.234e-10, rel_d=2.648e-15
+  gap=8.547e-2, gap_rel=7.863e-10, obj_p=1.087e8, obj_d=1.087e8
+Status:     Optimal
+Variables:  10000
+Constraints:25000
+Iterations: 11
+Objective:  1.087048e8
+Final μ:    6.771948e-7
+Time:       18747.412 ms
+
+### CVXQP2_L
+Diagnostics for CVXQP2_L:
+  r_p_inf=7.731e-8 (scale 2.495e1), r_d_inf=4.585e-6 (scale 8.342e4)
+  rel_p=3.098e-9, rel_d=5.496e-11
+  gap=4.190e-2, gap_rel=5.120e-10, obj_p=8.184e7, obj_d=8.184e7
+Status:     Optimal
+Variables:  10000
+Constraints:22500
+Iterations: 10
+Objective:  8.184246e7
+Final μ:    3.788943e-7
+Time:       12779.927 ms
+
+### CVXQP3_L
+Diagnostics for CVXQP3_L:
+  r_p_inf=7.336e-10 (scale 2.112e1), r_d_inf=7.874e-7 (scale 3.950e8)
+  rel_p=3.474e-11, rel_d=1.993e-15
+  gap=1.710e-1, gap_rel=1.478e-9, obj_p=1.157e8, obj_d=1.157e8
+Status:     Optimal
+Variables:  10000
+Constraints:27500
+Iterations: 10
+Objective:  1.157111e8
+Final μ:    8.434445e-7
+Time:       22662.735 ms
+
+### Q25FV47
+iter   45 mu=6.488e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.956e2 sigma=8.809e-1 rel_p=8.443e-17 rel_d=4.215e-1 gap_rel=1.690e-1
+iter   46 mu=6.410e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.956e2 sigma=8.885e-1 rel_p=1.242e-16 rel_d=4.215e-1 gap_rel=1.690e-1
+iter   47 mu=6.338e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.956e2 sigma=8.950e-1 rel_p=1.278e-16 rel_d=4.215e-1 gap_rel=1.690e-1
+iter   48 mu=6.270e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.956e2 sigma=9.006e-1 rel_p=8.642e-17 rel_d=4.215e-1 gap_rel=1.690e-1
+iter   49 mu=6.204e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.956e2 sigma=9.053e-1 rel_p=1.212e-16 rel_d=4.215e-1 gap_rel=1.690e-1
+Diagnostics for Q25FV47:
+  r_p_inf=8.973e-13 (scale 8.633e3), r_d_inf=2.725e4 (scale 6.466e4)
+  rel_p=1.039e-16, rel_d=4.215e-1
+  top |r_d| components (with structure):
+    rd[ 325]=+2.725e4  q=+0.000e0  Px=+0.000e0  A^Tz=+2.725e4  A_nnz=7  P_diag=0.00e0
+    rd[ 324]=+2.250e4  q=+0.000e0  Px=+0.000e0  A^Tz=+2.250e4  A_nnz=6  P_diag=0.00e0
+    rd[1557]=+1.730e4  q=+0.000e0  Px=+5.080e2  A^Tz=+1.679e4  A_nnz=3  P_diag=2.00e1
+    rd[1189]=+1.323e4  q=+2.909e-1  Px=+5.737e3  A^Tz=+7.495e3  A_nnz=8  P_diag=3.00e1
+    rd[1242]=+1.273e4  q=+5.656e-1  Px=+3.667e3  A^Tz=+9.060e3  A_nnz=5  P_diag=2.00e1
+  gap=2.322e6, gap_rel=1.690e-1, obj_p=1.374e7, obj_d=1.142e7
+Status:     MaxIters
+Variables:  1571
+Constraints:2391
+Iterations: 50
+Objective:  1.374445e7
+Final μ:    6.204490e-14
+Time:       6582.287 ms
+
+### QADLITTL
+iter   45 mu=1.389e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.904e-1 sigma=3.806e-1 rel_p=2.680e-16 rel_d=9.780e-1 gap_rel=4.605e-15
+iter   46 mu=1.401e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.904e-1 sigma=4.107e-1 rel_p=1.235e-16 rel_d=9.780e-1 gap_rel=5.211e-15
+iter   47 mu=1.416e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.904e-1 sigma=4.403e-1 rel_p=7.249e-17 rel_d=9.780e-1 gap_rel=5.332e-15
+iter   48 mu=1.433e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.904e-1 sigma=4.692e-1 rel_p=1.095e-16 rel_d=9.780e-1 gap_rel=6.059e-15
+iter   49 mu=1.452e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.904e-1 sigma=4.974e-1 rel_p=7.249e-17 rel_d=9.780e-1 gap_rel=6.544e-15
+Diagnostics for QADLITTL:
+  r_p_inf=4.512e-13 (scale 3.137e3), r_d_inf=9.429e2 (scale 8.245e4)
+  rel_p=1.439e-16, rel_d=1.144e-2
+  top |r_d| components (with structure):
+    rd[  33]=+9.429e2  q=+0.000e0  Px=+0.000e0  A^Tz=+9.429e2  A_nnz=3  P_diag=0.00e0
+    rd[   8]=+9.429e2  q=+0.000e0  Px=+0.000e0  A^Tz=+9.429e2  A_nnz=3  P_diag=0.00e0
+    rd[  65]=+9.429e2  q=+0.000e0  Px=+0.000e0  A^Tz=+9.429e2  A_nnz=3  P_diag=0.00e0
+    rd[  51]=+6.129e2  q=+2.040e0  Px=+0.000e0  A^Tz=+6.109e2  A_nnz=5  P_diag=0.00e0
+    rd[   3]=+4.380e2  q=-1.890e3  Px=+0.000e0  A^Tz=+2.328e3  A_nnz=7  P_diag=0.00e0
+  gap=1.453e3, gap_rel=3.025e-3, obj_p=4.803e5, obj_d=4.789e5
+Status:     MaxIters
+Variables:  97
+Constraints:153
+Iterations: 50
+Objective:  4.803189e5
+Final μ:    1.452351e-14
+Time:       23.528 ms
+
+### QBANDM
+iter   45 mu=7.717e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.130e1 sigma=3.950e-1 rel_p=1.089e-16 rel_d=1.004e-1 gap_rel=7.084e-1
+iter   46 mu=7.774e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.130e1 sigma=4.317e-1 rel_p=1.785e-16 rel_d=1.004e-1 gap_rel=7.084e-1
+iter   47 mu=7.857e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.130e1 sigma=4.675e-1 rel_p=1.612e-16 rel_d=1.004e-1 gap_rel=7.084e-1
+iter   48 mu=7.964e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.130e1 sigma=5.023e-1 rel_p=2.474e-16 rel_d=1.004e-1 gap_rel=7.084e-1
+iter   49 mu=8.094e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.130e1 sigma=5.359e-1 rel_p=1.278e-16 rel_d=1.004e-1 gap_rel=7.084e-1
+Diagnostics for QBANDM:
+  r_p_inf=2.238e-13 (scale 1.752e3), r_d_inf=2.435e2 (scale 2.425e3)
+  rel_p=1.278e-16, rel_d=1.004e-1
+  top |r_d| components (with structure):
+    rd[ 454]=+2.435e2  q=+2.912e0  Px=+2.464e2  A^Tz=-5.784e0  A_nnz=13  P_diag=1.00e1
+    rd[ 318]=+1.922e2  q=+2.780e0  Px=+1.946e2  A^Tz=-5.209e0  A_nnz=22  P_diag=1.00e1
+    rd[ 430]=+1.301e2  q=+1.542e0  Px=+1.319e2  A^Tz=-3.362e0  A_nnz=15  P_diag=1.00e1
+    rd[ 311]=+2.994e1  q=+2.730e0  Px=+3.281e1  A^Tz=-5.598e0  A_nnz=19  P_diag=1.00e1
+    rd[ 152]=-1.541e1  q=-5.716e0  Px=+0.000e0  A^Tz=-9.698e0  A_nnz=4  P_diag=0.00e0
+  gap=1.158e4, gap_rel=7.084e-1, obj_p=1.635e4, obj_d=4.769e3
+Status:     MaxIters
+Variables:  472
+Constraints:777
+Iterations: 50
+Objective:  1.635234e4
+Final μ:    8.093794e-15
+Time:       250.483 ms
+
+### QBEACONF
+iter   45 mu=1.809e-11 alpha=2.653e-1 alpha_sz=2.679e-1 min_s=0.000e0 min_z=-2.186e3 sigma=8.794e-1 rel_p=1.487e-14 rel_d=1.038e0 gap_rel=1.019e-1
+iter   46 mu=1.831e-11 alpha=1.563e-2 alpha_sz=1.579e-2 min_s=0.000e0 min_z=-2.186e3 sigma=9.679e-1 rel_p=4.668e-15 rel_d=1.038e0 gap_rel=1.019e-1
+iter   47 mu=2.040e-11 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.186e3 sigma=9.797e-1 rel_p=8.721e-15 rel_d=1.038e0 gap_rel=1.019e-1
+iter   48 mu=1.802e-11 alpha=2.702e-1 alpha_sz=2.730e-1 min_s=0.000e0 min_z=-2.186e3 sigma=6.651e-1 rel_p=7.439e-15 rel_d=1.038e0 gap_rel=1.019e-1
+iter   49 mu=1.680e-11 alpha=4.749e-1 alpha_sz=4.797e-1 min_s=0.000e0 min_z=-2.186e3 sigma=9.944e-1 rel_p=8.177e-15 rel_d=1.038e0 gap_rel=1.019e-1
+Diagnostics for QBEACONF:
+  r_p_inf=6.887e-11 (scale 7.477e3), r_d_inf=4.277e6 (scale 4.119e6)
+  rel_p=9.211e-15, rel_d=1.038e0
+  top |r_d| components (with structure):
+    rd[ 246]=-4.277e6  q=+0.000e0  Px=+0.000e0  A^Tz=-4.277e6  A_nnz=19  P_diag=0.00e0
+    rd[ 149]=-2.790e6  q=+0.000e0  Px=+0.000e0  A^Tz=-2.790e6  A_nnz=24  P_diag=0.00e0
+    rd[ 145]=-4.299e5  q=+0.000e0  Px=+0.000e0  A^Tz=-4.299e5  A_nnz=27  P_diag=0.00e0
+    rd[ 159]=-3.495e5  q=+0.000e0  Px=+0.000e0  A^Tz=-3.495e5  A_nnz=5  P_diag=0.00e0
+    rd[ 150]=-3.009e5  q=+0.000e0  Px=+0.000e0  A^Tz=-3.009e5  A_nnz=24  P_diag=0.00e0
+  gap=1.678e4, gap_rel=1.019e-1, obj_p=1.647e5, obj_d=1.479e5
+Status:     MaxIters
+Variables:  262
+Constraints:435
+Iterations: 50
+Objective:  1.647123e5
+Final μ:    1.679897e-11
+Time:       83.327 ms
+
+### QBORE3D
+iter   45 mu=3.907e-13 alpha=6.907e-2 alpha_sz=6.976e-2 min_s=0.000e0 min_z=-5.690e2 sigma=9.972e-1 rel_p=7.210e-15 rel_d=1.766e0 gap_rel=3.022e-13
+iter   46 mu=3.928e-13 alpha=4.410e-2 alpha_sz=4.454e-2 min_s=0.000e0 min_z=-5.690e2 sigma=9.973e-1 rel_p=7.209e-15 rel_d=1.766e0 gap_rel=2.694e-13
+iter   47 mu=3.943e-13 alpha=3.408e-2 alpha_sz=3.442e-2 min_s=0.000e0 min_z=-5.690e2 sigma=9.979e-1 rel_p=7.209e-15 rel_d=1.766e0 gap_rel=6.822e-14
+iter   48 mu=3.952e-13 alpha=2.218e-2 alpha_sz=2.241e-2 min_s=0.000e0 min_z=-5.690e2 sigma=9.990e-1 rel_p=7.209e-15 rel_d=1.766e0 gap_rel=8.886e-14
+iter   49 mu=3.965e-13 alpha=5.189e-2 alpha_sz=5.242e-2 min_s=0.000e0 min_z=-5.690e2 sigma=9.990e-1 rel_p=7.208e-15 rel_d=1.766e0 gap_rel=1.117e-13
+Diagnostics for QBORE3D:
+  r_p_inf=9.214e-11 (scale 1.278e4), r_d_inf=8.126e5 (scale 4.601e5)
+  rel_p=7.208e-15, rel_d=1.766e0
+  top |r_d| components (with structure):
+    rd[ 305]=-8.126e5  q=+0.000e0  Px=+0.000e0  A^Tz=-8.126e5  A_nnz=3  P_diag=0.00e0
+    rd[ 194]=-4.046e5  q=+0.000e0  Px=+9.699e-14  A^Tz=-4.046e5  A_nnz=13  P_diag=2.00e1
+    rd[ 186]=-3.308e5  q=+0.000e0  Px=+0.000e0  A^Tz=-3.308e5  A_nnz=18  P_diag=0.00e0
+    rd[ 187]=-3.248e5  q=+0.000e0  Px=+0.000e0  A^Tz=-3.248e5  A_nnz=18  P_diag=0.00e0
+    rd[ 306]=-1.478e5  q=+0.000e0  Px=+0.000e0  A^Tz=-1.478e5  A_nnz=5  P_diag=0.00e0
+  gap=1.187e-10, gap_rel=3.821e-14, obj_p=3.106e3, obj_d=3.106e3
+Status:     MaxIters
+Variables:  315
+Constraints:560
+Iterations: 50
+Objective:  3.106372e3
+Final μ:    3.964689e-13
+Time:       140.596 ms
+
+### QBRANDY
+iter   45 mu=1.062e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.399e1 sigma=8.410e-1 rel_p=2.686e-16 rel_d=9.832e-2 gap_rel=1.208e-1
+iter   46 mu=1.087e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.399e1 sigma=8.553e-1 rel_p=2.370e-16 rel_d=9.832e-2 gap_rel=1.208e-1
+iter   47 mu=1.112e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.399e1 sigma=8.681e-1 rel_p=1.896e-16 rel_d=9.832e-2 gap_rel=1.208e-1
+iter   48 mu=1.137e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.399e1 sigma=8.794e-1 rel_p=1.738e-16 rel_d=9.832e-2 gap_rel=1.208e-1
+iter   49 mu=1.163e-14 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.399e1 sigma=8.893e-1 rel_p=1.264e-16 rel_d=9.832e-2 gap_rel=1.208e-1
+Diagnostics for QBRANDY:
+  r_p_inf=4.554e-13 (scale 7.197e3), r_d_inf=4.270e2 (scale 4.343e3)
+  rel_p=6.327e-17, rel_d=9.832e-2
+  top |r_d| components (with structure):
+    rd[ 242]=-4.270e2  q=+0.000e0  Px=+0.000e0  A^Tz=-4.270e2  A_nnz=5  P_diag=0.00e0
+    rd[ 225]=-4.242e2  q=+0.000e0  Px=+0.000e0  A^Tz=-4.242e2  A_nnz=4  P_diag=1.00e1
+    rd[ 148]=-3.797e2  q=+0.000e0  Px=+0.000e0  A^Tz=-3.797e2  A_nnz=5  P_diag=0.00e0
+    rd[ 240]=-3.611e2  q=+0.000e0  Px=+0.000e0  A^Tz=-3.611e2  A_nnz=5  P_diag=0.00e0
+    rd[ 241]=-3.521e2  q=+0.000e0  Px=+0.000e0  A^Tz=-3.521e2  A_nnz=5  P_diag=0.00e0
+  gap=3.427e3, gap_rel=1.208e-1, obj_p=2.838e4, obj_d=2.495e4
+Status:     MaxIters
+Variables:  249
+Constraints:469
+Iterations: 50
+Objective:  2.837511e4
+Final μ:    1.162870e-14
+Time:       74.454 ms
+
+### QCAPRI
+iter   45 mu=7.390e-8 alpha=2.692e-1 alpha_sz=2.719e-1 min_s=0.000e0 min_z=-1.353e5 sigma=9.127e-1 rel_p=1.668e-11 rel_d=2.791e-1 gap_rel=5.821e-2
+iter   46 mu=7.255e-8 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.353e5 sigma=8.942e-1 rel_p=1.493e-11 rel_d=2.791e-1 gap_rel=5.821e-2
+iter   47 mu=6.249e-8 alpha=4.485e-1 alpha_sz=4.530e-1 min_s=0.000e0 min_z=-1.353e5 sigma=6.182e-1 rel_p=1.238e-11 rel_d=2.791e-1 gap_rel=5.821e-2
+iter   48 mu=2.805e-8 alpha=9.237e-1 alpha_sz=9.330e-1 min_s=0.000e0 min_z=-1.353e5 sigma=3.450e-1 rel_p=4.888e-12 rel_d=2.791e-1 gap_rel=5.821e-2
+iter   49 mu=1.025e-9 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.353e5 sigma=1.871e-2 rel_p=1.392e-13 rel_d=2.791e-1 gap_rel=5.821e-2
+Diagnostics for QCAPRI:
+  r_p_inf=4.413e-9 (scale 3.171e4), r_d_inf=2.100e6 (scale 7.524e6)
+  rel_p=1.392e-13, rel_d=2.791e-1
+  top |r_d| components (with structure):
+    rd[ 146]=-2.100e6  q=+0.000e0  Px=+0.000e0  A^Tz=-2.100e6  A_nnz=20  P_diag=0.00e0
+    rd[ 122]=-9.646e5  q=+0.000e0  Px=+0.000e0  A^Tz=-9.646e5  A_nnz=15  P_diag=0.00e0
+    rd[   3]=-2.595e4  q=+0.000e0  Px=+4.075e3  A^Tz=-3.002e4  A_nnz=5  P_diag=4.00e1
+    rd[  77]=-4.241e-1  q=+0.000e0  Px=+0.000e0  A^Tz=-4.241e-1  A_nnz=4  P_diag=0.00e0
+    rd[  76]=+4.241e-1  q=+0.000e0  Px=+0.000e0  A^Tz=+4.241e-1  A_nnz=3  P_diag=0.00e0
+  gap=4.129e6, gap_rel=5.821e-2, obj_p=6.679e7, obj_d=7.092e7
+Status:     MaxIters
+Variables:  353
+Constraints:757
+Iterations: 50
+Objective:  6.679329e7
+Final μ:    1.024732e-9
+Time:       180.143 ms
+
+### QE226
+iter   45 mu=1.575e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.249e-1 sigma=1.000e-3 rel_p=3.719e-16 rel_d=3.203e-2 gap_rel=7.588e-2
+iter   46 mu=1.561e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.249e-1 sigma=1.000e-3 rel_p=2.851e-16 rel_d=3.203e-2 gap_rel=7.588e-2
+iter   47 mu=1.549e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.249e-1 sigma=1.000e-3 rel_p=1.540e-16 rel_d=3.203e-2 gap_rel=7.588e-2
+iter   48 mu=1.537e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.249e-1 sigma=1.000e-3 rel_p=3.083e-16 rel_d=3.203e-2 gap_rel=7.588e-2
+iter   49 mu=1.526e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-4.249e-1 sigma=1.000e-3 rel_p=2.053e-16 rel_d=3.203e-2 gap_rel=7.588e-2
+Diagnostics for QE226:
+  r_p_inf=5.684e-14 (scale 2.769e2), r_d_inf=1.864e1 (scale 5.818e2)
+  rel_p=2.053e-16, rel_d=3.203e-2
+  top |r_d| components (with structure):
+    rd[ 231]=+1.864e1  q=+2.824e0  Px=+1.874e1  A^Tz=-2.923e0  A_nnz=17  P_diag=2.00e1
+    rd[ 215]=+1.696e1  q=+2.814e0  Px=+1.090e0  A^Tz=+1.305e1  A_nnz=14  P_diag=1.00e1
+    rd[  78]=+2.321e-1  q=-2.614e0  Px=+0.000e0  A^Tz=+2.846e0  A_nnz=3  P_diag=0.00e0
+    rd[ 100]=-3.442e-12  q=+1.860e-2  Px=+0.000e0  A^Tz=-1.860e-2  A_nnz=17  P_diag=0.00e0
+    rd[  24]=+2.150e-12  q=-4.450e0  Px=+0.000e0  A^Tz=+4.450e0  A_nnz=3  P_diag=0.00e0
+  gap=1.560e1, gap_rel=7.588e-2, obj_p=2.055e2, obj_d=1.899e2
+Status:     MaxIters
+Variables:  282
+Constraints:505
+Iterations: 50
+Objective:  2.055404e2
+Final μ:    1.525696e-15
+Time:       64.631 ms
+
+### QFFFFF80
+iter   45 mu=4.981e-7 alpha=9.394e-2 alpha_sz=9.489e-2 min_s=0.000e0 min_z=-1.068e3 sigma=9.825e-1 rel_p=9.120e-9 rel_d=7.238e2 gap_rel=1.316e0
+iter   46 mu=4.992e-7 alpha=4.210e-1 alpha_sz=4.252e-1 min_s=0.000e0 min_z=-1.068e3 sigma=9.648e-1 rel_p=9.120e-9 rel_d=7.346e2 gap_rel=1.316e0
+iter   47 mu=4.938e-7 alpha=9.072e-1 alpha_sz=9.163e-1 min_s=0.000e0 min_z=-1.069e3 sigma=9.519e-1 rel_p=9.120e-9 rel_d=7.682e2 gap_rel=1.316e0
+iter   48 mu=4.626e-7 alpha=3.957e-1 alpha_sz=3.997e-1 min_s=0.000e0 min_z=-1.069e3 sigma=8.083e-1 rel_p=9.120e-9 rel_d=8.312e2 gap_rel=1.316e0
+iter   49 mu=3.481e-7 alpha=7.260e-1 alpha_sz=7.333e-1 min_s=0.000e0 min_z=-1.069e3 sigma=6.344e-1 rel_p=9.121e-9 rel_d=1.131e3 gap_rel=1.316e0
+Diagnostics for QFFFFF80:
+  r_p_inf=8.601e-3 (scale 9.430e5), r_d_inf=4.498e8 (scale 3.977e5)
+  rel_p=9.121e-9, rel_d=1.131e3
+  top |r_d| components (with structure):
+    rd[ 170]=-4.498e8  q=+0.000e0  Px=+6.131e1  A^Tz=-4.498e8  A_nnz=51  P_diag=1.00e1
+    rd[ 584]=+4.520e3  q=+0.000e0  Px=+0.000e0  A^Tz=+4.520e3  A_nnz=7  P_diag=0.00e0
+    rd[ 633]=-4.039e3  q=+0.000e0  Px=+0.000e0  A^Tz=-4.039e3  A_nnz=3  P_diag=0.00e0
+    rd[ 802]=-4.039e3  q=+0.000e0  Px=+0.000e0  A^Tz=-4.039e3  A_nnz=3  P_diag=0.00e0
+    rd[ 806]=-4.039e3  q=+0.000e0  Px=+0.000e0  A^Tz=-4.039e3  A_nnz=3  P_diag=0.00e0
+  gap=3.634e6, gap_rel=1.316e0, obj_p=8.732e5, obj_d=-2.761e6
+Status:     MaxIters
+Variables:  854
+Constraints:1378
+Iterations: 50
+Objective:  8.732073e5
+Final μ:    3.480857e-7
+Time:       623.259 ms
+
+### QFORPLAN
+iter   45 mu=4.594e23 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.339e21 sigma=2.468e-1 rel_p=1.000e-1 rel_d=1.000e-1 gap_rel=9.609e-1
+iter   46 mu=1.230e23 alpha=5.553e-1 alpha_sz=5.609e-1 min_s=0.000e0 min_z=-1.339e21 sigma=1.747e-2 rel_p=1.000e-1 rel_d=1.000e-1 gap_rel=9.609e-1
+iter   47 mu=3.323e24 alpha=6.873e-1 alpha_sz=6.943e-1 min_s=0.000e0 min_z=-1.339e21 sigma=9.365e-1 rel_p=1.000e-1 rel_d=1.000e-1 gap_rel=9.609e-1
+iter   48 mu=1.018e26 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.339e21 sigma=9.954e-1 rel_p=1.000e-1 rel_d=1.000e-1 gap_rel=9.609e-1
+iter   49 mu=1.120e24 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.339e21 sigma=1.000e-3 rel_p=1.000e-1 rel_d=1.000e-1 gap_rel=9.609e-1
+Diagnostics for QFORPLAN:
+  r_p_inf=5.643e7 (scale 1.033e21), r_d_inf=4.201e21 (scale 4.906e21)
+  rel_p=5.461e-14, rel_d=8.564e-1
+  top |r_d| components (with structure):
+    rd[  31]=-4.201e21  q=+0.000e0  Px=+0.000e0  A^Tz=-4.201e21  A_nnz=18  P_diag=0.00e0
+    rd[  40]=-6.554e4  q=+1.107e-1  Px=+0.000e0  A^Tz=-6.554e4  A_nnz=20  P_diag=0.00e0
+    rd[  53]=-6.554e4  q=+7.918e-2  Px=+0.000e0  A^Tz=-6.554e4  A_nnz=18  P_diag=0.00e0
+    rd[  41]=-3.277e4  q=+1.145e-1  Px=+0.000e0  A^Tz=-3.277e4  A_nnz=21  P_diag=0.00e0
+    rd[  54]=-3.277e4  q=+8.170e-2  Px=+0.000e0  A^Tz=-3.277e4  A_nnz=19  P_diag=0.00e0
+  gap=9.668e21, gap_rel=9.593e-1, obj_p=4.103e20, obj_d=1.008e22
+Status:     MaxIters
+Variables:  83
+Constraints:162
+Iterations: 50
+Objective:  4.102967e20
+Final μ:    1.119979e24
+Time:       10.154 ms
+
+### QGFRDXPN
+iter   45 mu=1.237e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=1.510e-5 sigma=1.000e-3 rel_p=1.796e-15 rel_d=3.683e-3 gap_rel=2.197e-12
+iter   46 mu=1.237e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=1.510e-5 sigma=1.000e-3 rel_p=1.793e-15 rel_d=3.683e-3 gap_rel=2.197e-12
+iter   47 mu=1.237e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=1.510e-5 sigma=1.000e-3 rel_p=1.791e-15 rel_d=3.683e-3 gap_rel=2.197e-12
+iter   48 mu=1.237e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=1.510e-5 sigma=1.000e-3 rel_p=1.789e-15 rel_d=3.683e-3 gap_rel=2.197e-12
+iter   49 mu=1.237e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=1.510e-5 sigma=1.000e-3 rel_p=1.787e-15 rel_d=3.683e-3 gap_rel=2.197e-12
+Diagnostics for QGFRDXPN:
+  r_p_inf=1.787e-15 (scale 1.000e0), r_d_inf=3.482e2 (scale 9.455e4)
+  rel_p=1.787e-15, rel_d=3.683e-3
+  top |r_d| components (with structure):
+    rd[ 793]=-3.482e2  q=+2.000e-1  Px=+0.000e0  A^Tz=-3.484e2  A_nnz=3  P_diag=0.00e0
+    rd[ 792]=-3.421e2  q=+5.300e-1  Px=+0.000e0  A^Tz=-3.427e2  A_nnz=3  P_diag=0.00e0
+    rd[ 415]=-2.493e2  q=+2.200e-1  Px=+0.000e0  A^Tz=-2.496e2  A_nnz=3  P_diag=0.00e0
+    rd[ 743]=-2.489e2  q=+2.100e-1  Px=+0.000e0  A^Tz=-2.491e2  A_nnz=3  P_diag=0.00e0
+    rd[  89]=-2.443e2  q=+2.000e-1  Px=+0.000e0  A^Tz=-2.445e2  A_nnz=3  P_diag=0.00e0
+  gap=2.197e-12, gap_rel=2.197e-12, obj_p=2.197e-12, obj_d=-8.686e-27
+Status:     MaxIters
+Variables:  1092
+Constraints:1708
+Iterations: 50
+Objective:  2.196585e-12
+Final μ:    1.236753e-15
+Time:       100.030 ms
+
+### QPCBOEI1
+iter   45 mu=1.474e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.455e2 sigma=9.592e-1 rel_p=1.206e-15 rel_d=2.611e-3 gap_rel=3.724e-15
+iter   46 mu=1.420e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.455e2 sigma=9.606e-1 rel_p=1.210e-15 rel_d=2.611e-3 gap_rel=4.048e-15
+iter   47 mu=1.370e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.455e2 sigma=9.618e-1 rel_p=7.734e-16 rel_d=2.611e-3 gap_rel=4.372e-15
+iter   48 mu=1.323e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.455e2 sigma=9.630e-1 rel_p=6.987e-16 rel_d=2.611e-3 gap_rel=3.724e-15
+iter   49 mu=1.280e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.455e2 sigma=9.642e-1 rel_p=7.489e-16 rel_d=2.611e-3 gap_rel=3.400e-15
+Diagnostics for QPCBOEI1:
+  r_p_inf=2.856e-11 (scale 3.813e4), r_d_inf=8.181e2 (scale 3.133e5)
+  rel_p=7.489e-16, rel_d=2.611e-3
+  top |r_d| components (with structure):
+    rd[ 175]=-8.181e2  q=+1.157e-2  Px=+0.000e0  A^Tz=-8.181e2  A_nnz=8  P_diag=1.02e1
+    rd[ 324]=-8.004e-10  q=+3.302e1  Px=+1.723e1  A^Tz=-5.025e1  A_nnz=19  P_diag=1.72e1
+    rd[ 328]=-7.576e-10  q=+4.035e1  Px=+1.742e1  A^Tz=-5.777e1  A_nnz=25  P_diag=1.74e1
+    rd[ 110]=+1.536e-10  q=-4.394e-2  Px=+4.302e2  A^Tz=-4.301e2  A_nnz=9  P_diag=7.17e0
+    rd[ 330]=+1.348e-10  q=+1.692e1  Px=+1.751e1  A^Tz=-3.443e1  A_nnz=34  P_diag=1.75e1
+  gap=3.912e-8, gap_rel=3.400e-15, obj_p=1.150e7, obj_d=1.150e7
+Status:     MaxIters
+Variables:  384
+Constraints:980
+Iterations: 50
+Objective:  1.150391e7
+Final μ:    1.279583e-12
+Time:       98.616 ms
+
+### QPILOTNO
+iter   45 mu=1.096e-8 alpha=9.140e-2 alpha_sz=9.232e-2 min_s=0.000e0 min_z=-2.723e4 sigma=9.981e-1 rel_p=1.079e-6 rel_d=2.824e-5 gap_rel=1.424e-1
+iter   46 mu=1.356e-8 alpha=9.652e-1 alpha_sz=9.749e-1 min_s=0.000e0 min_z=-2.723e4 sigma=9.990e-1 rel_p=1.079e-6 rel_d=2.824e-5 gap_rel=1.424e-1
+iter   47 mu=1.439e-8 alpha=1.729e-1 alpha_sz=1.746e-1 min_s=0.000e0 min_z=-2.723e4 sigma=9.924e-1 rel_p=1.079e-6 rel_d=2.824e-5 gap_rel=1.424e-1
+iter   48 mu=1.748e-8 alpha=5.816e-1 alpha_sz=5.874e-1 min_s=0.000e0 min_z=-2.723e4 sigma=9.908e-1 rel_p=1.078e-6 rel_d=2.824e-5 gap_rel=1.424e-1
+iter   49 mu=1.789e-8 alpha=5.522e-2 alpha_sz=5.578e-2 min_s=0.000e0 min_z=-2.723e4 sigma=9.990e-1 rel_p=1.078e-6 rel_d=2.824e-5 gap_rel=1.424e-1
+Diagnostics for QPILOTNO:
+  r_p_inf=1.825e-1 (scale 1.693e5), r_d_inf=3.593e3 (scale 1.272e8)
+  rel_p=1.078e-6, rel_d=2.824e-5
+  top |r_d| components (with structure):
+    rd[  51]=+3.593e3  q=+0.000e0  Px=+3.393e3  A^Tz=+2.003e2  A_nnz=4  P_diag=2.00e1
+    rd[  36]=+2.658e3  q=+0.000e0  Px=+5.642e2  A^Tz=+2.094e3  A_nnz=5  P_diag=2.00e1
+    rd[1839]=-4.281e-1  q=+0.000e0  Px=+0.000e0  A^Tz=-4.281e-1  A_nnz=13  P_diag=0.00e0
+    rd[2161]=-3.929e-1  q=+0.000e0  Px=+0.000e0  A^Tz=-3.929e-1  A_nnz=10  P_diag=0.00e0
+    rd[1507]=+3.439e-1  q=+0.000e0  Px=+0.000e0  A^Tz=+3.439e-1  A_nnz=13  P_diag=0.00e0
+  gap=6.735e5, gap_rel=1.424e-1, obj_p=4.729e6, obj_d=4.055e6
+Status:     MaxIters
+Variables:  2172
+Constraints:3691
+Iterations: 50
+Objective:  4.728711e6
+Final μ:    1.788831e-8
+Time:       469.444 ms
+
+### QSCAGR25
+iter   45 mu=2.717e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.924e1 sigma=9.286e-1 rel_p=1.377e-16 rel_d=2.017e0 gap_rel=2.785e-1
+iter   46 mu=2.625e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.924e1 sigma=9.296e-1 rel_p=1.377e-16 rel_d=2.017e0 gap_rel=2.785e-1
+iter   47 mu=2.540e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.924e1 sigma=9.306e-1 rel_p=1.377e-16 rel_d=2.017e0 gap_rel=2.785e-1
+iter   48 mu=2.459e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.924e1 sigma=9.314e-1 rel_p=1.377e-16 rel_d=2.017e0 gap_rel=2.785e-1
+iter   49 mu=2.383e-12 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-3.924e1 sigma=9.323e-1 rel_p=1.377e-16 rel_d=2.017e0 gap_rel=2.785e-1
+Diagnostics for QSCAGR25:
+  r_p_inf=1.455e-11 (scale 5.285e4), r_d_inf=1.498e5 (scale 7.424e4)
+  rel_p=2.753e-16, rel_d=2.017e0
+  top |r_d| components (with structure):
+    rd[  16]=+1.498e5  q=-6.620e2  Px=+1.860e4  A^Tz=+1.318e5  A_nnz=9  P_diag=4.00e1
+    rd[  36]=-4.541e-10  q=-6.620e2  Px=+0.000e0  A^Tz=+6.620e2  A_nnz=10  P_diag=0.00e0
+    rd[  12]=-3.934e-10  q=+0.000e0  Px=+3.730e4  A^Tz=-3.730e4  A_nnz=3  P_diag=2.00e1
+    rd[  26]=+4.577e-11  q=+8.720e0  Px=+0.000e0  A^Tz=-8.720e0  A_nnz=3  P_diag=0.00e0
+    rd[ 206]=-4.160e-11  q=+8.720e0  Px=+0.000e0  A^Tz=-8.720e0  A_nnz=3  P_diag=0.00e0
+  gap=5.619e7, gap_rel=2.785e-1, obj_p=2.017e8, obj_d=1.455e8
+Status:     MaxIters
+Variables:  500
+Constraints:971
+Iterations: 50
+Objective:  2.017379e8
+Final μ:    2.383111e-12
+Time:       453.261 ms
+
+### QSCAGR7
+iter   45 mu=7.082e-13 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.097e1 sigma=8.412e-1 rel_p=1.100e-16 rel_d=1.692e-1 gap_rel=1.215e-1
+iter   46 mu=6.839e-13 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.097e1 sigma=8.454e-1 rel_p=1.236e-16 rel_d=1.692e-1 gap_rel=1.215e-1
+iter   47 mu=6.606e-13 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.097e1 sigma=8.478e-1 rel_p=1.081e-16 rel_d=1.692e-1 gap_rel=1.215e-1
+iter   48 mu=6.385e-13 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.097e1 sigma=8.495e-1 rel_p=1.853e-16 rel_d=1.692e-1 gap_rel=1.215e-1
+iter   49 mu=6.175e-13 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-6.097e1 sigma=8.508e-1 rel_p=1.544e-16 rel_d=1.692e-1 gap_rel=1.215e-1
+Diagnostics for QSCAGR7:
+  r_p_inf=1.819e-12 (scale 1.472e4), r_d_inf=8.700e3 (scale 5.141e4)
+  rel_p=1.236e-16, rel_d=1.692e-1
+  top |r_d| components (with structure):
+    rd[  16]=+8.700e3  q=-6.620e2  Px=+0.000e0  A^Tz=+9.362e3  A_nnz=9  P_diag=0.00e0
+    rd[  78]=-4.285e-7  q=+3.900e-1  Px=+0.000e0  A^Tz=-3.900e-1  A_nnz=4  P_diag=0.00e0
+    rd[  98]=-4.042e-7  q=+3.900e-1  Px=+0.000e0  A^Tz=-3.900e-1  A_nnz=4  P_diag=0.00e0
+    rd[  58]=-4.018e-7  q=+3.900e-1  Px=+0.000e0  A^Tz=-3.900e-1  A_nnz=4  P_diag=0.00e0
+    rd[  79]=+3.757e-7  q=+4.700e-1  Px=+0.000e0  A^Tz=-4.700e-1  A_nnz=4  P_diag=0.00e0
+  gap=3.264e6, gap_rel=1.215e-1, obj_p=2.687e7, obj_d=2.360e7
+Status:     MaxIters
+Variables:  140
+Constraints:269
+Iterations: 50
+Objective:  2.686595e7
+Final μ:    6.175397e-13
+Time:       28.590 ms
+
+### QSCFXM1
+iter   45 mu=5.541e-10 alpha=2.265e-1 alpha_sz=2.288e-1 min_s=0.000e0 min_z=-5.482e3 sigma=9.981e-1 rel_p=2.096e-9 rel_d=8.317e-1 gap_rel=1.545e-1
+iter   46 mu=6.789e-10 alpha=5.536e-1 alpha_sz=5.592e-1 min_s=0.000e0 min_z=-5.479e3 sigma=9.990e-1 rel_p=2.095e-9 rel_d=8.317e-1 gap_rel=1.545e-1
+iter   47 mu=6.946e-10 alpha=7.907e-2 alpha_sz=7.987e-2 min_s=0.000e0 min_z=-5.471e3 sigma=9.810e-1 rel_p=2.091e-9 rel_d=8.317e-1 gap_rel=1.545e-1
+iter   48 mu=8.752e-10 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.401e3 sigma=9.864e-1 rel_p=2.061e-9 rel_d=8.318e-1 gap_rel=1.545e-1
+iter   49 mu=8.523e-10 alpha=1.053e-1 alpha_sz=1.063e-1 min_s=0.000e0 min_z=-5.316e3 sigma=8.427e-1 rel_p=2.024e-9 rel_d=8.318e-1 gap_rel=1.545e-1
+Diagnostics for QSCFXM1:
+  r_p_inf=6.637e-5 (scale 3.279e4), r_d_inf=9.140e4 (scale 1.099e5)
+  rel_p=2.024e-9, rel_d=8.318e-1
+  top |r_d| components (with structure):
+    rd[ 108]=+9.140e4  q=+0.000e0  Px=+0.000e0  A^Tz=+9.140e4  A_nnz=4  P_diag=0.00e0
+    rd[  16]=+1.717e4  q=+0.000e0  Px=+0.000e0  A^Tz=+1.717e4  A_nnz=5  P_diag=0.00e0
+    rd[ 163]=+1.560e4  q=+0.000e0  Px=+0.000e0  A^Tz=+1.560e4  A_nnz=5  P_diag=0.00e0
+    rd[ 231]=-5.463e0  q=+0.000e0  Px=+0.000e0  A^Tz=-5.463e0  A_nnz=4  P_diag=0.00e0
+    rd[ 249]=-5.463e0  q=+0.000e0  Px=+0.000e0  A^Tz=-5.463e0  A_nnz=4  P_diag=0.00e0
+  gap=2.609e6, gap_rel=1.545e-1, obj_p=1.688e7, obj_d=1.427e7
+Status:     MaxIters
+Variables:  457
+Constraints:787
+Iterations: 50
+Objective:  1.688260e7
+Final μ:    8.523435e-10
+Time:       210.730 ms
+
+### QSCFXM2
+iter   45 mu=5.760e-6 alpha=3.142e-1 alpha_sz=3.173e-1 min_s=0.000e0 min_z=-1.061e4 sigma=8.785e-1 rel_p=2.753e-9 rel_d=8.963e-1 gap_rel=2.099e-1
+iter   46 mu=5.448e-6 alpha=5.101e-1 alpha_sz=5.152e-1 min_s=0.000e0 min_z=-1.061e4 sigma=8.435e-1 rel_p=2.552e-9 rel_d=8.963e-1 gap_rel=2.099e-1
+iter   47 mu=5.392e-6 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.061e4 sigma=9.391e-1 rel_p=2.434e-9 rel_d=8.963e-1 gap_rel=2.099e-1
+iter   48 mu=5.324e-6 alpha=3.326e-1 alpha_sz=3.359e-1 min_s=0.000e0 min_z=-1.061e4 sigma=9.066e-1 rel_p=2.381e-9 rel_d=8.963e-1 gap_rel=2.099e-1
+iter   49 mu=5.477e-6 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.061e4 sigma=9.797e-1 rel_p=2.393e-9 rel_d=8.963e-1 gap_rel=2.099e-1
+Diagnostics for QSCFXM2:
+  r_p_inf=7.919e-5 (scale 3.308e4), r_d_inf=1.353e5 (scale 1.510e5)
+  rel_p=2.393e-9, rel_d=8.963e-1
+  top |r_d| components (with structure):
+    rd[ 108]=+1.353e5  q=+0.000e0  Px=+0.000e0  A^Tz=+1.353e5  A_nnz=4  P_diag=0.00e0
+    rd[  16]=+4.000e4  q=+0.000e0  Px=+2.545e3  A^Tz=+3.746e4  A_nnz=5  P_diag=2.00e1
+    rd[ 163]=+3.584e4  q=+0.000e0  Px=+0.000e0  A^Tz=+3.584e4  A_nnz=5  P_diag=0.00e0
+    rd[ 231]=-1.078e1  q=+0.000e0  Px=+0.000e0  A^Tz=-1.078e1  A_nnz=4  P_diag=0.00e0
+    rd[ 249]=-1.078e1  q=+0.000e0  Px=+0.000e0  A^Tz=-1.078e1  A_nnz=4  P_diag=0.00e0
+  gap=5.829e6, gap_rel=2.099e-1, obj_p=2.778e7, obj_d=2.195e7
+Status:     MaxIters
+Variables:  914
+Constraints:1574
+Iterations: 50
+Objective:  2.777611e7
+Final μ:    5.477382e-6
+Time:       1411.910 ms
+
+### QSCFXM3
+iter   45 mu=5.737e-7 alpha=3.023e-1 alpha_sz=3.054e-1 min_s=0.000e0 min_z=-2.696e3 sigma=9.834e-1 rel_p=3.646e-9 rel_d=9.060e-1 gap_rel=2.009e-1
+iter   46 mu=6.655e-7 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.685e3 sigma=9.953e-1 rel_p=3.632e-9 rel_d=9.060e-1 gap_rel=2.009e-1
+iter   47 mu=8.116e-7 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.671e3 sigma=9.938e-1 rel_p=3.612e-9 rel_d=9.060e-1 gap_rel=2.009e-1
+iter   48 mu=8.345e-7 alpha=1.649e-1 alpha_sz=1.666e-1 min_s=0.000e0 min_z=-2.653e3 sigma=9.523e-1 rel_p=3.587e-9 rel_d=9.060e-1 gap_rel=2.009e-1
+iter   49 mu=9.742e-7 alpha=9.063e-1 alpha_sz=9.155e-1 min_s=0.000e0 min_z=-2.644e3 sigma=9.940e-1 rel_p=3.570e-9 rel_d=9.060e-1 gap_rel=2.009e-1
+Diagnostics for QSCFXM3:
+  r_p_inf=1.181e-4 (scale 3.309e4), r_d_inf=1.478e5 (scale 1.631e5)
+  rel_p=3.570e-9, rel_d=9.060e-1
+  top |r_d| components (with structure):
+    rd[ 108]=+1.478e5  q=+0.000e0  Px=+3.309e2  A^Tz=+1.475e5  A_nnz=4  P_diag=2.00e1
+    rd[  16]=+4.225e4  q=+0.000e0  Px=+2.545e3  A^Tz=+3.970e4  A_nnz=5  P_diag=2.00e1
+    rd[ 163]=+3.850e4  q=+0.000e0  Px=+0.000e0  A^Tz=+3.850e4  A_nnz=5  P_diag=0.00e0
+    rd[ 231]=-1.069e1  q=+0.000e0  Px=+0.000e0  A^Tz=-1.069e1  A_nnz=4  P_diag=0.00e0
+    rd[ 249]=-1.069e1  q=+0.000e0  Px=+0.000e0  A^Tz=-1.069e1  A_nnz=4  P_diag=0.00e0
+  gap=6.191e6, gap_rel=2.009e-1, obj_p=3.082e7, obj_d=2.462e7
+Status:     MaxIters
+Variables:  1371
+Constraints:2361
+Iterations: 50
+Objective:  3.081624e7
+Final μ:    9.742441e-7
+Time:       4531.379 ms
+
+### QSCORPIO
+iter   45 mu=2.446e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-7.460e-1 sigma=1.000e-3 rel_p=9.798e-17 rel_d=1.572e-1 gap_rel=1.209e-16
+iter   46 mu=2.445e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-7.460e-1 sigma=1.000e-3 rel_p=6.532e-17 rel_d=1.572e-1 gap_rel=1.330e-15
+iter   47 mu=2.444e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-7.460e-1 sigma=1.000e-3 rel_p=6.532e-17 rel_d=1.572e-1 gap_rel=3.627e-16
+iter   48 mu=2.443e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-7.460e-1 sigma=1.000e-3 rel_p=7.630e-17 rel_d=1.572e-1 gap_rel=1.088e-15
+iter   49 mu=2.442e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-7.460e-1 sigma=1.000e-3 rel_p=8.165e-17 rel_d=1.572e-1 gap_rel=8.464e-16
+Diagnostics for QSCORPIO:
+  r_p_inf=4.441e-16 (scale 6.798e0), r_d_inf=3.686e2 (scale 2.642e3)
+  rel_p=6.532e-17, rel_d=1.395e-1
+  top |r_d| components (with structure):
+    rd[  31]=-3.686e2  q=+1.810e0  Px=+1.108e-17  A^Tz=-3.704e2  A_nnz=7  P_diag=3.00e1
+    rd[  86]=+1.380e2  q=+1.540e0  Px=+0.000e0  A^Tz=+1.364e2  A_nnz=6  P_diag=0.00e0
+    rd[ 147]=+1.235e2  q=+1.360e0  Px=+0.000e0  A^Tz=+1.221e2  A_nnz=6  P_diag=0.00e0
+    rd[  92]=-8.885e1  q=+0.000e0  Px=+0.000e0  A^Tz=-8.885e1  A_nnz=3  P_diag=0.00e0
+    rd[  75]=+8.796e1  q=+3.900e-1  Px=+0.000e0  A^Tz=+8.757e1  A_nnz=8  P_diag=0.00e0
+  gap=2.323e0, gap_rel=1.235e-3, obj_p=1.881e3, obj_d=1.878e3
+Status:     MaxIters
+Variables:  358
+Constraints:746
+Iterations: 50
+Objective:  1.880510e3
+Final μ:    2.441778e-15
+Time:       331.921 ms
+
+### QSCRS8
+iter   45 mu=1.705e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.648e1 sigma=1.493e-1 rel_p=1.423e-16 rel_d=8.381e-1 gap_rel=3.671e-13
+iter   46 mu=1.687e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.648e1 sigma=1.576e-1 rel_p=8.461e-17 rel_d=8.381e-1 gap_rel=3.855e-13
+iter   47 mu=1.673e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.648e1 sigma=1.661e-1 rel_p=1.794e-16 rel_d=8.381e-1 gap_rel=4.112e-13
+iter   48 mu=1.661e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.648e1 sigma=1.747e-1 rel_p=1.582e-16 rel_d=8.381e-1 gap_rel=4.379e-13
+iter   49 mu=1.651e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-1.648e1 sigma=1.834e-1 rel_p=1.502e-16 rel_d=8.381e-1 gap_rel=4.662e-13
+Diagnostics for QSCRS8:
+  r_p_inf=6.968e-14 (scale 4.639e2), r_d_inf=7.437e4 (scale 8.874e4)
+  rel_p=1.502e-16, rel_d=8.381e-1
+  top |r_d| components (with structure):
+    rd[   7]=-7.437e4  q=+0.000e0  Px=+1.760e-13  A^Tz=-7.437e4  A_nnz=5  P_diag=3.00e1
+    rd[   2]=-3.815e4  q=+1.852e2  Px=+1.645e-15  A^Tz=-3.833e4  A_nnz=6  P_diag=2.00e1
+    rd[   6]=-3.643e4  q=+1.127e2  Px=+1.744e-13  A^Tz=-3.654e4  A_nnz=7  P_diag=3.00e1
+    rd[   3]=-2.367e4  q=+1.055e2  Px=+1.645e-15  A^Tz=-2.377e4  A_nnz=4  P_diag=2.00e1
+    rd[   1]=-8.243e3  q=+1.852e2  Px=+2.554e-7  A^Tz=-8.429e3  A_nnz=9  P_diag=4.00e1
+  gap=4.219e-10, gap_rel=4.664e-13, obj_p=9.046e2, obj_d=9.046e2
+Status:     MaxIters
+Variables:  1169
+Constraints:1659
+Iterations: 50
+Objective:  9.045600e2
+Final μ:    1.650672e-15
+Time:       1566.808 ms
+
+### QSHARE1B
+iter   45 mu=5.906e-7 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.989e-1 sigma=7.132e-1 rel_p=8.558e-15 rel_d=3.067e-4 gap_rel=1.757e-2
+iter   46 mu=3.883e-7 alpha=4.843e-1 alpha_sz=4.891e-1 min_s=0.000e0 min_z=-5.989e-1 sigma=2.369e-1 rel_p=5.393e-15 rel_d=3.067e-4 gap_rel=1.757e-2
+iter   47 mu=3.923e-7 alpha=2.190e-1 alpha_sz=2.212e-1 min_s=0.000e0 min_z=-5.987e-1 sigma=9.261e-1 rel_p=5.310e-15 rel_d=3.067e-4 gap_rel=1.757e-2
+iter   48 mu=4.154e-7 alpha=3.113e-1 alpha_sz=3.145e-1 min_s=0.000e0 min_z=-5.986e-1 sigma=9.798e-1 rel_p=5.273e-15 rel_d=3.067e-4 gap_rel=1.757e-2
+iter   49 mu=4.453e-7 alpha=3.319e-1 alpha_sz=3.352e-1 min_s=0.000e0 min_z=-5.985e-1 sigma=9.807e-1 rel_p=5.242e-15 rel_d=3.067e-4 gap_rel=1.757e-2
+Diagnostics for QSHARE1B:
+  r_p_inf=9.339e-9 (scale 1.782e6), r_d_inf=2.735e2 (scale 8.918e5)
+  rel_p=5.242e-15, rel_d=3.067e-4
+  top |r_d| components (with structure):
+    rd[   6]=-2.735e2  q=+0.000e0  Px=+0.000e0  A^Tz=-2.735e2  A_nnz=7  P_diag=0.00e0
+    rd[   0]=+1.868e1  q=+0.000e0  Px=+0.000e0  A^Tz=+1.868e1  A_nnz=7  P_diag=0.00e0
+    rd[  84]=-9.407e0  q=+0.000e0  Px=+0.000e0  A^Tz=-9.407e0  A_nnz=7  P_diag=0.00e0
+    rd[  42]=+8.240e0  q=+0.000e0  Px=+0.000e0  A^Tz=+8.240e0  A_nnz=7  P_diag=0.00e0
+    rd[  36]=+7.148e0  q=+0.000e0  Px=+0.000e0  A^Tz=+7.148e0  A_nnz=8  P_diag=0.00e0
+  gap=1.288e4, gap_rel=1.757e-2, obj_p=7.201e5, obj_d=7.330e5
+Status:     MaxIters
+Variables:  225
+Constraints:342
+Iterations: 50
+Objective:  7.200875e5
+Final μ:    4.453011e-7
+Time:       14.946 ms
+
+### QSHIP04L
+iter   45 mu=7.685e-13 alpha=5.189e-46 alpha_sz=5.241e-46 min_s=0.000e0 min_z=-8.925e0 sigma=9.990e-1 rel_p=3.683e-9 rel_d=5.318e-1 gap_rel=1.313e-3
+iter   46 mu=7.685e-13 alpha=5.189e-48 alpha_sz=5.241e-48 min_s=0.000e0 min_z=-8.925e0 sigma=9.990e-1 rel_p=3.683e-9 rel_d=5.318e-1 gap_rel=1.313e-3
+iter   47 mu=7.685e-13 alpha=5.189e-50 alpha_sz=5.241e-50 min_s=0.000e0 min_z=-8.925e0 sigma=9.990e-1 rel_p=3.683e-9 rel_d=5.318e-1 gap_rel=1.313e-3
+iter   48 mu=7.685e-13 alpha=5.189e-52 alpha_sz=5.241e-52 min_s=0.000e0 min_z=-8.925e0 sigma=9.990e-1 rel_p=3.683e-9 rel_d=5.318e-1 gap_rel=1.313e-3
+iter   49 mu=7.685e-13 alpha=5.189e-54 alpha_sz=5.241e-54 min_s=0.000e0 min_z=-8.925e0 sigma=9.990e-1 rel_p=3.683e-9 rel_d=5.318e-1 gap_rel=1.313e-3
+Diagnostics for QSHIP04L:
+  r_p_inf=1.222e-6 (scale 3.317e2), r_d_inf=8.629e3 (scale 1.623e4)
+  rel_p=3.683e-9, rel_d=5.318e-1
+  top |r_d| components (with structure):
+    rd[ 512]=+8.629e3  q=+4.585e2  Px=+0.000e0  A^Tz=+8.171e3  A_nnz=4  P_diag=0.00e0
+    rd[2066]=+7.669e3  q=+4.585e2  Px=+0.000e0  A^Tz=+7.210e3  A_nnz=4  P_diag=0.00e0
+    rd[1030]=+1.669e3  q=+4.585e2  Px=+0.000e0  A^Tz=+1.211e3  A_nnz=4  P_diag=0.00e0
+    rd[1548]=-5.101e2  q=+2.341e2  Px=+0.000e0  A^Tz=-7.443e2  A_nnz=4  P_diag=0.00e0
+    rd[   3]=-8.894e-10  q=+4.812e3  Px=+1.504e3  A^Tz=-6.316e3  A_nnz=7  P_diag=4.00e1
+  gap=3.177e3, gap_rel=1.313e-3, obj_p=2.420e6, obj_d=2.417e6
+Status:     MaxIters
+Variables:  2118
+Constraints:2520
+Iterations: 50
+Objective:  2.420016e6
+Final μ:    7.685444e-13
+Time:       8298.104 ms
+
+### QSHIP04S
+iter   45 mu=5.195e-14 alpha=1.378e-45 alpha_sz=1.392e-45 min_s=0.000e0 min_z=-7.219e0 sigma=9.990e-1 rel_p=4.240e-10 rel_d=5.398e-1 gap_rel=1.645e-1
+iter   46 mu=5.195e-14 alpha=1.378e-47 alpha_sz=1.392e-47 min_s=0.000e0 min_z=-7.219e0 sigma=9.990e-1 rel_p=4.240e-10 rel_d=5.398e-1 gap_rel=1.645e-1
+iter   47 mu=5.195e-14 alpha=1.378e-49 alpha_sz=1.392e-49 min_s=0.000e0 min_z=-7.219e0 sigma=9.990e-1 rel_p=4.240e-10 rel_d=5.398e-1 gap_rel=1.645e-1
+iter   48 mu=5.195e-14 alpha=1.378e-51 alpha_sz=1.392e-51 min_s=0.000e0 min_z=-7.219e0 sigma=9.990e-1 rel_p=4.240e-10 rel_d=5.398e-1 gap_rel=1.645e-1
+iter   49 mu=5.195e-14 alpha=1.378e-53 alpha_sz=1.392e-53 min_s=0.000e0 min_z=-7.219e0 sigma=9.990e-1 rel_p=4.240e-10 rel_d=5.398e-1 gap_rel=1.645e-1
+Diagnostics for QSHIP04S:
+  r_p_inf=1.409e-7 (scale 3.322e2), r_d_inf=8.754e3 (scale 1.622e4)
+  rel_p=4.240e-10, rel_d=5.398e-1
+  top |r_d| components (with structure):
+    rd[1391]=+8.754e3  q=+6.792e2  Px=+0.000e0  A^Tz=+8.074e3  A_nnz=4  P_diag=0.00e0
+    rd[1382]=+8.740e3  q=+6.657e2  Px=+0.000e0  A^Tz=+8.074e3  A_nnz=4  P_diag=0.00e0
+    rd[ 332]=+8.709e3  q=+6.792e2  Px=+0.000e0  A^Tz=+8.029e3  A_nnz=4  P_diag=0.00e0
+    rd[ 323]=+8.695e3  q=+6.657e2  Px=+0.000e0  A^Tz=+8.029e3  A_nnz=4  P_diag=0.00e0
+    rd[ 182]=+8.648e3  q=+1.349e2  Px=+0.000e0  A^Tz=+8.513e3  A_nnz=4  P_diag=0.00e0
+  gap=3.990e5, gap_rel=1.645e-1, obj_p=2.425e6, obj_d=2.026e6
+Status:     MaxIters
+Variables:  1458
+Constraints:1860
+Iterations: 50
+Objective:  2.424994e6
+Final μ:    5.195170e-14
+Time:       3191.860 ms
+
+### QSHIP08L
+iter   45 mu=4.354e-13 alpha=2.927e-19 alpha_sz=2.956e-19 min_s=0.000e0 min_z=-8.250e0 sigma=9.990e-1 rel_p=1.213e-9 rel_d=7.514e-1 gap_rel=8.590e-3
+iter   46 mu=4.354e-13 alpha=5.674e-23 alpha_sz=5.732e-23 min_s=0.000e0 min_z=-8.250e0 sigma=9.990e-1 rel_p=1.213e-9 rel_d=7.514e-1 gap_rel=8.590e-3
+iter   47 mu=4.354e-13 alpha=5.825e-21 alpha_sz=5.884e-21 min_s=0.000e0 min_z=-8.250e0 sigma=9.990e-1 rel_p=1.213e-9 rel_d=7.514e-1 gap_rel=8.590e-3
+iter   48 mu=4.354e-13 alpha=1.129e-24 alpha_sz=1.141e-24 min_s=0.000e0 min_z=-8.250e0 sigma=9.990e-1 rel_p=1.213e-9 rel_d=7.514e-1 gap_rel=8.590e-3
+iter   49 mu=4.354e-13 alpha=1.169e-22 alpha_sz=1.180e-22 min_s=0.000e0 min_z=-8.250e0 sigma=9.990e-1 rel_p=1.213e-9 rel_d=7.514e-1 gap_rel=8.590e-3
+Diagnostics for QSHIP08L:
+  r_p_inf=3.539e-7 (scale 2.918e2), r_d_inf=3.458e4 (scale 4.602e4)
+  rel_p=1.213e-9, rel_d=7.514e-1
+  top |r_d| components (with structure):
+    rd[1757]=-3.458e4  q=+2.727e2  Px=+0.000e0  A^Tz=-3.485e4  A_nnz=4  P_diag=0.00e0
+    rd[2073]=-3.421e4  q=+5.595e2  Px=+0.000e0  A^Tz=-3.477e4  A_nnz=4  P_diag=0.00e0
+    rd[3853]=-3.388e4  q=+4.671e2  Px=+0.000e0  A^Tz=-3.435e4  A_nnz=4  P_diag=0.00e0
+    rd[1749]=-3.337e4  q=+1.450e3  Px=+0.000e0  A^Tz=-3.482e4  A_nnz=4  P_diag=0.00e0
+    rd[4169]=-3.327e4  q=+9.584e2  Px=+0.000e0  A^Tz=-3.423e4  A_nnz=4  P_diag=0.00e0
+  gap=2.041e4, gap_rel=8.590e-3, obj_p=2.376e6, obj_d=2.356e6
+Status:     MaxIters
+Variables:  4283
+Constraints:5061
+Iterations: 50
+Objective:  2.376041e6
+Final μ:    4.353942e-13
+Time:       4299.710 ms
+
+### QSHIP08S
+iter   45 mu=1.211e-14 alpha=1.160e-25 alpha_sz=1.172e-25 min_s=0.000e0 min_z=-5.625e0 sigma=9.990e-1 rel_p=1.892e-9 rel_d=8.737e-1 gap_rel=3.714e-1
+iter   46 mu=1.211e-14 alpha=1.160e-27 alpha_sz=1.172e-27 min_s=0.000e0 min_z=-5.625e0 sigma=9.990e-1 rel_p=1.892e-9 rel_d=8.737e-1 gap_rel=3.714e-1
+iter   47 mu=1.211e-14 alpha=1.160e-29 alpha_sz=1.172e-29 min_s=0.000e0 min_z=-5.625e0 sigma=9.990e-1 rel_p=1.892e-9 rel_d=8.737e-1 gap_rel=3.714e-1
+iter   48 mu=1.211e-14 alpha=1.160e-31 alpha_sz=1.172e-31 min_s=0.000e0 min_z=-5.625e0 sigma=9.990e-1 rel_p=1.892e-9 rel_d=8.737e-1 gap_rel=3.714e-1
+iter   49 mu=1.211e-14 alpha=1.160e-33 alpha_sz=1.172e-33 min_s=0.000e0 min_z=-5.625e0 sigma=9.990e-1 rel_p=1.892e-9 rel_d=8.737e-1 gap_rel=3.714e-1
+Diagnostics for QSHIP08S:
+  r_p_inf=5.522e-7 (scale 2.919e2), r_d_inf=5.911e4 (scale 6.765e4)
+  rel_p=1.892e-9, rel_d=8.737e-1
+  top |r_d| components (with structure):
+    rd[ 944]=-5.911e4  q=+8.888e1  Px=+0.000e0  A^Tz=-5.919e4  A_nnz=4  P_diag=0.00e0
+    rd[1033]=-5.910e4  q=+9.090e1  Px=+0.000e0  A^Tz=-5.919e4  A_nnz=4  P_diag=0.00e0
+    rd[1059]=-5.910e4  q=+9.595e1  Px=+0.000e0  A^Tz=-5.919e4  A_nnz=4  P_diag=0.00e0
+    rd[1042]=-5.909e4  q=+8.989e1  Px=+0.000e0  A^Tz=-5.918e4  A_nnz=4  P_diag=0.00e0
+    rd[ 943]=-5.909e4  q=+1.071e2  Px=+0.000e0  A^Tz=-5.919e4  A_nnz=4  P_diag=0.00e0
+  gap=8.860e5, gap_rel=3.714e-1, obj_p=2.386e6, obj_d=1.500e6
+Status:     MaxIters
+Variables:  2387
+Constraints:3165
+Iterations: 50
+Objective:  2.385729e6
+Final μ:    1.211192e-14
+Time:       16560.626 ms
+
+### QSHIP12L
+iter   45 mu=2.066e-13 alpha=1.769e-44 alpha_sz=1.787e-44 min_s=0.000e0 min_z=-2.199e1 sigma=9.990e-1 rel_p=5.759e-10 rel_d=5.301e-2 gap_rel=9.936e-2
+iter   46 mu=2.066e-13 alpha=1.769e-46 alpha_sz=1.787e-46 min_s=0.000e0 min_z=-2.199e1 sigma=9.990e-1 rel_p=5.759e-10 rel_d=5.301e-2 gap_rel=9.936e-2
+iter   47 mu=2.066e-13 alpha=1.769e-48 alpha_sz=1.787e-48 min_s=0.000e0 min_z=-2.199e1 sigma=9.990e-1 rel_p=5.759e-10 rel_d=5.301e-2 gap_rel=9.936e-2
+iter   48 mu=2.066e-13 alpha=1.769e-50 alpha_sz=1.787e-50 min_s=0.000e0 min_z=-2.199e1 sigma=9.990e-1 rel_p=5.759e-10 rel_d=5.301e-2 gap_rel=9.936e-2
+iter   49 mu=2.066e-13 alpha=1.769e-52 alpha_sz=1.787e-52 min_s=0.000e0 min_z=-2.199e1 sigma=9.990e-1 rel_p=5.759e-10 rel_d=5.301e-2 gap_rel=9.936e-2
+Diagnostics for QSHIP12L:
+  r_p_inf=1.234e-7 (scale 2.143e2), r_d_inf=1.470e4 (scale 2.774e5)
+  rel_p=5.759e-10, rel_d=5.301e-2
+  top |r_d| components (with structure):
+    rd[4402]=+1.470e4  q=+6.016e2  Px=+0.000e0  A^Tz=+1.410e4  A_nnz=4  P_diag=0.00e0
+    rd[4418]=+1.454e4  q=+4.443e2  Px=+0.000e0  A^Tz=+1.410e4  A_nnz=4  P_diag=0.00e0
+    rd[4393]=+1.454e4  q=+4.432e2  Px=+0.000e0  A^Tz=+1.410e4  A_nnz=4  P_diag=0.00e0
+    rd[4433]=+1.447e4  q=+3.645e2  Px=+0.000e0  A^Tz=+1.410e4  A_nnz=4  P_diag=0.00e0
+    rd[4390]=+1.444e4  q=+3.402e2  Px=+0.000e0  A^Tz=+1.410e4  A_nnz=4  P_diag=0.00e0
+  gap=2.999e5, gap_rel=9.936e-2, obj_p=3.019e6, obj_d=2.719e6
+Status:     MaxIters
+Variables:  5427
+Constraints:6578
+Iterations: 50
+Objective:  3.018877e6
+Final μ:    2.065983e-13
+Time:       9652.494 ms
+
+### QSHIP12S
+iter   45 mu=1.045e-14 alpha=2.309e-28 alpha_sz=2.333e-28 min_s=0.000e0 min_z=-1.969e1 sigma=9.990e-1 rel_p=7.230e-10 rel_d=5.292e-2 gap_rel=7.313e-1
+iter   46 mu=1.045e-14 alpha=2.119e-30 alpha_sz=2.141e-30 min_s=0.000e0 min_z=-1.969e1 sigma=9.990e-1 rel_p=7.230e-10 rel_d=5.292e-2 gap_rel=7.313e-1
+iter   47 mu=1.045e-14 alpha=2.242e-32 alpha_sz=2.265e-32 min_s=0.000e0 min_z=-1.969e1 sigma=9.990e-1 rel_p=7.230e-10 rel_d=5.292e-2 gap_rel=7.313e-1
+iter   48 mu=1.045e-14 alpha=2.242e-34 alpha_sz=2.265e-34 min_s=0.000e0 min_z=-1.969e1 sigma=9.990e-1 rel_p=7.230e-10 rel_d=5.292e-2 gap_rel=7.313e-1
+iter   49 mu=1.045e-14 alpha=2.242e-36 alpha_sz=2.265e-36 min_s=0.000e0 min_z=-1.969e1 sigma=9.990e-1 rel_p=7.230e-10 rel_d=5.292e-2 gap_rel=7.313e-1
+Diagnostics for QSHIP12S:
+  r_p_inf=1.551e-7 (scale 2.146e2), r_d_inf=1.472e4 (scale 2.781e5)
+  rel_p=7.230e-10, rel_d=5.292e-2
+  top |r_d| components (with structure):
+    rd[2210]=+1.472e4  q=+6.016e2  Px=+0.000e0  A^Tz=+1.412e4  A_nnz=4  P_diag=0.00e0
+    rd[2216]=+1.460e4  q=+4.897e2  Px=+0.000e0  A^Tz=+1.412e4  A_nnz=4  P_diag=0.00e0
+    rd[2074]=+1.459e4  q=+4.731e2  Px=+0.000e0  A^Tz=+1.412e4  A_nnz=4  P_diag=0.00e0
+    rd[2214]=+1.456e4  q=+4.443e2  Px=+0.000e0  A^Tz=+1.412e4  A_nnz=4  P_diag=0.00e0
+    rd[2089]=+1.456e4  q=+4.432e2  Px=+0.000e0  A^Tz=+1.412e4  A_nnz=4  P_diag=0.00e0
+  gap=2.235e6, gap_rel=7.313e-1, obj_p=3.057e6, obj_d=8.215e5
+Status:     MaxIters
+Variables:  2763
+Constraints:3914
+Iterations: 50
+Objective:  3.056962e6
+Final μ:    1.045262e-14
+Time:       31761.319 ms
+
+### STCQP1
+iter   45 mu=1.588e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.997e-1 sigma=1.000e-3 rel_p=4.132e-16 rel_d=1.159e1 gap_rel=5.025e-1
+iter   46 mu=1.559e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.997e-1 sigma=1.000e-3 rel_p=2.591e-16 rel_d=1.160e1 gap_rel=5.025e-1
+iter   47 mu=1.531e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.997e-1 sigma=1.000e-3 rel_p=2.344e-16 rel_d=1.160e1 gap_rel=5.025e-1
+iter   48 mu=1.504e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.997e-1 sigma=1.000e-3 rel_p=2.591e-16 rel_d=1.160e1 gap_rel=5.025e-1
+iter   49 mu=1.478e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.997e-1 sigma=1.000e-3 rel_p=2.591e-16 rel_d=1.160e1 gap_rel=5.025e-1
+Diagnostics for STCQP1:
+  r_p_inf=4.885e-15 (scale 1.800e1), r_d_inf=5.982e2 (scale 5.155e1)
+  rel_p=2.714e-16, rel_d=1.160e1
+  top |r_d| components (with structure):
+    rd[  67]=+5.982e2  q=+0.000e0  Px=+7.660e2  A^Tz=-1.678e2  A_nnz=14  P_diag=1.28e2
+    rd[  83]=+5.963e2  q=+0.000e0  Px=+7.660e2  A^Tz=-1.697e2  A_nnz=14  P_diag=1.28e2
+    rd[  85]=+5.946e2  q=+0.000e0  Px=+7.679e2  A^Tz=-1.733e2  A_nnz=14  P_diag=1.28e2
+    rd[  87]=+5.940e2  q=+0.000e0  Px=+7.707e2  A^Tz=-1.767e2  A_nnz=14  P_diag=1.28e2
+    rd[  89]=+5.937e2  q=+0.000e0  Px=+7.642e2  A^Tz=-1.705e2  A_nnz=14  P_diag=1.28e2
+  gap=7.796e4, gap_rel=5.025e-1, obj_p=1.551e5, obj_d=7.718e4
+Status:     MaxIters
+Variables:  4097
+Constraints:10246
+Iterations: 50
+Objective:  1.551436e5
+Final μ:    1.478465e-15
+Time:       277.818 ms
+
+### STCQP2
+iter   45 mu=1.773e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.943e0 sigma=1.000e-3 rel_p=3.022e-16 rel_d=3.355e-1 gap_rel=1.822e-2
+iter   46 mu=1.742e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.943e0 sigma=1.000e-3 rel_p=2.344e-16 rel_d=3.355e-1 gap_rel=1.822e-2
+iter   47 mu=1.712e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.943e0 sigma=1.000e-3 rel_p=2.467e-16 rel_d=3.355e-1 gap_rel=1.822e-2
+iter   48 mu=1.684e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.943e0 sigma=1.000e-3 rel_p=2.097e-16 rel_d=3.355e-1 gap_rel=1.822e-2
+iter   49 mu=1.656e-15 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-2.943e0 sigma=1.000e-3 rel_p=3.454e-16 rel_d=3.355e-1 gap_rel=1.822e-2
+Diagnostics for STCQP2:
+  r_p_inf=5.773e-15 (scale 1.800e1), r_d_inf=7.882e1 (scale 2.349e2)
+  rel_p=3.207e-16, rel_d=3.355e-1
+  top |r_d| components (with structure):
+    rd[   1]=-7.882e1  q=+0.000e0  Px=+2.000e0  A^Tz=-8.082e1  A_nnz=14  P_diag=2.00e0
+    rd[ 337]=-2.951e1  q=+0.000e0  Px=+1.546e2  A^Tz=-1.841e2  A_nnz=14  P_diag=1.46e2
+    rd[ 169]=-2.787e1  q=+0.000e0  Px=+2.456e2  A^Tz=-2.735e2  A_nnz=14  P_diag=1.38e2
+    rd[  25]=-2.555e1  q=+0.000e0  Px=+1.785e2  A^Tz=-2.040e2  A_nnz=14  P_diag=1.02e2
+    rd[ 241]=-2.546e1  q=+0.000e0  Px=+2.281e2  A^Tz=-2.536e2  A_nnz=14  P_diag=1.38e2
+  gap=4.144e2, gap_rel=1.822e-2, obj_p=2.233e4, obj_d=2.274e4
+Status:     MaxIters
+Variables:  4097
+Constraints:10246
+Iterations: 50
+Objective:  2.232731e4
+Final μ:    1.656136e-15
+Time:       1705.600 ms
+
+### UBH1
+iter   45 mu=1.334e-16 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.958e-2 sigma=1.000e-3 rel_p=3.327e-16 rel_d=4.598e-12 gap_rel=1.494e-6
+iter   46 mu=1.324e-16 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.954e-2 sigma=1.000e-3 rel_p=2.884e-16 rel_d=3.984e-12 gap_rel=1.123e-6
+iter   47 mu=1.314e-16 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.951e-2 sigma=1.000e-3 rel_p=2.500e-16 rel_d=3.451e-12 gap_rel=8.441e-7
+iter   48 mu=1.305e-16 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.948e-2 sigma=1.000e-3 rel_p=2.167e-16 rel_d=2.989e-12 gap_rel=6.339e-7
+iter   49 mu=1.296e-16 alpha=9.900e-1 alpha_sz=1.000e0 min_s=0.000e0 min_z=-5.946e-2 sigma=1.000e-3 rel_p=2.030e-16 rel_d=2.589e-12 gap_rel=4.759e-7
+Diagnostics for UBH1:
+  r_p_inf=6.845e-13 (scale 3.259e3), r_d_inf=5.865e-9 (scale 2.265e3)
+  rel_p=2.100e-16, rel_d=2.589e-12
+  gap=5.311e-7, gap_rel=4.759e-7, obj_p=1.116e0, obj_d=1.116e0
+Status:     AlmostOptimal
+Variables:  18009
+Constraints:24030
+Iterations: 50
+Objective:  1.116012e0
+Final μ:    1.295777e-16
+Time:       325.874 ms
+

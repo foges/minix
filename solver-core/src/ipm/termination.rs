@@ -41,11 +41,11 @@ pub struct TerminationCriteria {
 impl Default for TerminationCriteria {
     fn default() -> Self {
         Self {
-            tol_feas: 1e-8,
-            tol_gap: 1e-8,
-            tol_gap_rel: 1e-8,  // Match Clarabel: was 1e-3 (too loose!)
-            tol_infeas: 1e-8,
-            tau_min: 1e-8,
+            tol_feas: 1e-9,
+            tol_gap: 1e-9,
+            tol_gap_rel: 1e-9,  // Match Clarabel standard
+            tol_infeas: 1e-9,
+            tau_min: 1e-9,
             max_iter: 200,
             min_progress: 1e-12,
         }

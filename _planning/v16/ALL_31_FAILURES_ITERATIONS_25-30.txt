@@ -1,0 +1,372 @@
+### BOYD1
+Iter   0: r_p=1.000e0 r_d=1.000e0 gap=9.704e7 gap_rel=1.000e0 mu=1.083e8
+Iter  10: r_p=1.172e4 r_d=3.646e4 gap=6.590e17 gap_rel=1.999e0 mu=2.889e5
+Iter  20: r_p=1.519e4 r_d=1.204e4 gap=1.516e17 gap_rel=2.000e0 mu=6.707e1
+Iter  25: r_p=1.477e4 r_d=1.188e4 gap=1.265e17 gap_rel=2.000e0 mu=9.268e-1
+Iter  26: r_p=1.461e4 r_d=1.187e4 gap=1.220e17 gap_rel=2.000e0 mu=3.007e-1
+Iter  27: r_p=1.447e4 r_d=1.187e4 gap=1.181e17 gap_rel=2.000e0 mu=3.194e-2
+Iter  28: r_p=1.437e4 r_d=1.174e4 gap=1.152e17 gap_rel=2.000e0 mu=1.046e-3
+Iter  29: r_p=1.428e4 r_d=1.011e4 gap=1.128e17 gap_rel=2.000e0 mu=1.950e-5
+Iter  30: r_p=1.420e4 r_d=8.998e3 gap=1.109e17 gap_rel=2.000e0 mu=1.186e-6
+Iterations: 35
+
+### BOYD2
+Iter   0: r_p=1.000e0 r_d=9.285e4 gap=4.178e7 gap_rel=1.000e0 mu=2.007e7
+Iter  10: r_p=8.159e3 r_d=2.246e3 gap=2.056e14 gap_rel=1.000e0 mu=1.797e5
+Iter  20: r_p=5.051e3 r_d=3.410e-2 gap=5.211e7 gap_rel=1.000e0 mu=2.378e-2
+Iter  25: r_p=4.525e3 r_d=5.724e-2 gap=4.816e7 gap_rel=9.998e-1 mu=1.033e-2
+Iter  26: r_p=4.362e3 r_d=8.472e-2 gap=7.782e7 gap_rel=9.999e-1 mu=8.280e-3
+Iter  27: r_p=4.340e3 r_d=8.665e-2 gap=8.007e7 gap_rel=9.999e-1 mu=7.919e-3
+Iter  28: r_p=4.259e3 r_d=9.695e-2 gap=9.132e7 gap_rel=9.999e-1 mu=6.868e-3
+Iter  29: r_p=4.264e3 r_d=1.075e-1 gap=1.012e8 gap_rel=9.999e-1 mu=6.466e-3
+Iter  30: r_p=4.261e3 r_d=8.494e-2 gap=8.611e7 gap_rel=9.999e-1 mu=5.975e-3
+Iterations: 35
+
+### Q25FV47
+Iter   0: r_p=9.561e-1 r_d=4.950e1 gap=1.046e6 gap_rel=1.000e0 mu=2.012e3
+Iter  10: r_p=2.955e0 r_d=1.064e1 gap=2.204e8 gap_rel=1.989e0 mu=5.451e0
+Iter  20: r_p=3.591e0 r_d=1.053e1 gap=1.919e8 gap_rel=1.988e0 mu=2.111e-3
+Iter  25: r_p=3.578e0 r_d=1.052e1 gap=1.875e8 gap_rel=1.988e0 mu=5.234e-5
+Iter  26: r_p=3.578e0 r_d=1.052e1 gap=1.874e8 gap_rel=1.988e0 mu=7.490e-6
+Iter  27: r_p=3.578e0 r_d=1.052e1 gap=1.873e8 gap_rel=1.988e0 mu=1.210e-6
+Iter  28: r_p=3.578e0 r_d=1.052e1 gap=1.873e8 gap_rel=1.988e0 mu=1.543e-7
+Iter  29: r_p=3.578e0 r_d=1.052e1 gap=1.873e8 gap_rel=1.988e0 mu=3.670e-9
+Iter  30: r_p=3.578e0 r_d=1.052e1 gap=1.873e8 gap_rel=1.988e0 mu=4.033e-11
+Iterations: 35
+
+### QADLITTL
+Iter   0: r_p=9.845e-1 r_d=9.688e-1 gap=6.153e4 gap_rel=1.000e0 mu=1.381e3
+Iter  10: r_p=2.600e0 r_d=1.068e0 gap=1.391e6 gap_rel=1.525e0 mu=2.062e-2
+Iter  20: r_p=2.491e0 r_d=1.041e0 gap=1.258e6 gap_rel=1.516e0 mu=1.169e-12
+Iter  25: r_p=2.491e0 r_d=1.041e0 gap=1.258e6 gap_rel=1.516e0 mu=3.398e-14
+Iter  26: r_p=2.491e0 r_d=1.041e0 gap=1.258e6 gap_rel=1.516e0 mu=3.398e-14
+Iter  27: r_p=2.491e0 r_d=1.041e0 gap=1.258e6 gap_rel=1.516e0 mu=3.025e-14
+Iter  28: r_p=2.491e0 r_d=1.041e0 gap=1.258e6 gap_rel=1.516e0 mu=3.025e-14
+Iter  29: r_p=2.491e0 r_d=1.041e0 gap=1.258e6 gap_rel=1.516e0 mu=3.025e-14
+Iter  30: r_p=2.491e0 r_d=1.041e0 gap=1.258e6 gap_rel=1.516e0 mu=2.755e-14
+Iterations: 35
+
+### QBANDM
+Iter   0: r_p=9.398e-1 r_d=8.340e-1 gap=1.306e3 gap_rel=1.000e0 mu=2.086e2
+Iter  10: r_p=2.644e0 r_d=1.172e0 gap=2.420e5 gap_rel=1.996e0 mu=2.168e-2
+Iter  20: r_p=2.648e0 r_d=1.190e0 gap=2.500e5 gap_rel=1.997e0 mu=3.277e-8
+Iter  25: r_p=2.648e0 r_d=1.190e0 gap=2.497e5 gap_rel=1.997e0 mu=2.277e-9
+Iter  26: r_p=2.648e0 r_d=1.190e0 gap=2.497e5 gap_rel=1.997e0 mu=2.277e-9
+Iter  27: r_p=2.648e0 r_d=1.190e0 gap=2.499e5 gap_rel=1.997e0 mu=2.293e-9
+Iter  28: r_p=2.648e0 r_d=1.190e0 gap=2.499e5 gap_rel=1.997e0 mu=2.293e-9
+Iter  29: r_p=2.648e0 r_d=1.190e0 gap=2.499e5 gap_rel=1.997e0 mu=2.293e-9
+Iter  30: r_p=2.648e0 r_d=1.190e0 gap=2.497e5 gap_rel=1.997e0 mu=2.238e-9
+Iterations: 35
+
+### QBEACONF
+Iter   0: r_p=9.914e-1 r_d=6.471e-1 gap=8.497e5 gap_rel=1.000e0 mu=3.054e4
+Iter  10: r_p=9.570e0 r_d=8.690e0 gap=2.260e6 gap_rel=1.964e0 mu=2.458e-1
+Iter  20: r_p=9.756e0 r_d=9.346e0 gap=2.119e6 gap_rel=1.964e0 mu=4.123e-11
+Iter  25: r_p=9.722e0 r_d=9.435e0 gap=2.070e6 gap_rel=1.963e0 mu=2.810e-11
+Iter  26: r_p=9.722e0 r_d=9.435e0 gap=2.070e6 gap_rel=1.963e0 mu=2.779e-11
+Iter  27: r_p=9.623e0 r_d=9.702e0 gap=1.933e6 gap_rel=1.962e0 mu=4.635e-11
+Iter  28: r_p=9.564e0 r_d=9.871e0 gap=1.853e6 gap_rel=1.961e0 mu=3.752e-11
+Iter  29: r_p=9.563e0 r_d=9.873e0 gap=1.852e6 gap_rel=1.961e0 mu=6.801e-11
+Iter  30: r_p=9.539e0 r_d=9.941e0 gap=1.821e6 gap_rel=1.961e0 mu=5.340e-11
+Iterations: 35
+
+### QBORE3D
+Iter   0: r_p=8.157e-1 r_d=9.413e-1 gap=1.106e4 gap_rel=1.000e0 mu=1.027e2
+Iter  10: r_p=4.231e0 r_d=2.244e-1 gap=2.029e4 gap_rel=1.668e0 mu=5.418e-1
+Iter  20: r_p=4.631e0 r_d=1.941e-1 gap=1.447e4 gap_rel=1.807e0 mu=3.469e-7
+Iter  25: r_p=4.623e0 r_d=2.095e-1 gap=1.199e4 gap_rel=1.792e0 mu=1.779e-7
+Iter  26: r_p=4.623e0 r_d=2.095e-1 gap=1.199e4 gap_rel=1.792e0 mu=1.779e-7
+Iter  27: r_p=4.516e0 r_d=2.103e-1 gap=1.139e4 gap_rel=1.787e0 mu=1.585e-7
+Iter  28: r_p=4.516e0 r_d=2.103e-1 gap=1.139e4 gap_rel=1.787e0 mu=1.585e-7
+Iter  29: r_p=4.517e0 r_d=2.104e-1 gap=1.145e4 gap_rel=1.787e0 mu=1.543e-7
+Iter  30: r_p=4.517e0 r_d=2.104e-1 gap=1.145e4 gap_rel=1.787e0 mu=1.543e-7
+Iterations: 35
+
+### QBRANDY
+Iter   0: r_p=7.238e-1 r_d=1.401e2 gap=1.353e4 gap_rel=1.000e0 mu=3.923e2
+Iter  10: r_p=2.177e0 r_d=6.950e-1 gap=5.141e4 gap_rel=1.725e0 mu=1.537e-1
+Iter  20: r_p=2.176e0 r_d=6.807e-1 gap=4.878e4 gap_rel=1.717e0 mu=5.939e-11
+Iter  25: r_p=2.176e0 r_d=6.807e-1 gap=4.878e4 gap_rel=1.717e0 mu=6.527e-13
+Iter  26: r_p=2.176e0 r_d=6.807e-1 gap=4.878e4 gap_rel=1.717e0 mu=6.449e-14
+Iter  27: r_p=2.176e0 r_d=6.807e-1 gap=4.878e4 gap_rel=1.717e0 mu=6.449e-14
+Iter  28: r_p=2.176e0 r_d=6.807e-1 gap=4.878e4 gap_rel=1.717e0 mu=6.449e-14
+Iter  29: r_p=2.176e0 r_d=6.807e-1 gap=4.878e4 gap_rel=1.717e0 mu=1.897e-14
+Iter  30: r_p=2.176e0 r_d=6.807e-1 gap=4.878e4 gap_rel=1.717e0 mu=1.897e-14
+Iterations: 35
+
+### QCAPRI
+Iter   0: r_p=1.000e0 r_d=4.877e0 gap=1.630e6 gap_rel=1.000e0 mu=5.715e3
+Iter  10: r_p=1.105e0 r_d=3.058e1 gap=3.212e8 gap_rel=1.993e0 mu=2.179e2
+Iter  20: r_p=1.319e0 r_d=2.161e1 gap=2.419e9 gap_rel=1.998e0 mu=3.050e-1
+Iter  25: r_p=1.307e0 r_d=2.174e1 gap=2.416e9 gap_rel=1.998e0 mu=3.123e-3
+Iter  26: r_p=1.307e0 r_d=2.174e1 gap=2.416e9 gap_rel=1.998e0 mu=1.384e-3
+Iter  27: r_p=1.307e0 r_d=2.174e1 gap=2.416e9 gap_rel=1.998e0 mu=7.141e-4
+Iter  28: r_p=1.307e0 r_d=2.174e1 gap=2.416e9 gap_rel=1.998e0 mu=3.370e-4
+Iter  29: r_p=1.307e0 r_d=2.174e1 gap=2.416e9 gap_rel=1.998e0 mu=1.407e-4
+Iter  30: r_p=1.307e0 r_d=2.174e1 gap=2.416e9 gap_rel=1.998e0 mu=1.663e-5
+Iterations: 35
+
+### QE226
+Iter   0: r_p=7.606e-1 r_d=1.610e2 gap=1.396e3 gap_rel=1.000e0 mu=5.980e1
+Iter  10: r_p=6.231e0 r_d=1.662e0 gap=6.172e3 gap_rel=1.954e0 mu=1.399e-3
+Iter  20: r_p=3.419e0 r_d=7.972e-1 gap=2.715e3 gap_rel=1.935e0 mu=2.933e-6
+Iter  25: r_p=3.439e0 r_d=7.855e-1 gap=2.675e3 gap_rel=1.935e0 mu=7.895e-13
+Iter  26: r_p=3.439e0 r_d=7.855e-1 gap=2.675e3 gap_rel=1.935e0 mu=1.016e-13
+Iter  27: r_p=3.439e0 r_d=7.855e-1 gap=2.675e3 gap_rel=1.935e0 mu=1.710e-14
+Iter  28: r_p=3.439e0 r_d=7.855e-1 gap=2.675e3 gap_rel=1.935e0 mu=4.636e-15
+Iter  29: r_p=3.439e0 r_d=7.855e-1 gap=2.675e3 gap_rel=1.935e0 mu=2.689e-15
+Iter  30: r_p=3.439e0 r_d=7.855e-1 gap=2.675e3 gap_rel=1.935e0 mu=2.293e-15
+Iterations: 35
+
+### QFFFFF80
+Iter   0: r_p=9.992e-1 r_d=7.354e2 gap=8.090e6 gap_rel=1.000e0 mu=3.495e4
+Iter  10: r_p=4.880e0 r_d=1.181e3 gap=1.129e8 gap_rel=1.078e0 mu=2.165e3
+Iter  20: r_p=9.567e0 r_d=1.492e2 gap=1.427e7 gap_rel=1.180e0 mu=1.100e0
+Iter  25: r_p=9.674e0 r_d=1.479e2 gap=1.397e7 gap_rel=1.185e0 mu=1.499e-2
+Iter  26: r_p=9.675e0 r_d=1.479e2 gap=1.397e7 gap_rel=1.185e0 mu=1.424e-2
+Iter  27: r_p=9.676e0 r_d=1.475e2 gap=1.396e7 gap_rel=1.185e0 mu=9.782e-3
+Iter  28: r_p=9.677e0 r_d=1.471e2 gap=1.395e7 gap_rel=1.185e0 mu=7.076e-3
+Iter  29: r_p=9.677e0 r_d=1.469e2 gap=1.395e7 gap_rel=1.185e0 mu=4.893e-3
+Iter  30: r_p=9.678e0 r_d=1.465e2 gap=1.395e7 gap_rel=1.185e0 mu=2.519e-3
+Iterations: 35
+
+### QFORPLAN
+Iter   0: r_p=9.963e-1 r_d=2.999e1 gap=9.761e8 gap_rel=1.000e0 mu=2.957e5
+Iter  10: r_p=3.457e-11 r_d=1.551e1 gap=1.695e18 gap_rel=1.001e0 mu=3.129e17
+Iter  20: r_p=4.785e-14 r_d=1.551e1 gap=1.062e24 gap_rel=1.001e0 mu=3.587e25
+Iter  25: r_p=1.327e-16 r_d=1.551e1 gap=1.062e24 gap_rel=1.001e0 mu=1.493e23
+Iter  26: r_p=4.645e-16 r_d=1.551e1 gap=1.062e24 gap_rel=1.001e0 mu=2.270e23
+Iter  27: r_p=2.124e-15 r_d=1.551e1 gap=1.062e24 gap_rel=1.001e0 mu=8.464e23
+Iter  28: r_p=1.261e-15 r_d=1.551e1 gap=1.062e24 gap_rel=1.001e0 mu=5.177e23
+Iter  29: r_p=6.636e-16 r_d=1.551e1 gap=1.062e24 gap_rel=1.001e0 mu=1.991e23
+Iter  30: r_p=8.627e-16 r_d=1.551e1 gap=1.062e24 gap_rel=1.001e0 mu=3.862e24
+Iterations: 35
+
+### QGFRDXPN
+Iter   0: r_p=1.000e0 r_d=1.027e0 gap=0.000e0 gap_rel=0.000e0 mu=3.997e0
+Iter  10: r_p=7.766e-10 r_d=9.859e-1 gap=2.380e-7 gap_rel=2.380e-7 mu=2.148e-14
+Iter  20: r_p=6.697e-14 r_d=9.859e-1 gap=6.920e-11 gap_rel=6.920e-11 mu=1.237e-15
+Iter  25: r_p=6.696e-14 r_d=9.859e-1 gap=6.920e-11 gap_rel=6.920e-11 mu=1.237e-15
+Iter  26: r_p=6.696e-14 r_d=9.859e-1 gap=6.920e-11 gap_rel=6.920e-11 mu=1.237e-15
+Iter  27: r_p=6.696e-14 r_d=9.859e-1 gap=6.919e-11 gap_rel=6.919e-11 mu=1.237e-15
+Iter  28: r_p=6.696e-14 r_d=9.859e-1 gap=6.919e-11 gap_rel=6.919e-11 mu=1.237e-15
+Iter  29: r_p=6.697e-14 r_d=9.859e-1 gap=6.919e-11 gap_rel=6.919e-11 mu=1.237e-15
+Iter  30: r_p=6.697e-14 r_d=9.859e-1 gap=6.918e-11 gap_rel=6.918e-11 mu=1.237e-15
+Iterations: 35
+
+### QPCBOEI1
+Iter   0: r_p=9.411e-1 r_d=4.780e3 gap=2.332e5 gap_rel=1.000e0 mu=8.016e3
+Iter  10: r_p=4.023e1 r_d=1.962e2 gap=6.383e7 gap_rel=1.827e0 mu=7.935e1
+Iter  20: r_p=3.825e1 r_d=1.989e2 gap=5.586e7 gap_rel=1.815e0 mu=8.967e-8
+Iter  25: r_p=3.825e1 r_d=1.989e2 gap=5.586e7 gap_rel=1.815e0 mu=8.248e-12
+Iter  26: r_p=3.825e1 r_d=1.989e2 gap=5.586e7 gap_rel=1.815e0 mu=6.545e-12
+Iter  27: r_p=3.825e1 r_d=1.989e2 gap=5.586e7 gap_rel=1.815e0 mu=5.558e-12
+Iter  28: r_p=3.825e1 r_d=1.989e2 gap=5.586e7 gap_rel=1.815e0 mu=4.827e-12
+Iter  29: r_p=3.825e1 r_d=1.989e2 gap=5.586e7 gap_rel=1.815e0 mu=4.271e-12
+Iter  30: r_p=3.825e1 r_d=1.989e2 gap=5.586e7 gap_rel=1.815e0 mu=3.834e-12
+Iterations: 35
+
+### QPILOTNO
+Iter   0: r_p=9.916e-1 r_d=1.800e3 gap=4.520e8 gap_rel=1.000e0 mu=7.191e4
+Iter  10: r_p=1.668e2 r_d=1.031e5 gap=1.430e8 gap_rel=1.981e0 mu=2.925e3
+Iter  20: r_p=1.894e2 r_d=1.550e5 gap=2.573e8 gap_rel=2.000e0 mu=9.201e-1
+Iter  25: r_p=2.321e2 r_d=9.429e4 gap=1.612e8 gap_rel=2.000e0 mu=1.284e-1
+Iter  26: r_p=2.323e2 r_d=9.299e4 gap=1.609e8 gap_rel=2.000e0 mu=7.451e-2
+Iter  27: r_p=2.323e2 r_d=9.223e4 gap=1.571e8 gap_rel=2.000e0 mu=1.616e-2
+Iter  28: r_p=2.323e2 r_d=9.167e4 gap=1.561e8 gap_rel=2.000e0 mu=5.637e-3
+Iter  29: r_p=2.323e2 r_d=9.118e4 gap=1.553e8 gap_rel=2.000e0 mu=2.243e-3
+Iter  30: r_p=2.324e2 r_d=9.076e4 gap=1.549e8 gap_rel=2.000e0 mu=9.344e-4
+Iterations: 35
+
+### QSCAGR25
+Iter   0: r_p=9.752e-1 r_d=1.033e0 gap=3.750e7 gap_rel=1.000e0 mu=3.072e4
+Iter  10: r_p=7.109e-1 r_d=1.645e1 gap=4.215e9 gap_rel=1.987e0 mu=4.267e0
+Iter  20: r_p=7.419e-1 r_d=1.373e1 gap=3.956e9 gap_rel=1.985e0 mu=1.864e-7
+Iter  25: r_p=7.419e-1 r_d=1.373e1 gap=3.956e9 gap_rel=1.985e0 mu=1.334e-11
+Iter  26: r_p=7.419e-1 r_d=1.373e1 gap=3.956e9 gap_rel=1.985e0 mu=1.334e-11
+Iter  27: r_p=7.419e-1 r_d=1.373e1 gap=3.956e9 gap_rel=1.985e0 mu=1.097e-11
+Iter  28: r_p=7.419e-1 r_d=1.373e1 gap=3.956e9 gap_rel=1.985e0 mu=9.593e-12
+Iter  29: r_p=7.419e-1 r_d=1.373e1 gap=3.956e9 gap_rel=1.985e0 mu=8.405e-12
+Iter  30: r_p=7.419e-1 r_d=1.373e1 gap=3.956e9 gap_rel=1.985e0 mu=8.405e-12
+Iterations: 35
+
+### QSCAGR7
+Iter   0: r_p=9.847e-1 r_d=1.139e0 gap=5.988e6 gap_rel=1.000e0 mu=1.139e4
+Iter  10: r_p=6.388e-1 r_d=1.830e1 gap=6.914e8 gap_rel=1.987e0 mu=1.161e0
+Iter  20: r_p=6.368e-1 r_d=1.825e1 gap=6.615e8 gap_rel=1.986e0 mu=8.803e-11
+Iter  25: r_p=6.368e-1 r_d=1.825e1 gap=6.616e8 gap_rel=1.986e0 mu=2.059e-10
+Iter  26: r_p=6.368e-1 r_d=1.825e1 gap=6.616e8 gap_rel=1.986e0 mu=1.688e-10
+Iter  27: r_p=6.368e-1 r_d=1.825e1 gap=6.617e8 gap_rel=1.986e0 mu=1.627e-10
+Iter  28: r_p=6.368e-1 r_d=1.825e1 gap=6.617e8 gap_rel=1.986e0 mu=1.658e-10
+Iter  29: r_p=6.368e-1 r_d=1.825e1 gap=6.617e8 gap_rel=1.986e0 mu=1.794e-10
+Iter  30: r_p=6.368e-1 r_d=1.825e1 gap=6.617e8 gap_rel=1.986e0 mu=2.344e-10
+Iterations: 35
+
+### QSCFXM1
+Iter   0: r_p=8.947e-1 r_d=8.039e2 gap=1.612e6 gap_rel=1.000e0 mu=9.985e3
+Iter  10: r_p=1.514e0 r_d=6.224e0 gap=1.053e9 gap_rel=1.995e0 mu=1.452e2
+Iter  20: r_p=3.594e0 r_d=8.336e0 gap=1.160e9 gap_rel=1.995e0 mu=2.385e-2
+Iter  25: r_p=3.601e0 r_d=8.358e0 gap=1.162e9 gap_rel=1.995e0 mu=6.321e-5
+Iter  26: r_p=3.600e0 r_d=8.358e0 gap=1.162e9 gap_rel=1.995e0 mu=1.772e-5
+Iter  27: r_p=3.600e0 r_d=8.358e0 gap=1.163e9 gap_rel=1.995e0 mu=1.231e-5
+Iter  28: r_p=3.600e0 r_d=8.358e0 gap=1.163e9 gap_rel=1.995e0 mu=1.151e-5
+Iter  29: r_p=3.600e0 r_d=8.358e0 gap=1.163e9 gap_rel=1.995e0 mu=1.135e-5
+Iter  30: r_p=3.600e0 r_d=8.358e0 gap=1.163e9 gap_rel=1.995e0 mu=1.083e-5
+Iterations: 35
+
+### QSCFXM2
+Iter   0: r_p=8.855e-1 r_d=4.309e2 gap=3.523e6 gap_rel=1.000e0 mu=1.194e4
+Iter  10: r_p=2.467e0 r_d=8.852e0 gap=3.763e9 gap_rel=1.997e0 mu=1.194e3
+Iter  20: r_p=3.247e0 r_d=1.139e1 gap=5.673e9 gap_rel=1.998e0 mu=5.014e-1
+Iter  25: r_p=3.277e0 r_d=1.154e1 gap=5.734e9 gap_rel=1.998e0 mu=3.101e-3
+Iter  26: r_p=3.276e0 r_d=1.154e1 gap=5.735e9 gap_rel=1.998e0 mu=2.163e-3
+Iter  27: r_p=3.275e0 r_d=1.154e1 gap=5.736e9 gap_rel=1.998e0 mu=1.290e-3
+Iter  28: r_p=3.274e0 r_d=1.154e1 gap=5.736e9 gap_rel=1.998e0 mu=6.876e-4
+Iter  29: r_p=3.273e0 r_d=1.154e1 gap=5.737e9 gap_rel=1.998e0 mu=4.882e-4
+Iter  30: r_p=3.273e0 r_d=1.154e1 gap=5.737e9 gap_rel=1.998e0 mu=2.667e-4
+Iterations: 35
+
+### QSCFXM3
+Iter   0: r_p=8.855e-1 r_d=4.309e2 gap=5.285e6 gap_rel=1.000e0 mu=1.194e4
+Iter  10: r_p=2.180e0 r_d=1.284e1 gap=2.428e8 gap_rel=1.990e0 mu=5.877e1
+Iter  20: r_p=2.876e0 r_d=1.618e1 gap=3.973e8 gap_rel=1.991e0 mu=5.612e-2
+Iter  25: r_p=2.927e0 r_d=1.652e1 gap=4.053e8 gap_rel=1.991e0 mu=8.078e-4
+Iter  26: r_p=2.928e0 r_d=1.653e1 gap=4.056e8 gap_rel=1.991e0 mu=4.071e-4
+Iter  27: r_p=2.928e0 r_d=1.654e1 gap=4.058e8 gap_rel=1.991e0 mu=2.680e-4
+Iter  28: r_p=2.927e0 r_d=1.654e1 gap=4.059e8 gap_rel=1.991e0 mu=1.671e-4
+Iter  29: r_p=2.927e0 r_d=1.654e1 gap=4.060e8 gap_rel=1.991e0 mu=9.844e-5
+Iter  30: r_p=2.926e0 r_d=1.654e1 gap=4.060e8 gap_rel=1.991e0 mu=6.420e-5
+Iterations: 35
+
+### QSCORPIO
+Iter   0: r_p=7.849e-1 r_d=9.585e-1 gap=9.369e0 gap_rel=1.000e0 mu=4.437e0
+Iter  10: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=8.505e-8
+Iter  20: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=3.641e-15
+Iter  25: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=2.609e-15
+Iter  26: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=2.609e-15
+Iter  27: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=2.581e-15
+Iter  28: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=2.581e-15
+Iter  29: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=2.581e-15
+Iter  30: r_p=2.869e-1 r_d=9.532e-1 gap=2.307e3 gap_rel=1.024e0 mu=2.560e-15
+Iterations: 35
+
+### QSCRS8
+Iter   0: r_p=8.624e-1 r_d=9.984e-1 gap=1.417e3 gap_rel=1.000e0 mu=1.020e1
+Iter  10: r_p=4.352e0 r_d=9.530e-1 gap=3.891e3 gap_rel=1.032e0 mu=3.003e-3
+Iter  20: r_p=3.648e0 r_d=9.562e-1 gap=2.678e3 gap_rel=1.003e0 mu=1.431e-5
+Iter  25: r_p=4.410e0 r_d=9.557e-1 gap=2.193e3 gap_rel=1.002e0 mu=1.316e-6
+Iter  26: r_p=4.412e0 r_d=9.556e-1 gap=2.187e3 gap_rel=1.002e0 mu=4.983e-7
+Iter  27: r_p=4.417e0 r_d=9.557e-1 gap=2.178e3 gap_rel=1.002e0 mu=1.653e-7
+Iter  28: r_p=4.416e0 r_d=9.559e-1 gap=2.165e3 gap_rel=1.002e0 mu=7.286e-8
+Iter  29: r_p=4.403e0 r_d=9.574e-1 gap=2.083e3 gap_rel=1.002e0 mu=4.728e-8
+Iter  30: r_p=4.401e0 r_d=9.575e-1 gap=2.079e3 gap_rel=1.002e0 mu=1.272e-8
+Iterations: 35
+
+### QSHARE1B
+Iter   0: r_p=9.970e-1 r_d=6.898e2 gap=5.932e6 gap_rel=1.000e0 mu=1.705e4
+Iter  10: r_p=1.279e1 r_d=1.100e-1 gap=1.649e8 gap_rel=1.999e0 mu=1.646e1
+Iter  20: r_p=6.212e0 r_d=4.561e-2 gap=3.129e7 gap_rel=1.987e0 mu=9.908e-3
+Iter  25: r_p=4.602e0 r_d=3.344e-2 gap=1.770e7 gap_rel=1.982e0 mu=1.112e-3
+Iter  26: r_p=4.606e0 r_d=3.070e-2 gap=1.509e7 gap_rel=1.980e0 mu=6.173e-4
+Iter  27: r_p=4.606e0 r_d=3.072e-2 gap=1.511e7 gap_rel=1.980e0 mu=6.675e-4
+Iter  28: r_p=4.606e0 r_d=3.016e-2 gap=1.459e7 gap_rel=1.979e0 mu=6.281e-4
+Iter  29: r_p=4.605e0 r_d=3.031e-2 gap=1.474e7 gap_rel=1.980e0 mu=6.813e-4
+Iter  30: r_p=4.606e0 r_d=3.012e-2 gap=1.456e7 gap_rel=1.979e0 mu=6.085e-4
+Iterations: 35
+
+### QSHIP04L
+Iter   0: r_p=5.473e-1 r_d=9.851e-1 gap=9.842e3 gap_rel=1.000e0 mu=1.358e3
+Iter  10: r_p=6.424e-1 r_d=4.353e0 gap=8.339e7 gap_rel=1.704e0 mu=9.004e-2
+Iter  20: r_p=6.461e-1 r_d=4.798e0 gap=1.042e8 gap_rel=1.729e0 mu=1.068e-12
+Iter  25: r_p=6.461e-1 r_d=4.798e0 gap=1.042e8 gap_rel=1.729e0 mu=7.685e-13
+Iter  26: r_p=6.461e-1 r_d=4.798e0 gap=1.042e8 gap_rel=1.729e0 mu=7.685e-13
+Iter  27: r_p=6.461e-1 r_d=4.798e0 gap=1.042e8 gap_rel=1.729e0 mu=7.685e-13
+Iter  28: r_p=6.461e-1 r_d=4.798e0 gap=1.042e8 gap_rel=1.729e0 mu=7.685e-13
+Iter  29: r_p=6.461e-1 r_d=4.798e0 gap=1.042e8 gap_rel=1.729e0 mu=7.685e-13
+Iter  30: r_p=6.461e-1 r_d=4.798e0 gap=1.042e8 gap_rel=1.729e0 mu=7.685e-13
+Iterations: 35
+
+### QSHIP04S
+Iter   0: r_p=5.473e-1 r_d=9.851e-1 gap=9.842e3 gap_rel=1.000e0 mu=1.358e3
+Iter  10: r_p=6.350e-1 r_d=3.801e0 gap=6.060e7 gap_rel=1.667e0 mu=6.015e-2
+Iter  20: r_p=6.371e-1 r_d=4.020e0 gap=6.852e7 gap_rel=1.682e0 mu=7.940e-14
+Iter  25: r_p=6.371e-1 r_d=4.020e0 gap=6.852e7 gap_rel=1.682e0 mu=5.195e-14
+Iter  26: r_p=6.371e-1 r_d=4.020e0 gap=6.852e7 gap_rel=1.682e0 mu=5.195e-14
+Iter  27: r_p=6.371e-1 r_d=4.020e0 gap=6.852e7 gap_rel=1.682e0 mu=5.195e-14
+Iter  28: r_p=6.371e-1 r_d=4.020e0 gap=6.852e7 gap_rel=1.682e0 mu=5.195e-14
+Iter  29: r_p=6.371e-1 r_d=4.020e0 gap=6.852e7 gap_rel=1.682e0 mu=5.195e-14
+Iter  30: r_p=6.371e-1 r_d=4.020e0 gap=6.852e7 gap_rel=1.682e0 mu=5.195e-14
+Iterations: 35
+
+### QSHIP08L
+Iter   0: r_p=5.498e-1 r_d=9.865e-1 gap=9.809e3 gap_rel=1.000e0 mu=1.339e3
+Iter  10: r_p=7.659e-1 r_d=4.176e0 gap=1.296e8 gap_rel=1.706e0 mu=1.957e-1
+Iter  20: r_p=7.717e-1 r_d=4.826e0 gap=1.808e8 gap_rel=1.743e0 mu=5.370e-11
+Iter  25: r_p=7.717e-1 r_d=4.826e0 gap=1.808e8 gap_rel=1.743e0 mu=5.514e-13
+Iter  26: r_p=7.717e-1 r_d=4.826e0 gap=1.808e8 gap_rel=1.743e0 mu=5.514e-13
+Iter  27: r_p=7.717e-1 r_d=4.826e0 gap=1.808e8 gap_rel=1.743e0 mu=5.514e-13
+Iter  28: r_p=7.717e-1 r_d=4.826e0 gap=1.808e8 gap_rel=1.743e0 mu=5.514e-13
+Iter  29: r_p=7.717e-1 r_d=4.826e0 gap=1.808e8 gap_rel=1.743e0 mu=5.514e-13
+Iter  30: r_p=7.717e-1 r_d=4.826e0 gap=1.808e8 gap_rel=1.743e0 mu=5.514e-13
+Iterations: 35
+
+### QSHIP08S
+Iter   0: r_p=5.498e-1 r_d=9.865e-1 gap=9.809e3 gap_rel=1.000e0 mu=1.339e3
+Iter  10: r_p=7.569e-1 r_d=3.420e0 gap=8.411e7 gap_rel=1.656e0 mu=4.821e-2
+Iter  20: r_p=7.581e-1 r_d=3.502e0 gap=8.948e7 gap_rel=1.664e0 mu=4.186e-12
+Iter  25: r_p=7.581e-1 r_d=3.502e0 gap=8.948e7 gap_rel=1.664e0 mu=7.381e-14
+Iter  26: r_p=7.581e-1 r_d=3.502e0 gap=8.948e7 gap_rel=1.664e0 mu=2.510e-14
+Iter  27: r_p=7.581e-1 r_d=3.502e0 gap=8.948e7 gap_rel=1.664e0 mu=1.213e-14
+Iter  28: r_p=7.581e-1 r_d=3.502e0 gap=8.948e7 gap_rel=1.664e0 mu=1.212e-14
+Iter  29: r_p=7.581e-1 r_d=3.502e0 gap=8.948e7 gap_rel=1.664e0 mu=1.212e-14
+Iter  30: r_p=7.581e-1 r_d=3.502e0 gap=8.948e7 gap_rel=1.664e0 mu=1.212e-14
+Iterations: 35
+
+### QSHIP12L
+Iter   0: r_p=6.563e-1 r_d=9.770e-1 gap=3.039e3 gap_rel=1.000e0 mu=1.885e3
+Iter  10: r_p=7.318e-1 r_d=1.120e1 gap=3.851e8 gap_rel=1.921e0 mu=2.166e-1
+Iter  20: r_p=7.336e-1 r_d=1.318e1 gap=5.744e8 gap_rel=1.936e0 mu=1.662e-9
+Iter  25: r_p=7.336e-1 r_d=1.318e1 gap=5.744e8 gap_rel=1.936e0 mu=2.067e-13
+Iter  26: r_p=7.336e-1 r_d=1.318e1 gap=5.744e8 gap_rel=1.936e0 mu=2.067e-13
+Iter  27: r_p=7.336e-1 r_d=1.318e1 gap=5.744e8 gap_rel=1.936e0 mu=2.067e-13
+Iter  28: r_p=7.336e-1 r_d=1.318e1 gap=5.744e8 gap_rel=1.936e0 mu=2.066e-13
+Iter  29: r_p=7.336e-1 r_d=1.318e1 gap=5.744e8 gap_rel=1.936e0 mu=2.066e-13
+Iter  30: r_p=7.336e-1 r_d=1.318e1 gap=5.744e8 gap_rel=1.936e0 mu=2.066e-13
+Iterations: 35
+
+### QSHIP12S
+Iter   0: r_p=9.037e-1 r_d=9.770e-1 gap=3.039e3 gap_rel=1.000e0 mu=1.884e3
+Iter  10: r_p=7.297e-1 r_d=8.201e0 gap=1.868e8 gap_rel=1.890e0 mu=1.204e-1
+Iter  20: r_p=7.312e-1 r_d=8.918e0 gap=2.269e8 gap_rel=1.900e0 mu=5.339e-10
+Iter  25: r_p=7.312e-1 r_d=8.918e0 gap=2.269e8 gap_rel=1.900e0 mu=7.178e-14
+Iter  26: r_p=7.312e-1 r_d=8.918e0 gap=2.269e8 gap_rel=1.900e0 mu=6.854e-14
+Iter  27: r_p=7.312e-1 r_d=8.918e0 gap=2.269e8 gap_rel=1.900e0 mu=3.112e-14
+Iter  28: r_p=7.312e-1 r_d=8.918e0 gap=2.269e8 gap_rel=1.900e0 mu=3.103e-14
+Iter  29: r_p=7.312e-1 r_d=8.918e0 gap=2.269e8 gap_rel=1.900e0 mu=3.102e-14
+Iter  30: r_p=7.312e-1 r_d=8.918e0 gap=2.269e8 gap_rel=1.900e0 mu=3.102e-14
+Iterations: 35
+
+### STCQP1
+Iter   0: r_p=5.327e-1 r_d=9.721e-1 gap=1.581e5 gap_rel=1.000e0 mu=9.307e1
+Iter  10: r_p=1.586e0 r_d=3.937e1 gap=4.198e7 gap_rel=1.981e0 mu=4.516e-9
+Iter  20: r_p=1.586e0 r_d=3.932e1 gap=4.187e7 gap_rel=1.981e0 mu=3.498e-15
+Iter  25: r_p=1.586e0 r_d=3.932e1 gap=4.187e7 gap_rel=1.981e0 mu=2.780e-15
+Iter  26: r_p=1.586e0 r_d=3.932e1 gap=4.187e7 gap_rel=1.981e0 mu=2.675e-15
+Iter  27: r_p=1.586e0 r_d=3.932e1 gap=4.187e7 gap_rel=1.981e0 mu=2.578e-15
+Iter  28: r_p=1.586e0 r_d=3.932e1 gap=4.187e7 gap_rel=1.981e0 mu=2.490e-15
+Iter  29: r_p=1.586e0 r_d=3.932e1 gap=4.187e7 gap_rel=1.981e0 mu=2.408e-15
+Iter  30: r_p=1.586e0 r_d=3.932e1 gap=4.187e7 gap_rel=1.981e0 mu=2.332e-15
+Iterations: 35
+
+### STCQP2
+Iter   0: r_p=4.861e-1 r_d=9.130e-1 gap=1.906e5 gap_rel=1.000e0 mu=1.353e2
+Iter  10: r_p=1.884e0 r_d=2.978e1 gap=1.222e7 gap_rel=1.997e0 mu=6.398e-9
+Iter  20: r_p=1.884e0 r_d=2.976e1 gap=1.219e7 gap_rel=1.997e0 mu=3.726e-15
+Iter  25: r_p=1.884e0 r_d=2.976e1 gap=1.219e7 gap_rel=1.997e0 mu=3.006e-15
+Iter  26: r_p=1.884e0 r_d=2.976e1 gap=1.219e7 gap_rel=1.997e0 mu=2.900e-15
+Iter  27: r_p=1.884e0 r_d=2.976e1 gap=1.219e7 gap_rel=1.997e0 mu=2.802e-15
+Iter  28: r_p=1.884e0 r_d=2.976e1 gap=1.219e7 gap_rel=1.997e0 mu=2.711e-15
+Iter  29: r_p=1.884e0 r_d=2.976e1 gap=1.219e7 gap_rel=1.997e0 mu=2.628e-15
+Iter  30: r_p=1.884e0 r_d=2.976e1 gap=1.219e7 gap_rel=1.997e0 mu=2.550e-15
+Iterations: 35
+
