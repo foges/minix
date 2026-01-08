@@ -207,6 +207,12 @@ pub struct SolverSettings {
 
 impl Default for SolverSettings {
     fn default() -> Self {
+        // Allow environment variable override for refinement iterations
+        let kkt_refine_iters = std::env::var("MINIX_REFINE_ITERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(2);
+
         Self {
             max_iter: 50,
             time_limit_ms: None,
@@ -217,7 +223,7 @@ impl Default for SolverSettings {
             ruiz_iters: 10,
             static_reg: 1e-8,
             dynamic_reg_min_pivot: 1e-13,
-            kkt_refine_iters: 2,
+            kkt_refine_iters,
             feas_weight_floor: 0.05,
             mcc_iters: 0,
             centrality_beta: 0.1,

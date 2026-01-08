@@ -248,7 +248,20 @@ pub fn solve_ipm2(
                     .min(reg_policy.static_reg_max);
             }
             SolveMode::Polish => {
-                reg_policy.enter_polish(&mut reg_state);
+                // V19: If dual is stalling, increase regularization BEFORE enter_polish()
+                // This helps BOYD-class problems where Polish triggers before StallRecovery
+                if stall.dual_stalling() {
+                    // Increase static_reg aggressively (10x per iteration, capped at 1e-4)
+                    reg_state.static_reg_eff = (reg_state.static_reg_eff * 10.0)
+                        .min(reg_policy.static_reg_max);
+                    if diag.should_log(iter) {
+                        eprintln!("Polish + dual stall: increased static_reg to {:.3e}", reg_state.static_reg_eff);
+                    }
+                    // Don't reset to polish_static_reg - keep the increased value
+                } else {
+                    // Normal polish: reduce regularization for accuracy
+                    reg_policy.enter_polish(&mut reg_state);
+                }
             }
         }
 
