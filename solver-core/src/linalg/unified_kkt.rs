@@ -107,6 +107,14 @@ impl UnifiedKktSolver {
     pub fn is_normal_equations(&self) -> bool {
         matches!(self, UnifiedKktSolver::NormalEqns(_))
     }
+
+    /// Estimate condition number of the KKT matrix from factorization diagonal.
+    pub fn estimate_condition_number(&self) -> Option<f64> {
+        match self {
+            UnifiedKktSolver::Standard(kkt) => kkt.estimate_condition_number(),
+            UnifiedKktSolver::NormalEqns(_) => None, // Normal equations don't expose this
+        }
+    }
 }
 
 impl KktSolverTrait for UnifiedKktSolver {

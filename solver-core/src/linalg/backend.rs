@@ -22,6 +22,10 @@ pub trait KktBackend {
     fn numeric_factorization(&mut self, kkt: &SparseCsc) -> Result<Self::Factorization, BackendError>;
     fn solve(&self, factor: &Self::Factorization, rhs: &[f64], sol: &mut [f64]);
     fn dynamic_bumps(&self) -> u64;
+
+    /// Estimate condition number from factorization diagonal (if available).
+    /// Returns None if not supported or factorization not yet done.
+    fn estimate_condition_number(&self) -> Option<f64>;
 }
 
 pub struct QdldlBackend {
@@ -61,5 +65,30 @@ impl KktBackend for QdldlBackend {
 
     fn dynamic_bumps(&self) -> u64 {
         self.solver.dynamic_bumps()
+    }
+
+    fn estimate_condition_number(&self) -> Option<f64> {
+        self.solver.d_values().and_then(|d| {
+            if d.is_empty() {
+                return None;
+            }
+
+            let mut d_max = 0.0_f64;
+            let mut d_min = f64::INFINITY;
+
+            for &val in d {
+                let abs_val = val.abs();
+                if abs_val > 1e-20 {  // Skip near-zero entries
+                    d_max = d_max.max(abs_val);
+                    d_min = d_min.min(abs_val);
+                }
+            }
+
+            if d_min.is_finite() && d_min > 0.0 && d_max.is_finite() {
+                Some(d_max / d_min)
+            } else {
+                None
+            }
+        })
     }
 }

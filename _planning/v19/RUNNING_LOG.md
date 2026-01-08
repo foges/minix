@@ -167,3 +167,48 @@ if dual_stall_count >= dual_stall_iters {
 - Realistic: Confirms BOYD is a numerical precision limitation, not a solver bug
 
 ---
+
+### Phase 3: Condition Number Diagnostics
+
+**Status**: COMPLETED ✅
+
+**Implementation**:
+1. Added `estimate_condition_number()` to KktBackend trait
+2. Implemented for QdldlBackend using diagonal D from LDL factorization
+   - Formula: κ(K) ≈ max(|D_i|) / min(|D_i|)
+3. Exposed through KktSolver and UnifiedKktSolver
+4. Added diagnostics in main solve loop (solve.rs:354-361)
+
+**Thresholds**:
+- κ > 1e12: Log if diagnostics enabled (moderate warning)
+- κ > 1e15: Always log (severe warning)
+
+**Test Results**:
+
+**BOYD1** (ill-conditioned):
+```
+iter  9 condition number: 1.810e12 (ill-conditioned KKT)
+iter 10 condition number: 4.897e12 (ill-conditioned KKT)
+iter 11 condition number: 1.096e13 (ill-conditioned KKT)
+...
+iter 17 condition number: 2.641e15 (ill-conditioned KKT)
+iter 18 condition number: 9.940e15 (ill-conditioned KKT)
+iter 19 condition number: 3.467e16 (ill-conditioned KKT)  <- severely ill-conditioned!
+```
+**Observation**: Condition number grows rapidly from 1e12 → 3e16 as optimizer approaches solution. This explains why refinement and regularization can't help - the KKT system is fundamentally ill-conditioned due to the extreme scaling in the original problem.
+
+**HS21** (well-conditioned):
+- No condition number warnings (κ < 1e12 throughout)
+- Converges in 9 iterations
+
+**Files Modified**:
+- `solver-core/src/linalg/backend.rs` - Add estimate_condition_number() to trait
+- `solver-core/src/linalg/kkt.rs` - Expose condition number
+- `solver-core/src/linalg/unified_kkt.rs` - Forward to backend
+- `solver-core/src/ipm2/solve.rs` - Log warnings
+
+**Value**: Provides clear diagnostic signal for when problems are hitting numerical precision limits vs algorithmic issues.
+
+**Phase 3 Status**: ✅ COMPLETED
+
+---

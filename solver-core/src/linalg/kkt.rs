@@ -1530,6 +1530,12 @@ impl<B: KktBackend> KktSolverImpl<B> {
         self.backend.numeric_factorization(kkt_ref)
     }
 
+    /// Estimate condition number of the KKT matrix from factorization diagonal.
+    /// Returns None if factorization not yet done or not supported by backend.
+    pub fn estimate_condition_number(&self) -> Option<f64> {
+        self.backend.estimate_condition_number()
+    }
+
     /// Solve a single KKT system: K * [dx; dz] = [rhs_x; rhs_z].
     ///
     /// # Arguments

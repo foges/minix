@@ -350,6 +350,16 @@ pub fn solve_ipm2(
             Ok(result) => {
                 consecutive_failures = 0;
                 numeric_recovery_level = 0;
+
+                // V19: Log condition number (warn if > 1e12)
+                if let Some(cond) = kkt.estimate_condition_number() {
+                    if cond > 1e12 && diag.should_log(iter) {
+                        eprintln!("iter {} condition number: {:.3e} (ill-conditioned KKT)", iter, cond);
+                    } else if cond > 1e15 && diag.enabled {
+                        eprintln!("iter {} condition number: {:.3e} (severely ill-conditioned!)", iter, cond);
+                    }
+                }
+
                 result
             }
             Err(e) => {
