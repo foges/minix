@@ -45,7 +45,7 @@ pub fn solve_ipm2(
     let n = prob.num_vars();
     let m = prob.num_constraints();
     let orig_n = orig_prob.num_vars();
-    let _orig_m = orig_prob_bounds.num_constraints();
+    let orig_m = orig_prob_bounds.num_constraints();
 
     // Constraint conditioning: DISABLED (harmful - see _planning/v15/conditioning_results.md)
     // Row scaling interferes with Ruiz equilibration and decreases pass rate (108→104).
@@ -201,7 +201,8 @@ pub fn solve_ipm2(
     let reg_scale = 1.0;
 
     // P1.1: Progress-based iteration budget for large problems
-    let is_large_problem = (prob.num_vars() > 50_000) || (prob.num_constraints() > 50_000);
+    // Use ORIGINAL dimensions (before presolve) to classify problem size
+    let is_large_problem = (orig_n > 50_000) || (orig_m > 50_000);
     let base_max_iter = settings.max_iter;
     let extended_max_iter = if is_large_problem { 200 } else { base_max_iter };
     let mut effective_max_iter = base_max_iter;

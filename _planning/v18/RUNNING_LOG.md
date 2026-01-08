@@ -29,3 +29,30 @@ Fix regressions and bugs identified in improvement_plan.md:
 **Build**: SUCCESS (with warnings only)
 
 **Next**: Test with SOC problems to verify fix
+
+---
+
+### Task 2: Fix P1.1 Bug - Convert For Loop to While for max_iter Extension
+
+**Problem**: The P1.1 "extend max_iter" feature uses a for loop `for iter in 0..max_iter`, which cannot be extended at runtime when the range is set at loop entry.
+
+**Solution**: Convert to while loop so max_iter can be dynamically extended.
+
+**Status**: COMPLETED ✅
+
+**Findings**:
+- The iteration loop is already a while loop (not a for loop)
+- The issue was that `is_large_problem` used REDUCED dimensions after presolve
+- BOYD problems have ~93k vars originally but may shrink below 50k threshold after presolve
+
+**Changes Made**:
+1. Changed `is_large_problem` to use `orig_n` and `orig_m` (original dimensions before presolve)
+2. Removed underscore prefix from `orig_m` variable
+3. Added comment explaining why original dimensions are used
+
+**Files Modified**:
+- solver-core/src/ipm2/solve.rs
+
+**Build**: SUCCESS
+
+**Expected Impact**: BOYD1/BOYD2 should now be classified as large problems and get extended max_iter budget (200 iterations instead of 50)
