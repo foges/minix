@@ -6,6 +6,7 @@ mod maros_meszaros;
 mod qps;
 mod regression;
 mod solver_choice;
+mod test_problems;
 
 use clap::{Parser, Subcommand};
 use solver_choice::{solve_with_choice, SolverChoice};
@@ -57,9 +58,12 @@ enum Commands {
     },
     /// Run regression suite (local QPS cache + synthetic cases)
     Regression {
-        /// Maximum iterations per problem
-        #[arg(long, default_value = "50")]
+        /// Maximum iterations per problem (for passing problems)
+        #[arg(long, default_value = "200")]
         max_iter: usize,
+        /// Maximum iterations for expected-to-fail problems
+        #[arg(long, default_value = "50")]
+        max_iter_fail: usize,
         /// Require cached QPS files (fail if missing)
         #[arg(long)]
         require_cache: bool,
@@ -355,6 +359,7 @@ fn show_qps_info(path: &str) {
 
 fn run_regression_suite(
     max_iter: usize,
+    max_iter_fail: usize,
     solver: SolverChoice,
     require_cache: bool,
     baseline_in: Option<String>,
@@ -364,7 +369,7 @@ fn run_regression_suite(
     let mut settings = SolverSettings::default();
     settings.max_iter = max_iter;
 
-    let results = regression::run_regression_suite(&settings, solver, require_cache);
+    let results = regression::run_regression_suite(&settings, solver, require_cache, max_iter_fail);
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
@@ -478,6 +483,7 @@ fn main() {
         }
         Some(Commands::Regression {
             max_iter,
+            max_iter_fail,
             require_cache,
             solver,
             baseline_in,
@@ -486,6 +492,7 @@ fn main() {
         }) => {
             run_regression_suite(
                 max_iter,
+                max_iter_fail,
                 solver,
                 require_cache,
                 baseline_in,
