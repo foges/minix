@@ -124,6 +124,9 @@ pub fn solve_ipm2(
         state.apply_warm_start(warm, &postsolve, &scaling, &cones);
     }
 
+    // Ensure initial point is strictly interior (critical for exp/pow cones)
+    state.push_to_interior(&cones, 1e-2);
+
     // In direct mode, fix tau=1 and kappa=0 (no homogeneous embedding)
     if settings.direct_mode {
         state.tau = 1.0;

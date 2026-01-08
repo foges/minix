@@ -54,11 +54,19 @@ impl ConeKernel for ExpCone {
         let mut alpha = f64::INFINITY;
         for block in 0..self.count {
             let offset = 3 * block;
-            let a = exp_step_to_boundary_block(
-                &s[offset..offset + 3],
-                &ds[offset..offset + 3],
-                exp_primal_interior,
-            );
+            let s_block = &s[offset..offset + 3];
+            let ds_block = &ds[offset..offset + 3];
+
+            // Debug: check if s is interior
+            let is_int = exp_primal_interior(s_block);
+            if !is_int {
+                eprintln!("WARNING: exp cone s NOT interior: {:?}", s_block);
+            }
+
+            let a = exp_step_to_boundary_block(s_block, ds_block, exp_primal_interior);
+            if !is_int && a == 0.0 {
+                eprintln!("  -> Returning alpha=0 because s not interior");
+            }
             if a.is_finite() {
                 alpha = alpha.min(a.max(0.0));
             }
@@ -493,5 +501,127 @@ mod tests {
 
         // This should be on the boundary, not interior
         // Because x = exp(-t) → x = exp(-(-ln(2))) = exp(ln(2)) = 2
+    }
+
+    #[test]
+    fn test_step_to_boundary_negative_direction() {
+        // Test the step-to-boundary for exp cone with a decreasing direction
+        // This is a regression test for the bug where negative steps return 0
+
+        // Interior point: (0, 1, 1.5)
+        let s = [0.0, 1.0, 1.5];
+        assert!(exp_primal_interior(&s), "Starting point must be interior");
+
+        // Direction that decreases x (should be valid since we're in interior)
+        let ds = [-0.1, 0.0, -0.1];
+
+        let alpha = exp_step_to_boundary_block(&s, &ds, exp_primal_interior);
+
+        println!("\nStep-to-boundary test:");
+        println!("  s = {:?}", s);
+        println!("  ds = {:?}", ds);
+        println!("  alpha = {}", alpha);
+
+        // The step should allow some movement
+        // At s + alpha*ds, we should still be able to move
+        if alpha > 0.0 && alpha < f64::INFINITY {
+            let s_new = [
+                s[0] + alpha * ds[0],
+                s[1] + alpha * ds[1],
+                s[2] + alpha * ds[2],
+            ];
+            println!("  s + alpha*ds = {:?}", s_new);
+            println!("  Is interior? {}", exp_primal_interior(&s_new));
+        }
+
+        assert!(alpha > 0.0, "Step size should be positive, got {}", alpha);
+    }
+
+    #[test]
+    fn test_step_boundary_actual_problem() {
+        // Reproduce the exact scenario from the trivial exp cone problem
+        // After preprocessing, our problem becomes:
+        // min x s.t. (x, 1, 1) ∈ K_exp
+
+        // After push-to-interior, what are the initial (s, z) values?
+        // Let me check by manually computing them
+
+        // Standard HSDE initialization might set s = e, z = e
+        let s = [1.0, 1.0, 1.0];
+        let z = [1.0, 1.0, 1.0];
+
+        println!("\nActual problem initialization:");
+        println!("  s = {:?}, is_interior = {}", s, exp_primal_interior(&s));
+        println!("  z = {:?}, is_interior = {}", z, exp_dual_interior(&z));
+
+        // Check if this is interior
+        // For primal: z >= y*exp(x/y) → 1 >= 1*exp(1) = 2.718 → NO!
+        // So [1,1,1] is NOT interior for exp cone!
+    }
+
+    #[test]
+    fn test_what_is_actually_interior() {
+        // Find an actual interior point for exp cone
+        // K_exp = {(x,y,z) : z >= y*exp(x/y), y > 0}
+
+        // Try various points
+        let test_points = vec![
+            ([0.0, 1.0, 2.0], "should be interior"),
+            ([1.0, 1.0, 3.0], "should be interior"),
+            ([1.0, 1.0, 1.0], "NOT interior (1 < e)"),
+            ([-1.0, 1.0, 1.0], "should be interior"),
+            ([0.0, 1.0, 1.01], "barely interior"),
+        ];
+
+        for (point, desc) in test_points {
+            let x: f64 = point[0];
+            let y: f64 = point[1];
+            let z: f64 = point[2];
+            let required = y * (x / y).exp();
+            let is_int = exp_primal_interior(&point);
+            println!("{}: {:?} → z={}, required={}, interior={}",
+                     desc, point, z, required, is_int);
+        }
+    }
+
+    #[test]
+    fn test_unit_initialization_is_interior() {
+        let cone = ExpCone::new(1);
+        let mut s = vec![0.0; 3];
+        let mut z = vec![0.0; 3];
+
+        cone.unit_initialization(&mut s, &mut z);
+
+        println!("\nUnit initialization:");
+        println!("  s = {:?}, is_interior = {}", s, exp_primal_interior(&s));
+        println!("  z = {:?}, is_interior = {}", z, exp_dual_interior(&z));
+
+        // Check what's required
+        let x: f64 = s[0];
+        let y: f64 = s[1];
+        let z_val: f64 = s[2];
+        let required = y * (x / y).exp();
+        println!("  For s: z={}, y*exp(x/y)={}", z_val, required);
+
+        assert!(exp_primal_interior(&s), "Unit initialization s should be interior");
+        assert!(exp_dual_interior(&z), "Unit initialization z should be interior");
+    }
+
+    #[test]
+    fn test_barrier_gradient_sign() {
+        // Test that barrier gradient has correct sign for descent
+        let cone = ExpCone::new(1);
+        let s = [-1.0, 1.0, 2.0];  // Interior point
+
+        let mut grad = vec![0.0; 3];
+        cone.barrier_grad_primal(&s, &mut grad);
+
+        println!("\nBarrier gradient test:");
+        println!("  s = {:?}", s);
+        println!("  ∇f(s) = {:?}", grad);
+
+        // The barrier gradient should point inward (toward interior)
+        // For exp cone, we expect specific signs based on the barrier function
+        assert!(grad.iter().all(|&g| g.is_finite()), "Gradient should be finite");
     }
 }

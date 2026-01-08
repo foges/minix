@@ -147,6 +147,7 @@ impl HsdeState {
 
             // Check and fix s
             if !cone.is_interior_primal(&self.s[offset..offset + dim]) {
+                eprintln!("push_to_interior: s NOT interior at offset {}: {:?}", offset, &self.s[offset..offset + dim]);
                 // Push the entire block to a safe interior point.
                 let mut s_unit = vec![0.0; dim];
                 let mut z_unit = vec![0.0; dim];
@@ -155,10 +156,12 @@ impl HsdeState {
                 for i in 0..dim {
                     self.s[offset + i] = s_unit[i] * min_value;
                 }
+                eprintln!("  -> Fixed to: {:?}", &self.s[offset..offset + dim]);
             }
 
             // Check and fix z
             if !cone.is_interior_dual(&self.z[offset..offset + dim]) {
+                eprintln!("push_to_interior: z NOT interior at offset {}: {:?}", offset, &self.z[offset..offset + dim]);
                 let mut s_unit = vec![0.0; dim];
                 let mut z_unit = vec![0.0; dim];
                 cone.unit_initialization(&mut s_unit, &mut z_unit);
@@ -166,6 +169,7 @@ impl HsdeState {
                 for i in 0..dim {
                     self.z[offset + i] = z_unit[i] * min_value;
                 }
+                eprintln!("  -> Fixed to: {:?}", &self.z[offset..offset + dim]);
             }
 
             offset += dim;

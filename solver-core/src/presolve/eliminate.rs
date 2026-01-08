@@ -50,7 +50,7 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
         if cone_idx == usize::MAX {
             continue;
         }
-        match prob.cones[cone_idx] {
+        match &prob.cones[cone_idx] {
             ConeSpec::Zero { .. } => {
                 if row.val == 0.0 {
                     continue;
@@ -67,9 +67,14 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
                     rhs,
                     kind: RemovedRowKind::Zero,
                 });
+                eprintln!("presolve: removing Zero cone row {}: var={}, val={}, rhs={}", row.row, row.col, row.val, rhs);
             }
-            ConeSpec::NonNeg { .. } => {}
-            _ => {}
+            ConeSpec::NonNeg { .. } => {
+                eprintln!("presolve: skipping NonNeg cone row {}", row.row);
+            }
+            cone_spec => {
+                eprintln!("presolve: skipping {:?} cone row {}", cone_spec, row.row);
+            }
         }
     }
 

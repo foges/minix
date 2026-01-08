@@ -295,6 +295,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_exp_debug_trivial() {
+        // Simplest possible exp cone problem
+        // minimize x
+        // subject to (x, 1, 1) ∈ K_exp  i.e., exp(x) ≤ 1, so x ≤ 0
+        // Optimal: x = 0, objective = 0
+
+        let num_vars = 1;
+        let q = vec![1.0];
+        let triplets = vec![(0, 0, -1.0)];
+        let A = sparse::from_triplets(3, num_vars, triplets);
+        let b = vec![0.0, 1.0, 1.0];
+        let cones = vec![ConeSpec::Exp { count: 1 }];
+
+        let prob = ProblemData {
+            P: None,
+            q,
+            A,
+            b,
+            cones,
+            var_bounds: None,
+            integrality: None,
+        };
+
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 20;
+        settings.verbose = true;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== Exp Cone Trivial Debug Test ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+        println!("Solution: x={:.6}", result.x[0]);
+        println!("\nExpected: x=0, objective=0");
+    }
+
+    #[test]
     fn test_exponential_cone_cvxpy() {
         let prob = exp_cone_cvxpy_style();
         let mut settings = SolverSettings::default();
