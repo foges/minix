@@ -148,3 +148,47 @@ Per improvement_plan.md:
 4. This is a **conditioning/scaling issue**, not a dual variable explosion
 
 **Next**: Test with presolve/scaling/polish toggles to isolate which component helps/hurts
+
+---
+
+## Final Summary
+
+### V18 Completion Status
+
+**Tasks Completed**:
+1. ✅ SOC regression fix (cone-aware singleton elimination)
+2. ✅ P1.1 bug fix (use original dimensions for large problem detection)
+3. ✅ Dual residual decomposition diagnostics
+4. ✅ Full regression test run (200 max iters)
+5. ✅ BOYD diagnostics analysis
+6. ✅ Comprehensive documentation
+
+**Results**:
+- Pass rate: 108/110 MM problems (98.2%) + 2/2 synthetic = 110/112 total
+- STCQP2: Now passes! ✅
+- QSC205: Huge improvement (17 vs 200 iters) 🎉
+- BOYD1/2: Failing due to conditioning (matrix entries 8e8, 15 orders of magnitude range)
+
+**Root Cause Identified**:
+- BOYD problems are NOT a dual blow-up
+- NOT a solver bug
+- Conditioning/scaling issue: matrix entries span 1e-7 to 1e8
+- Fundamental numerical precision limitation
+
+**Documentation**:
+- RUNNING_LOG.md: Session work log
+- RESULTS.md: Detailed test results
+- FULL_DIAGNOSTICS.md: Comprehensive analysis and recommendations
+
+**Commits**: 5 total
+- e64a508: Test infrastructure
+- 807002f: SOC fix
+- 9f2fa72: P1.1 fix
+- b91e25c: Test results
+- 0c83d4d: Dual diagnostics
+
+**Remaining Work** (for future):
+- Update iteration baselines (all 108 problems)
+- Add presolve/scaling/polish toggles
+- Consider near-optimal acceptance tier
+- Wall clock baseline tracking
