@@ -11,7 +11,7 @@ use crate::ipm::hsde::{HsdeResiduals, HsdeState, compute_mu, compute_residuals};
 use crate::ipm::termination::TerminationCriteria;
 use crate::ipm2::{
     DiagnosticsConfig, IpmWorkspace, PerfSection, PerfTimers, RegularizationPolicy, SolveMode,
-    StallDetector, compute_unscaled_metrics, polish_nonneg_active_set,
+    StallDetector, compute_unscaled_metrics, diagnose_dual_residual, polish_nonneg_active_set,
     polish_primal_and_dual, polish_lp_dual,
 };
 use crate::ipm2::predcorr::predictor_corrector_step_in_place;
@@ -924,6 +924,39 @@ pub fn solve_ipm2(
             }
             status = SolveStatus::Optimal;
         }
+    }
+
+    // Dual residual diagnostics for failed problems (enabled via MINIX_DUAL_DIAG env var)
+    if status == SolveStatus::MaxIters && std::env::var("MINIX_DUAL_DIAG").is_ok() {
+        // Get problem name from environment or use default
+        let problem_name = std::env::var("MINIX_PROBLEM_NAME").unwrap_or_else(|_| "unknown".to_string());
+        // Compute r_d for diagnostic purposes
+        let n_orig = orig_prob_bounds.num_vars();
+        let m_orig = orig_prob_bounds.num_constraints();
+        let mut r_d_diag = vec![0.0; n_orig];
+        let mut r_p_diag = vec![0.0; m_orig];
+        let mut p_x_diag = vec![0.0; n_orig];
+        compute_unscaled_metrics(
+            &orig_prob_bounds.A,
+            orig_prob_bounds.P.as_ref(),
+            &orig_prob_bounds.q,
+            &orig_prob_bounds.b,
+            &x,
+            &s,
+            &z,
+            &mut r_p_diag,
+            &mut r_d_diag,
+            &mut p_x_diag,
+        );
+        diagnose_dual_residual(
+            &orig_prob_bounds.A,
+            orig_prob_bounds.P.as_ref(),
+            &orig_prob_bounds.q,
+            &x,
+            &z,
+            &r_d_diag,
+            &problem_name,
+        );
     }
 
     // Optional active-set polish (Zero + NonNeg only):

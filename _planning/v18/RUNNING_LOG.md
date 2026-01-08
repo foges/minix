@@ -115,7 +115,36 @@ Command: `MINIX_REGRESSION_MAX_ITER=200 cargo test -p solver-bench regression_su
 
 ### Remaining Work
 Per improvement_plan.md:
-- [ ] Add dual residual decomposition diagnostics
+- [x] Add dual residual decomposition diagnostics
 - [ ] Test BOYD with presolve/scaling/polish toggles
 - [ ] Consider event-driven proximal regularization
 - [ ] Update iteration baselines in regression.rs
+
+---
+
+### Task 4: Dual Residual Decomposition Diagnostics
+
+**Status**: COMPLETED ✅
+
+**Implementation**:
+- Added `diagnose_dual_residual()` function to metrics.rs
+- Decomposes r_d = P*x + A^T*z + q into components
+- Shows top 10 worst dual residual components
+- Analyzes whether objective gradient (g=Px+q) or dual variables (A^T*z) dominate
+- Enabled via `MINIX_DUAL_DIAG=1` environment variable
+
+**BOYD1 Diagnostic Results**:
+```
+||r_d||_inf = 1.347e2 (total dual residual)
+||g||_inf   = 6.886e4 (objective gradient = P*x + q)
+||A^T*z||_inf = 6.886e4 (dual variable contribution)
+✓  Components are balanced (neither dominates)
+```
+
+**Key Findings**:
+1. NOT a dual blow-up (A^T*z and g are balanced, both ~68k)
+2. Problem has HUGE matrix entries (A up to 8e8 in some rows)
+3. Dual residual components show rows 2-3 with massive A entries × tiny duals
+4. This is a **conditioning/scaling issue**, not a dual variable explosion
+
+**Next**: Test with presolve/scaling/polish toggles to isolate which component helps/hurts

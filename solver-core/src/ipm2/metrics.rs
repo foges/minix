@@ -148,3 +148,101 @@ pub fn compute_unscaled_metrics(
     }
 }
 
+/// Decompose dual residual to diagnose which component is causing issues.
+/// r_d = P*x + A^T*z + q
+/// This helps identify if the problem is:
+/// - Objective term (P*x + q)
+/// - Dual variable blow-up (A^T*z)
+/// - Numerical issues in recovery/scaling
+pub fn diagnose_dual_residual(
+    a: &CsMat<f64>,
+    p_upper: Option<&CsMat<f64>>,
+    q: &[f64],
+    x_bar: &[f64],
+    z_bar: &[f64],
+    r_d: &[f64],
+    problem_name: &str,
+) {
+    let n = x_bar.len();
+    let m = z_bar.len();
+
+    // Compute P*x (objective gradient term)
+    let mut p_x = vec![0.0; n];
+    if let Some(p) = p_upper {
+        for col in 0..n {
+            if let Some(col_view) = p.outer_view(col) {
+                let xj = x_bar[col];
+                for (row, &val) in col_view.iter() {
+                    p_x[row] += val * xj;
+                    if row != col {
+                        p_x[col] += val * x_bar[row];
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute g = P*x + q (objective gradient)
+    let mut g = p_x.clone();
+    for i in 0..n {
+        g[i] += q[i];
+    }
+
+    // Compute A^T*z (dual contribution)
+    let mut atz = vec![0.0; n];
+    for col in 0..n {
+        if let Some(col_view) = a.outer_view(col) {
+            let mut acc = 0.0;
+            for (row, &val) in col_view.iter() {
+                acc += val * z_bar[row];
+            }
+            atz[col] = acc;
+        }
+    }
+
+    // Find top 10 dual residual components by magnitude
+    let mut indexed: Vec<(usize, f64)> = r_d.iter().enumerate().map(|(i, &v)| (i, v.abs())).collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    eprintln!("\n{}", "=".repeat(80));
+    eprintln!("DUAL RESIDUAL DECOMPOSITION: {}", problem_name);
+    eprintln!("{}", "=".repeat(80));
+    eprintln!("Top 10 dual residual components (r_d = P*x + A^T*z + q):");
+    eprintln!("{:>5} {:>12} {:>12} {:>12} {:>12} {:>12}",
+              "idx", "r_d", "g=Px+q", "A^T*z", "x", "z_max");
+    eprintln!("{}", "-".repeat(80));
+
+    for i in 0..10.min(indexed.len()) {
+        let idx = indexed[i].0;
+        let z_max = if m > 0 {
+            z_bar.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()))
+        } else {
+            0.0
+        };
+        eprintln!("{:>5} {:>+12.3e} {:>+12.3e} {:>+12.3e} {:>+12.3e} {:>+12.3e}",
+                  idx, r_d[idx], g[idx], atz[idx], x_bar[idx], z_max);
+    }
+
+    // Summary statistics
+    let g_inf = g.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
+    let atz_inf = atz.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
+    let rd_inf = r_d.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
+
+    eprintln!("{}", "-".repeat(80));
+    eprintln!("Summary:");
+    eprintln!("  ||r_d||_inf = {:.3e} (total dual residual)", rd_inf);
+    eprintln!("  ||g||_inf   = {:.3e} (objective gradient = P*x + q)", g_inf);
+    eprintln!("  ||A^T*z||_inf = {:.3e} (dual variable contribution)", atz_inf);
+
+    if atz_inf > g_inf * 10.0 {
+        eprintln!("\n⚠️  DIAGNOSIS: Dual blow-up (A^T*z >> g)");
+        eprintln!("     Likely causes: dual variables exploding, conditioning issues, or presolve recovery bug");
+    } else if g_inf > atz_inf * 10.0 {
+        eprintln!("\n⚠️  DIAGNOSIS: Objective gradient dominates (g >> A^T*z)");
+        eprintln!("     Likely causes: scaling issues, data magnitude problems");
+    } else {
+        eprintln!("\n✓  Components are balanced (neither dominates)");
+    }
+    eprintln!("{}", "=".repeat(80));
+}
+
