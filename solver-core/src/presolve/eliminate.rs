@@ -67,14 +67,9 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
                     rhs,
                     kind: RemovedRowKind::Zero,
                 });
-                eprintln!("presolve: removing Zero cone row {}: var={}, val={}, rhs={}", row.row, row.col, row.val, rhs);
             }
-            ConeSpec::NonNeg { .. } => {
-                eprintln!("presolve: skipping NonNeg cone row {}", row.row);
-            }
-            cone_spec => {
-                eprintln!("presolve: skipping {:?} cone row {}", cone_spec, row.row);
-            }
+            ConeSpec::NonNeg { .. } => {}
+            _ => {}
         }
     }
 

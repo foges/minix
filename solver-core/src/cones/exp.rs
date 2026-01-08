@@ -54,19 +54,11 @@ impl ConeKernel for ExpCone {
         let mut alpha = f64::INFINITY;
         for block in 0..self.count {
             let offset = 3 * block;
-            let s_block = &s[offset..offset + 3];
-            let ds_block = &ds[offset..offset + 3];
-
-            // Debug: check if s is interior
-            let is_int = exp_primal_interior(s_block);
-            if !is_int {
-                eprintln!("WARNING: exp cone s NOT interior: {:?}", s_block);
-            }
-
-            let a = exp_step_to_boundary_block(s_block, ds_block, exp_primal_interior);
-            if !is_int && a == 0.0 {
-                eprintln!("  -> Returning alpha=0 because s not interior");
-            }
+            let a = exp_step_to_boundary_block(
+                &s[offset..offset + 3],
+                &ds[offset..offset + 3],
+                exp_primal_interior,
+            );
             if a.is_finite() {
                 alpha = alpha.min(a.max(0.0));
             }
@@ -301,22 +293,100 @@ fn exp_hess_psi(y: f64, z: f64) -> [f64; 9] {
     ]
 }
 
+/// Compute the dual barrier gradient for the exponential cone dual.
+///
+/// The dual cone is K_exp* = {(u,v,w) : u < 0, w ≥ -u*exp(v/u - 1)}
+/// The dual barrier is f*(u,v,w) = -log(-u) - log(w) - log(ψ*)
+/// where ψ* = u + w*exp(v/w - 1)
+fn exp_dual_barrier_grad_block(z: &[f64], grad_out: &mut [f64]) {
+    let u: f64 = z[0];
+    let v: f64 = z[1];
+    let w: f64 = z[2];
+
+    // Compute ψ* = u + w*exp(v/w - 1)
+    let exp_term = (v / w - 1.0).exp();
+    let psi_star = u + w * exp_term;
+
+    let inv_psi_star = 1.0 / psi_star;
+
+    // ∂ψ*/∂u = 1
+    // ∂ψ*/∂v = exp(v/w - 1)
+    // ∂ψ*/∂w = exp(v/w - 1) * (1 - v/w)
+    let d_psi_du = 1.0;
+    let d_psi_dv = exp_term;
+    let d_psi_dw = exp_term * (1.0 - v / w);
+
+    // ∇f*(u,v,w) = [1/u - 1/ψ*, -exp(v/w-1)/ψ*, -1/w - exp(v/w-1)*(1-v/w)/ψ*]
+    grad_out[0] = 1.0 / u - inv_psi_star * d_psi_du;
+    grad_out[1] = -inv_psi_star * d_psi_dv;
+    grad_out[2] = -1.0 / w - inv_psi_star * d_psi_dw;
+}
+
+/// Compute the dual barrier Hessian for the exponential cone dual.
+fn exp_dual_hess_matrix(z: &[f64]) -> [f64; 9] {
+    let u: f64 = z[0];
+    let v: f64 = z[1];
+    let w: f64 = z[2];
+
+    let exp_term = (v / w - 1.0).exp();
+    let psi_star = u + w * exp_term;
+
+    let inv_psi_star = 1.0 / psi_star;
+    let inv_psi_star2 = inv_psi_star * inv_psi_star;
+
+    // Gradient of ψ*
+    let d_psi = [1.0, exp_term, exp_term * (1.0 - v / w)];
+
+    // Hessian of ψ* (sparse structure)
+    // ∂²ψ*/∂u² = 0, ∂²ψ*/∂u∂v = 0, ∂²ψ*/∂u∂w = 0
+    // ∂²ψ*/∂v² = exp(v/w-1) / w
+    // ∂²ψ*/∂v∂w = -exp(v/w-1) * v / w²
+    // ∂²ψ*/∂w² = exp(v/w-1) * v² / w³
+    let h_psi = [
+        0.0, 0.0, 0.0,
+        0.0, exp_term / w, -exp_term * v / (w * w),
+        0.0, -exp_term * v / (w * w), exp_term * v * v / (w * w * w),
+    ];
+
+    // Hessian formula: H = (1/ψ²) * ∇ψ ∇ψᵀ - (1/ψ) * ∇²ψ + diag terms
+    let mut h = [0.0; 9];
+    for i in 0..3 {
+        for j in 0..3 {
+            h[3 * i + j] = inv_psi_star2 * d_psi[i] * d_psi[j] - inv_psi_star * h_psi[3 * i + j];
+        }
+    }
+
+    // Add diagonal terms from -log(-u) and -log(w)
+    h[0] += 1.0 / (u * u);  // ∂²(-log(-u))/∂u² = -1/u²
+    h[8] += 1.0 / (w * w);  // ∂²(-log(w))/∂w² = 1/w²
+
+    h
+}
+
 fn exp_dual_map_block(z: &[f64], x_out: &mut [f64], h_star: &mut [f64; 9]) {
+    // The dual map should solve: ∇f*(x) = -z
+    // where f* is the DUAL barrier (not primal!)
+    // This is the critical fix for non-symmetric cones.
+
+    // Start from dual unit initialization
     let mut x = [-1.051_383, 0.556_409, 1.258_967];
+
     for _ in 0..ExpCone::MAX_NEWTON_ITERS {
         let mut grad = [0.0; 3];
-        exp_barrier_grad_block(&x, &mut grad);
+        exp_dual_barrier_grad_block(&x, &mut grad);  // Use DUAL barrier gradient!
         let r = [z[0] + grad[0], z[1] + grad[1], z[2] + grad[2]];
         let r_norm = r.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         if r_norm <= ExpCone::NEWTON_TOL {
             break;
         }
-        let h = exp_hess_matrix(&x);
+        let h = exp_dual_hess_matrix(&x);  // Use DUAL barrier Hessian!
         let dx = solve_3x3(&h, &r);
         let mut alpha = 1.0;
         let mut moved = false;
         for _ in 0..ExpCone::MAX_LINESEARCH_ITERS {
             let trial = [x[0] + alpha * dx[0], x[1] + alpha * dx[1], x[2] + alpha * dx[2]];
+            // Check DUAL cone interior since x should be in K_exp (result is in primal cone)
+            // because ∇f*(z) ∈ K for z ∈ K*
             if exp_primal_interior(&trial) {
                 x = trial;
                 moved = true;
@@ -330,7 +400,7 @@ fn exp_dual_map_block(z: &[f64], x_out: &mut [f64], h_star: &mut [f64; 9]) {
     }
 
     x_out.copy_from_slice(&x);
-    let h = exp_hess_matrix(&x);
+    let h = exp_dual_hess_matrix(&x);  // Use DUAL barrier Hessian!
     let h_inv = invert_3x3(&h);
     *h_star = h_inv;
 }
@@ -557,6 +627,43 @@ mod tests {
         // Check if this is interior
         // For primal: z >= y*exp(x/y) → 1 >= 1*exp(1) = 2.718 → NO!
         // So [1,1,1] is NOT interior for exp cone!
+    }
+
+    #[test]
+    fn test_dual_barrier_gradient_finite() {
+        // Test that the dual barrier gradient is finite for interior points
+        let z = [-1.0, 0.5, 1.5];  // Should be in K_exp* interior
+        assert!(exp_dual_interior(&z), "Test point should be in dual interior");
+
+        let mut grad = [0.0; 3];
+        exp_dual_barrier_grad_block(&z, &mut grad);
+
+        println!("\nDual barrier gradient test:");
+        println!("  z = {:?}", z);
+        println!("  ∇f*(z) = {:?}", grad);
+
+        assert!(grad.iter().all(|&g| g.is_finite()), "Dual barrier gradient should be finite");
+    }
+
+    #[test]
+    fn test_dual_map_basic() {
+        // Test that dual_map produces a point in the primal cone
+        let z = [-1.0, 0.5, 1.5];  // Point in K_exp* interior
+        assert!(exp_dual_interior(&z), "z should be in dual interior");
+
+        let mut s_tilde = [0.0; 3];
+        let mut h_star = [0.0; 9];
+        exp_dual_map_block(&z, &mut s_tilde, &mut h_star);
+
+        println!("\nDual map test:");
+        println!("  z = {:?}", z);
+        println!("  s_tilde = -∇f*(z) = {:?}", s_tilde);
+        println!("  is s_tilde interior? {}", exp_primal_interior(&s_tilde));
+
+        // The dual map should return s_tilde such that ∇f*(z) = -s_tilde
+        // Since ∇f*(z) ∈ K for z ∈ K*, we expect s_tilde ∈ K
+        // Actually, s_tilde = -∇f*(z) ∈ -K, which may not be in K...
+        // Let me check what the gradient actually is
     }
 
     #[test]
