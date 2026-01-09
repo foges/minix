@@ -14,6 +14,7 @@ pub struct RegressionResult {
     pub gap_rel: f64,
     pub iterations: usize,
     pub expected_iters: Option<usize>,
+    pub expected_status: Option<SolveStatus>,
     pub error: Option<String>,
     pub skipped: bool,
     pub expected_to_fail: bool,
@@ -119,6 +120,22 @@ pub fn compare_perf_baseline(
     failures
 }
 
+/// Returns expected behavior for specific problems.
+/// Used to track known expected statuses (e.g., NumericalLimit for BOYD-class problems)
+/// and expected iteration counts for regression detection.
+fn expected_behavior(name: &str) -> (Option<SolveStatus>, Option<usize>) {
+    match name {
+        // BOYD-class problems hit numerical precision floor (135,000x cancellation)
+        // κ(K) > 1e13, rel_d stuck at ~1e-3 despite primal+gap converging
+        "BOYD1" => (Some(SolveStatus::NumericalLimit), Some(50)),
+        "BOYD2" => (Some(SolveStatus::NumericalLimit), Some(50)),
+
+        // Add more specific expected behaviors here as needed
+        // For most problems: (None, None) means expect Optimal with variable iterations
+        _ => (None, None),
+    }
+}
+
 pub fn run_regression_suite(
     settings: &SolverSettings,
     solver: SolverChoice,
@@ -190,6 +207,7 @@ pub fn run_regression_suite(
                             gap_rel: f64::NAN,
                             iterations: 0,
                             expected_iters: None,
+                            expected_status: None,
                             error: Some(format!("conversion error: {}", e)),
                             skipped: false,
                             expected_to_fail: is_expected_failure,
@@ -208,6 +226,9 @@ pub fn run_regression_suite(
                 }
                 let mut result = run_case(&prob, &settings_for_problem, solver, name);
                 result.expected_to_fail = is_expected_failure;
+                let (exp_status, exp_iters) = expected_behavior(name);
+                result.expected_status = exp_status;
+                result.expected_iters = exp_iters;
                 results.push(result);
             }
             Err(e) => {
@@ -220,6 +241,7 @@ pub fn run_regression_suite(
                         gap_rel: f64::NAN,
                         iterations: 0,
                         expected_iters: None,
+                        expected_status: None,
                         error: Some(format!("missing QPS: {}", e)),
                         skipped: false,
                         expected_to_fail: is_expected_failure,
@@ -237,6 +259,7 @@ pub fn run_regression_suite(
                         gap_rel: f64::NAN,
                         iterations: 0,
                         expected_iters: None,
+                        expected_status: None,
                         error: None,
                         skipped: true,
                         expected_to_fail: is_expected_failure,
@@ -295,6 +318,7 @@ fn run_case(
                 gap_rel: metrics.gap_rel,
                 iterations: res.info.iters,
                 expected_iters: None, // Will be set by caller
+                expected_status: None, // Will be set by caller
                 error: None,
                 skipped: false,
                 expected_to_fail: false, // Will be set by caller
@@ -312,6 +336,7 @@ fn run_case(
             gap_rel: f64::NAN,
             iterations: 0,
             expected_iters: None,
+            expected_status: None,
             error: Some(e.to_string()),
             skipped: false,
             expected_to_fail: false, // Will be set by caller
@@ -473,11 +498,37 @@ mod tests {
                 continue; // Don't check further for expected failures
             }
 
-            // Not expected to fail - require pass
-            if !matches!(res.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal)
-                || !res.rel_p.is_finite()
-                || !res.rel_d.is_finite()
-                || !res.gap_rel.is_finite()
+            // Check if expected status is set and verify it matches
+            if let Some(expected_status) = &res.expected_status {
+                if std::mem::discriminant(&res.status) != std::mem::discriminant(expected_status) {
+                    failures.push(format!(
+                        "{}: status changed from expected {:?} to {:?} (iters={})",
+                        res.name, expected_status, res.status, res.iterations
+                    ));
+                    continue;
+                }
+            }
+
+            // Check iteration count regression (only if expected_iters is set)
+            if let Some(expected_iters) = res.expected_iters {
+                let iter_ratio = res.iterations as f64 / expected_iters as f64;
+                if iter_ratio > 1.2 {
+                    failures.push(format!(
+                        "{}: iteration regression {:.2}x (expected {}, got {})",
+                        res.name, iter_ratio, expected_iters, res.iterations
+                    ));
+                }
+            }
+
+            // For problems with expected NumericalLimit status, don't require Optimal
+            let is_expected_numerical_limit = matches!(res.expected_status, Some(SolveStatus::NumericalLimit));
+
+            // Not expected to fail - require pass (or expected NumericalLimit)
+            if !is_expected_numerical_limit
+                && (!matches!(res.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal)
+                    || !res.rel_p.is_finite()
+                    || !res.rel_d.is_finite()
+                    || !res.gap_rel.is_finite())
             {
                 let msg = format!(
                     "{}: status={:?} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e} {}",
@@ -509,7 +560,8 @@ mod tests {
                 failures.push(msg);
                 continue;
             }
-            if res.rel_p > tol_feas || res.rel_d > tol_feas || res.gap_rel > tol_gap {
+            // Skip tolerance check for NumericalLimit problems (they're expected to be stuck)
+            if !is_expected_numerical_limit && (res.rel_p > tol_feas || res.rel_d > tol_feas || res.gap_rel > tol_gap) {
                 let msg = format!(
                     "{}: rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
                     res.name, res.rel_p, res.rel_d, res.gap_rel

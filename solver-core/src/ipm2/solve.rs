@@ -1311,7 +1311,9 @@ pub fn solve_ipm2(
         let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
         // For ill-conditioned problems, accept gap up to 1e-4 (loose but realistic)
         let gap_ok = final_metrics.gap_rel <= 1e-4;
-        let dual_stuck = final_metrics.rel_d > criteria.tol_feas;
+        // Dual must be significantly stuck (100x above tolerance, not just marginally)
+        // to avoid false positives like LISWET (rel_d ~2e-9, excellent convergence)
+        let dual_stuck = final_metrics.rel_d > criteria.tol_feas * 100.0;
 
         // Check condition number from last KKT factorization
         let cond_number = kkt.estimate_condition_number().unwrap_or(1.0);
