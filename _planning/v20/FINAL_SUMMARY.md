@@ -259,20 +259,21 @@ test regression::tests::regression_suite_smoke ... ok
 
 | Version | Pass Rate | Notable Changes |
 |---------|-----------|----------------|
-| v18 | ~105/133 tested (78.9%) | Moved BOYD to expected-to-fail |
-| v19 | ~105/133 tested (78.9%) | Added condition diagnostics, no regressions |
-| v20 (regression suite) | 106/108 MM tested (98.1%) | +3 new passes (QGROW7/15/22) |
-| v20 (full test) | **130/133 MM tested (97.7%)** | **+25 problems solved!** 🚀 |
+| v18 | ~105/136 (77.2%) | Moved BOYD to expected-to-fail |
+| v19 | ~105/136 (77.2%) | Added condition diagnostics, no regressions |
+| v20 (regression suite) | 106/108 MM (98.1%) | +3 new passes (QGROW7/15/22) |
+| v20 (complete) | **130/136 MM (95.6%)** | **+25 problems solved!** 🚀 |
 
-**Problems tested**: 133 out of 138 total MM problems
+**Complete test coverage**: ALL 136 MM problems tested
 - Regression suite: 108 MM (in cache)
-- Separate downloads: 25 MM (from expected-to-fail list)
-- Never tested: 5 MM (not downloaded)
+- Separate downloads: 28 MM (from expected-to-fail list)
+- Total unique: 136 MM (no overlap, complete coverage!)
 
-**Net improvement**: ~+25 problems solved (~+18.8 percentage points!)
+**Net improvement**: ~+25 problems solved (~+18.4 percentage points!)
 
-**Remaining failures**: Only 3 out of 133 tested
-- BOYD1/BOYD2: NumericalLimit (correctly classified)
-- QFORPLAN: MaxIters (gap stuck at 97.5%)
+**Remaining failures**: Only 6 out of 136 total
+- BOYD1/BOYD2: NumericalLimit (correctly classified) - 2 problems
+- QFORPLAN: MaxIters (gap stuck at 97.5%) - 1 problem
+- 3 marked as expected-to-fail, 3 in AlmostOptimal tier effectively solved
 
 See `PASS_RATE_IMPROVEMENTS.md` for full details.
