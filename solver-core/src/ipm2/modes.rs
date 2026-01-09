@@ -131,4 +131,9 @@ impl StallDetector {
     pub fn dual_stalling(&self) -> bool {
         self.dual_stall_count >= self.dual_stall_iters
     }
+
+    /// Returns the number of consecutive iterations where dual residual is stalling.
+    pub fn dual_stall_count(&self) -> usize {
+        self.dual_stall_count
+    }
 }

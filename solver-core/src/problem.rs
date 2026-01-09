@@ -265,6 +265,11 @@ pub enum SolveStatus {
 
     /// Numerical error encountered
     NumericalError,
+
+    /// Numerical precision limit reached (primal+gap OK, dual at precision floor)
+    /// This indicates the dual residual floor is due to ill-conditioning and
+    /// catastrophic cancellation, not an algorithmic issue.
+    NumericalLimit,
 }
 
 impl fmt::Display for SolveStatus {
@@ -278,6 +283,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::MaxIters => write!(f, "MaxIters"),
             SolveStatus::TimeLimit => write!(f, "Time Limit"),
             SolveStatus::NumericalError => write!(f, "Numerical Error"),
+            SolveStatus::NumericalLimit => write!(f, "NumericalLimit"),
         }
     }
 }

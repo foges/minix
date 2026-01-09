@@ -16,6 +16,19 @@ pub struct UnscaledMetrics {
     pub gap_rel: f64,
 }
 
+/// Result of A^T*z computation with cancellation analysis.
+#[derive(Debug, Clone)]
+pub struct AtzResult {
+    /// Final A^T*z values (computed with Kahan summation)
+    pub atz: Vec<f64>,
+    /// Sum of |val * z| for each column (cancellation-free magnitude)
+    pub atz_magnitude: Vec<f64>,
+    /// Cancellation factor = atz_magnitude / |atz| for each column
+    pub cancellation_factor: Vec<f64>,
+    /// Maximum cancellation factor across all columns
+    pub max_cancellation: f64,
+}
+
 #[inline]
 fn inf_norm(v: &[f64]) -> f64 {
     v.iter().fold(0.0, |acc, &x| acc.max(x.abs()))
@@ -148,6 +161,68 @@ pub fn compute_unscaled_metrics(
     }
 }
 
+/// Compute A^T*z with Kahan (compensated) summation and cancellation analysis.
+///
+/// This function tracks both the final result and the magnitude of contributions
+/// to detect catastrophic cancellation. When many large terms of opposite sign
+/// cancel to produce a small result, the cancellation factor will be large (>100).
+///
+/// **Use case**: Diagnose whether a dual residual floor is due to:
+/// - Algorithmic issues (low cancellation factor)
+/// - Numerical precision limits (high cancellation factor, e.g., >100x)
+///
+/// The Kahan summation algorithm maintains a running compensation term to recover
+/// low-order bits lost to rounding error, providing more accurate results than
+/// naive summation when many terms are accumulated.
+pub fn compute_atz_with_kahan(a: &CsMat<f64>, z: &[f64]) -> AtzResult {
+    let n = a.cols();
+    let m = a.rows();
+    debug_assert_eq!(z.len(), m);
+
+    let mut atz = vec![0.0; n];
+    let mut atz_compensation = vec![0.0; n];  // Kahan compensation term
+    let mut atz_magnitude = vec![0.0; n];     // Cancellation-free magnitude
+
+    for col in 0..n {
+        if let Some(col_view) = a.outer_view(col) {
+            for (row, &val) in col_view.iter() {
+                let contrib = val * z[row];
+
+                // Kahan summation for atz
+                let y = contrib - atz_compensation[col];
+                let t = atz[col] + y;
+                atz_compensation[col] = (t - atz[col]) - y;
+                atz[col] = t;
+
+                // Magnitude sum (no cancellation)
+                atz_magnitude[col] += contrib.abs();
+            }
+        }
+    }
+
+    // Compute cancellation factor for each variable
+    let mut cancellation_factor = vec![1.0; n];
+    for i in 0..n {
+        if atz[i].abs() > 1e-20 {
+            cancellation_factor[i] = atz_magnitude[i] / atz[i].abs();
+        } else if atz_magnitude[i] > 1e-20 {
+            // Perfect cancellation: large magnitude but tiny result
+            cancellation_factor[i] = 1e20;
+        }
+    }
+
+    let max_cancellation = cancellation_factor.iter()
+        .copied()
+        .fold(0.0f64, f64::max);
+
+    AtzResult {
+        atz,
+        atz_magnitude,
+        cancellation_factor,
+        max_cancellation,
+    }
+}
+
 /// Decompose dual residual to diagnose which component is causing issues.
 /// r_d = P*x + A^T*z + q
 /// This helps identify if the problem is:
@@ -188,17 +263,9 @@ pub fn diagnose_dual_residual(
         g[i] += q[i];
     }
 
-    // Compute A^T*z (dual contribution)
-    let mut atz = vec![0.0; n];
-    for col in 0..n {
-        if let Some(col_view) = a.outer_view(col) {
-            let mut acc = 0.0;
-            for (row, &val) in col_view.iter() {
-                acc += val * z_bar[row];
-            }
-            atz[col] = acc;
-        }
-    }
+    // Compute A^T*z with Kahan summation + cancellation analysis
+    let atz_result = compute_atz_with_kahan(a, z_bar);
+    let atz = &atz_result.atz;
 
     // Find top 10 dual residual components by magnitude
     let mut indexed: Vec<(usize, f64)> = r_d.iter().enumerate().map(|(i, &v)| (i, v.abs())).collect();
@@ -243,6 +310,45 @@ pub fn diagnose_dual_residual(
     } else {
         eprintln!("\n✓  Components are balanced (neither dominates)");
     }
+
+    // Cancellation analysis
+    eprintln!("\n{}", "-".repeat(80));
+    eprintln!("CANCELLATION ANALYSIS (Kahan summation):");
+    eprintln!("  Max cancellation factor: {:.1}x", atz_result.max_cancellation);
+
+    if atz_result.max_cancellation > 100.0 {
+        eprintln!("\n⚠️  SEVERE CANCELLATION DETECTED (factor > 100x)");
+        eprintln!("     → Dual residual floor is dominated by numerical precision limits");
+        eprintln!("     → This is a fundamental double-precision limitation, not a solver bug");
+    } else if atz_result.max_cancellation > 10.0 {
+        eprintln!("\n⚠️  Moderate cancellation (factor > 10x)");
+        eprintln!("     → Some numerical precision loss in A^T*z computation");
+    } else {
+        eprintln!("\n✓  Low cancellation (factor < 10x)");
+        eprintln!("     → Dual residual is not limited by catastrophic cancellation");
+    }
+
+    // Show top 5 variables with worst cancellation
+    let mut cancel_indexed: Vec<(usize, f64)> = atz_result.cancellation_factor.iter()
+        .enumerate()
+        .map(|(i, &v)| (i, v))
+        .collect();
+    cancel_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    if cancel_indexed[0].1 > 10.0 {
+        eprintln!("\n  Top 5 variables with highest cancellation:");
+        eprintln!("  {:>5} {:>12} {:>15} {:>15}",
+                  "idx", "cancel_x", "A^T*z", "magnitude");
+        for i in 0..5.min(cancel_indexed.len()) {
+            let idx = cancel_indexed[i].0;
+            let factor = cancel_indexed[i].1;
+            if factor > 10.0 {
+                eprintln!("  {:>5} {:>12.1} {:>+15.3e} {:>15.3e}",
+                    idx, factor, atz_result.atz[idx], atz_result.atz_magnitude[idx]);
+            }
+        }
+    }
+
     eprintln!("{}", "=".repeat(80));
 }
 

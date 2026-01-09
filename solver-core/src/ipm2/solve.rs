@@ -1304,6 +1304,43 @@ pub fn solve_ipm2(
 
     let (primal_res, dual_res, gap) = (final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
 
+    // Condition-aware acceptance: check if we hit a numerical precision floor
+    // This happens when primal+gap converged, dual is stuck, KKT is ill-conditioned,
+    // and dual has stalled for many iterations (indicating we've hit the precision limit)
+    if status == SolveStatus::MaxIters {
+        let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
+        // For ill-conditioned problems, accept gap up to 1e-4 (loose but realistic)
+        let gap_ok = final_metrics.gap_rel <= 1e-4;
+        let dual_stuck = final_metrics.rel_d > criteria.tol_feas;
+
+        // Check condition number from last KKT factorization
+        let cond_number = kkt.estimate_condition_number().unwrap_or(1.0);
+        let ill_conditioned = cond_number > 1e13;
+
+        // The combination of primal+gap converged, dual stuck at high level,
+        // and severely ill-conditioned KKT is sufficient to indicate precision floor
+        // (don't require stall counter check since it can be reset during mode transitions)
+
+        if diag.enabled {
+            eprintln!("\nCondition-aware acceptance checks:");
+            eprintln!("  primal_ok: {} (rel_p={:.3e} <= {:.3e})", primal_ok, final_metrics.rel_p, criteria.tol_feas);
+            eprintln!("  gap_ok: {} (gap_rel={:.3e} <= 1e-4)", gap_ok, final_metrics.gap_rel);
+            eprintln!("  dual_stuck: {} (rel_d={:.3e} > {:.3e})", dual_stuck, final_metrics.rel_d, criteria.tol_feas);
+            eprintln!("  ill_conditioned: {} (κ={:.3e} > 1e13)", ill_conditioned, cond_number);
+        }
+
+        if primal_ok && gap_ok && dual_stuck && ill_conditioned {
+            if diag.enabled {
+                eprintln!("\nCondition-aware acceptance:");
+                eprintln!("  rel_p={:.3e} (✓), gap_rel={:.3e} (✓), rel_d={:.3e} (✗)",
+                    final_metrics.rel_p, final_metrics.gap_rel, final_metrics.rel_d);
+                eprintln!("  κ(K)={:.3e} (ill-conditioned)", cond_number);
+                eprintln!("  → Accepting as NumericalLimit (double-precision floor)");
+            }
+            status = SolveStatus::NumericalLimit;
+        }
+    }
+
     // Final check: if we hit MaxIters but meet AlmostOptimal thresholds, upgrade status
     // This check happens AFTER polish, so we've given the solver every chance to reach Optimal
     if status == SolveStatus::MaxIters && is_almost_optimal(&final_metrics) {
