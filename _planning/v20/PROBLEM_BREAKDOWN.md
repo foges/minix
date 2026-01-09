@@ -2,15 +2,19 @@
 
 ## Summary Statistics
 
-**Total problems in regression suite**: 110
+**Total problems in regression suite**: 110 (108 MM + 2 synthetic)
+
+### Regression Suite Only (110 problems)
 
 | Status | Count | Percentage | Description |
 |--------|-------|------------|-------------|
 | **Optimal** | 98 | 89.1% | Meets strict 1e-9 tolerances on all metrics |
 | **AlmostOptimal** | 10 | 9.1% | Meets relaxed tolerances (1e-4 feas, 5e-5 gap) |
 | **NumericalLimit** | 2 | 1.8% | Hit precision floor (correctly classified) |
-| **MaxIters** | 0 | 0.0% | Did not converge (none!) |
+| **MaxIters** | 0 | 0.0% | Did not converge (none in regression suite!) |
 | **Total Solved** | **108** | **98.2%** | Optimal + AlmostOptimal |
+
+(Note: 2 of the "Optimal" are synthetic problems, 96 are MM problems, plus 10 AlmostOptimal MM, plus 2 NumericalLimit MM = 108 MM total in regression)
 
 ## Optimal Status (98 problems)
 
@@ -104,22 +108,27 @@ These problems hit fundamental double-precision limits:
 - Mu oscillating (1e21 → 1e26)
 - This is a true convergence failure (different from BOYD)
 
-## Problems Not in Local Cache
+## Problems Not in Local Regression Cache
 
-These 28 problems were in expected-to-fail but aren't cached locally. Testing showed:
+25 problems from the expected-to-fail list weren't in the regression cache. I downloaded and tested them separately:
 
 **Status after downloading**:
-- 26 now report **Optimal** ✅
+- 23 report **Optimal** ✅
 - 1 reports **AlmostOptimal** (QSHARE1B: rel_d=4.3e-9) ✅
 - 1 reports **MaxIters** (QFORPLAN: gap=97.5%) ❌
 
-Combined with local cache:
-- **Total MM problems tested**: 138
-- **Optimal**: 124 (89.9%)
-- **AlmostOptimal**: 11 (8.0%)
-- **NumericalLimit**: 2 (1.4%) - BOYD1/BOYD2
-- **MaxIters**: 1 (0.7%) - QFORPLAN
-- **Total solved**: 135/138 (97.8%)
+### Combined: All MM Problems Tested (133 total)
+
+| Status | Regression | Separate | Total | Percentage |
+|--------|------------|----------|-------|------------|
+| **Optimal** | 96 | 23 | 119 | 89.5% |
+| **AlmostOptimal** | 10 | 1 | 11 | 8.3% |
+| **NumericalLimit** | 2 | 0 | 2 | 1.5% |
+| **MaxIters** | 0 | 1 | 1 | 0.8% |
+| **Total** | 108 | 25 | **133** | 100% |
+| **Solved** | 106 | 24 | **130** | **97.7%** |
+
+**Note**: Full MM benchmark has 138 problems. 5 were never tested (not downloaded, not in cache).
 
 ## Key Insights
 
@@ -145,4 +154,4 @@ Combined with local cache:
 - ✅ All "AlmostOptimal" problems meet relaxed 1e-4/5e-5 thresholds
 - ✅ No misclassifications detected
 
-**We are NOT fooling ourselves** - the 97.8% pass rate is real and accurate!
+**We are NOT fooling ourselves** - the 97.7% pass rate (130/133 tested) is real and accurate!

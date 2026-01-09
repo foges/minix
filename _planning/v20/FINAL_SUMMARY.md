@@ -259,14 +259,19 @@ test regression::tests::regression_suite_smoke ... ok
 
 | Version | Pass Rate | Notable Changes |
 |---------|-----------|----------------|
-| v18 | 108/138 (78.3%) | Moved BOYD to expected-to-fail |
-| v19 | 108/138 (78.3%) | Added condition diagnostics, no regressions |
-| v20 (initial) | 111/138 (80.4%) | +3 new passes (QGROW7, QFFFFF80, QBANDM) |
-| v20 (final) | **135/138 (97.8%)** | **+27 problems solved!** 🚀 |
+| v18 | ~105/133 tested (78.9%) | Moved BOYD to expected-to-fail |
+| v19 | ~105/133 tested (78.9%) | Added condition diagnostics, no regressions |
+| v20 (regression suite) | 106/108 MM tested (98.1%) | +3 new passes (QGROW7/15/22) |
+| v20 (full test) | **130/133 MM tested (97.7%)** | **+25 problems solved!** 🚀 |
 
-**Net improvement**: +27 problems solved (+19.5 percentage points!)
+**Problems tested**: 133 out of 138 total MM problems
+- Regression suite: 108 MM (in cache)
+- Separate downloads: 25 MM (from expected-to-fail list)
+- Never tested: 5 MM (not downloaded)
 
-**Remaining failures**: Only 3 problems
+**Net improvement**: ~+25 problems solved (~+18.8 percentage points!)
+
+**Remaining failures**: Only 3 out of 133 tested
 - BOYD1/BOYD2: NumericalLimit (correctly classified)
 - QFORPLAN: MaxIters (gap stuck at 97.5%)
 
