@@ -130,6 +130,10 @@ fn expected_behavior(name: &str) -> (Option<SolveStatus>, Option<usize>) {
         "BOYD1" => (Some(SolveStatus::NumericalLimit), Some(50)),
         "BOYD2" => (Some(SolveStatus::NumericalLimit), Some(50)),
 
+        // QFORPLAN: Fundamental convergence failure (gap stuck at 97.5%)
+        // Not a numerical limit - different failure mode (HSDE infeasibility signals)
+        "QFORPLAN" => (Some(SolveStatus::MaxIters), Some(50)),
+
         // Add more specific expected behaviors here as needed
         // For most problems: (None, None) means expect Optimal with variable iterations
         _ => (None, None),

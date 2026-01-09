@@ -121,15 +121,16 @@ pub fn maros_meszaros_problem_names() -> &'static [&'static str] {
 
 pub fn maros_meszaros_expected_failures() -> &'static [&'static str] {
     &[
-        // BOYD portfolio QPs - fail due to extreme conditioning (matrix entries span 15 orders of magnitude)
+        // BOYD1/BOYD2: Hit numerical precision floor (NumericalLimit status)
+        // - κ(K) = 4.1e20 (ill-conditioned)
+        // - 135,000x cancellation in A^T*z
+        // - rel_p ≈ 1e-14 ✓, gap_rel ≈ 1e-6 ✓, but rel_d stuck at ~1e-3
         "BOYD1", "BOYD2",
-        // Other expected failures
-        "Q25FV47", "QADLITTL", "QBANDM", "QBEACONF", "QBORE3D",
-        "QBRANDY", "QCAPRI", "QE226", "QFFFFF80", "QFORPLAN",
-        "QGFRDXPN", "QPCBOEI1", "QPILOTNO",
-        "QSCAGR25", "QSCAGR7", "QSCFXM1", "QSCFXM2", "QSCFXM3",
-        "QSCORPIO", "QSCRS8", "QSHARE1B",
-        "QSHIP04L", "QSHIP04S", "QSHIP08L", "QSHIP08S",
-        "QSHIP12L", "QSHIP12S", "STCQP1",
+
+        // QFORPLAN: Fundamental convergence failure
+        // - gap_rel stuck at 97.5% (not converging)
+        // - Mu oscillating (1e21 to 1e26) instead of decreasing
+        // - HSDE showing infeasibility signals (different from BOYD)
+        "QFORPLAN",
     ]
 }
