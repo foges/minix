@@ -398,6 +398,11 @@ pub fn solve_ipm2(
             );
         }
 
+        // QFORPLAN-style comprehensive diagnostics (enabled via MINIX_QFORPLAN_DIAG=1)
+        if std::env::var("MINIX_QFORPLAN_DIAG").is_ok() {
+            log_qforplan_diagnostics(iter, &scaled_prob, &state, &mut ws, mu);
+        }
+
         // Check for μ explosion (more than 100x growth without residual progress)
         if mu.is_finite() && mu_old.is_finite() && mu > mu_old * 100.0 && mu > 1e-8 {
             // Compute residual norms to see if we're making progress
@@ -444,9 +449,24 @@ pub fn solve_ipm2(
             mu = compute_mu(&state, barrier_degree);
         }
 
-        // Note: τ+κ normalization was tried but it interferes with infeasibility detection
-        // (driving τ too small). Stick with τ-only normalization which preserves the
-        // invariant τ ≈ 1 that the infeasibility check relies on.
+        // τ+κ normalization: prevent HSDE overflow/underflow cascades.
+        // When τ+κ grows too large (>1e6) or too small (<1e-3), rescale to keep it ~1.
+        // This prevents numerical catastrophe while preserving HSDE geometry.
+        //
+        // Note: This prevents overflow (good) but doesn't fix convergence failures
+        // for problems like QFORPLAN where the IPM fundamentally diverges. Those
+        // require proximal stabilization (Layer C) or crossover to active-set methods.
+        let tau_kappa_sum = state.tau + state.kappa;
+        if tau_kappa_sum > 1e6 || (tau_kappa_sum < 1e-3 && tau_kappa_sum > 0.0) {
+            if state.normalize_tau_kappa_if_needed(1e-2, 1e5, 1.0) {
+                mu = compute_mu(&state, barrier_degree);
+                if diag.enabled {
+                    let kappa_ratio = state.kappa / (state.tau + state.kappa).max(1e-100);
+                    eprintln!("  → τ+κ normalization: τ+κ {:.3e} → 1.0 (κ/(τ+κ)={:.3e})",
+                        tau_kappa_sum, kappa_ratio);
+                }
+            }
+        }
 
         let mut term_status = None;
         let metrics = {
@@ -1651,4 +1671,109 @@ fn dual_cone_ok(prob: &ProblemData, z: &[f64], tol: f64) -> bool {
         }
     }
     true
+}
+
+/// Comprehensive diagnostics for QFORPLAN-style IPM failures.
+/// Logs all metrics that can expose dual blow-up, cancellation, and HSDE distress.
+///
+/// Enabled via `MINIX_QFORPLAN_DIAG=1` environment variable.
+///
+/// Key metrics tracked:
+/// - rel_d_alt: Alternative dual residual not fooled by ||z|| explosion
+/// - ||A^T*z||_∞, ||z||_∞: Dual blow-up indicators
+/// - κ/(τ+κ): HSDE distress ratio (→1 means infeasibility/unboundedness signals)
+/// - Cancellation factor: Numerical precision limits (>100x = severe)
+fn log_qforplan_diagnostics(
+    iter: usize,
+    prob: &ProblemData,
+    state: &HsdeState,
+    ws: &mut IpmWorkspace,
+    mu: f64,
+) {
+    use crate::ipm2::metrics::compute_atz_with_kahan;
+
+    // Unscale to physical space
+    let inv_tau = if state.tau > 1e-10 { 1.0 / state.tau } else { 0.0 };
+    let x_bar: Vec<f64> = state.x.iter().map(|xi| xi * inv_tau).collect();
+    let s_bar: Vec<f64> = state.s.iter().map(|si| si * inv_tau).collect();
+    let z_bar: Vec<f64> = state.z.iter().map(|zi| zi * inv_tau).collect();
+
+    // Compute primal residual r_p = A*x + s - b
+    ws.r_p.copy_from_slice(&s_bar);
+    for i in 0..prob.num_constraints() {
+        ws.r_p[i] -= prob.b[i];
+    }
+    for col in 0..prob.num_vars() {
+        if let Some(col_view) = prob.A.outer_view(col) {
+            let xj = x_bar[col];
+            for (row, &val) in col_view.iter() {
+                ws.r_p[row] += val * xj;
+            }
+        }
+    }
+
+    // Compute P*x
+    ws.p_x.fill(0.0);
+    if let Some(p) = prob.P.as_ref() {
+        for col in 0..prob.num_vars() {
+            if let Some(col_view) = p.outer_view(col) {
+                let xj = x_bar[col];
+                for (row, &val) in col_view.iter() {
+                    ws.p_x[row] += val * xj;
+                    if row != col {
+                        ws.p_x[col] += val * x_bar[row];
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute A^T*z with Kahan summation + cancellation analysis
+    let atz_result = compute_atz_with_kahan(&prob.A, &z_bar);
+
+    // Compute dual residual r_d = P*x + A^T*z + q
+    ws.r_d.copy_from_slice(&ws.p_x[..prob.num_vars()]);
+    for i in 0..prob.num_vars() {
+        ws.r_d[i] += atz_result.atz[i] + prob.q[i];
+    }
+
+    // Norms
+    let rp_inf = ws.r_p.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    let rd_inf = ws.r_d.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    let z_inf = z_bar.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    let px_inf = ws.p_x.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    let q_inf = prob.q.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    let atz_inf = atz_result.atz.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+
+    // Alternative relative dual residual (not fooled by ||z||)
+    let dual_scale_alt = (1.0 + q_inf + px_inf + atz_inf).max(1.0);
+    let rel_d_alt = rd_inf / dual_scale_alt;
+
+    // HSDE distress metrics
+    let kappa_ratio = state.kappa / (state.tau + state.kappa).max(1e-100);
+    let (mu_sz, mu_tk) = state.mu_decomposition();
+
+    eprintln!("═══ QFORPLAN DIAGNOSTICS iter {} ═══", iter);
+    eprintln!("Residuals (absolute):");
+    eprintln!("  ||r_p||_∞ = {:.3e}", rp_inf);
+    eprintln!("  ||r_d||_∞ = {:.3e}", rd_inf);
+    eprintln!("Dual components:");
+    eprintln!("  ||z||_∞ = {:.3e}", z_inf);
+    eprintln!("  ||A^T*z||_∞ = {:.3e}", atz_inf);
+    eprintln!("  ||P*x||_∞ = {:.3e}", px_inf);
+    eprintln!("  ||q||_∞ = {:.3e}", q_inf);
+    eprintln!("Relative metrics:");
+    eprintln!("  rel_d_alt = ||r_d||_∞ / (1 + ||q||_∞ + ||P*x||_∞ + ||A^T*z||_∞) = {:.3e}", rel_d_alt);
+    eprintln!("HSDE state:");
+    eprintln!("  τ = {:.3e}, κ = {:.3e}", state.tau, state.kappa);
+    eprintln!("  κ/(τ+κ) = {:.3e} {}", kappa_ratio, if kappa_ratio > 0.99 { "⚠️  DISTRESS!" } else { "" });
+    eprintln!("Complementarity:");
+    eprintln!("  μ = {:.3e}", mu);
+    eprintln!("  μ_sz (s^T*z) = {:.3e}", mu_sz);
+    eprintln!("  μ_tk (τ*κ) = {:.3e}", mu_tk);
+    eprintln!("Cancellation:");
+    eprintln!("  max cancellation factor = {:.1}x {}",
+        atz_result.max_cancellation,
+        if atz_result.max_cancellation > 100.0 { "⚠️  SEVERE!" } else { "" });
+    eprintln!("═══════════════════════════════════════");
 }
