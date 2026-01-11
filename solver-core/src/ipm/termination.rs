@@ -410,4 +410,92 @@ mod tests {
         // Should detect primal infeasibility (b^T z = -1 * 1 = -1 < 0)
         assert!(matches!(status, Some(SolveStatus::PrimalInfeasible)));
     }
+
+    #[test]
+    fn test_scale_invariant_infeasibility_detection() {
+        // Test that small absolute τ doesn't trigger false infeasibility when τ/(τ+κ) is not small.
+        // This was the root cause of the POWELL20 bug: after τ+κ normalization, both τ and κ
+        // can be small, but the ratio τ/(τ+κ) indicates the problem is still feasible.
+        let prob = ProblemData {
+            P: None,
+            q: vec![0.0],
+            A: sparse::from_triplets(1, 1, vec![]),  // A = 0, Ax = b infeasible if b != 0
+            b: vec![-1.0],  // Would be infeasible with small τ
+            cones: vec![ConeSpec::NonNeg { dim: 1 }],
+            var_bounds: None,
+            integrality: None,
+        };
+
+        // State with small τ but also small κ (after τ+κ normalization)
+        // τ/(τ+κ) = 0.5, which is >> 1e-6, so should NOT trigger infeasibility check
+        let state = HsdeState {
+            x: vec![0.0],
+            s: vec![0.0],
+            z: vec![1.0],   // z > 0 and b^T z = -1 < 0 would indicate infeasibility
+            tau: 1e-8,      // Small absolute τ (would trigger old bug)
+            kappa: 1e-8,    // Also small κ, so τ/(τ+κ) = 0.5
+            xi: vec![0.0],
+        };
+
+        let criteria = TerminationCriteria::default();
+        let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
+        let status = check_termination(&prob, &scaling, &state, 10, &criteria);
+
+        // Should NOT detect infeasibility because τ/(τ+κ) = 0.5 >> 1e-6
+        // (old code would return PrimalInfeasible because tau < tau_min)
+        // Result should be None (continue solving) or something other than infeasible
+        assert!(
+            !matches!(status, Some(SolveStatus::PrimalInfeasible) | Some(SolveStatus::DualInfeasible)),
+            "Got {:?}. Scale-invariant check should prevent false infeasibility when τ/(τ+κ) is large.",
+            status
+        );
+    }
+
+    #[test]
+    fn test_infeasibility_requires_kappa_dominance() {
+        // Test that infeasibility is only detected when κ >> τ (i.e., τ/(τ+κ) < 1e-6)
+        let prob = ProblemData {
+            P: None,
+            q: vec![0.0],
+            A: sparse::from_triplets(1, 1, vec![]),
+            b: vec![-1.0],
+            cones: vec![ConeSpec::NonNeg { dim: 1 }],
+            var_bounds: None,
+            integrality: None,
+        };
+
+        // Case 1: τ/(τ+κ) = 0.5 - should NOT detect infeasibility
+        let state_balanced = HsdeState {
+            x: vec![0.0],
+            s: vec![0.0],
+            z: vec![1.0],
+            tau: 0.5,
+            kappa: 0.5,
+            xi: vec![0.0],
+        };
+
+        let criteria = TerminationCriteria::default();
+        let scaling = RuizScaling::identity(prob.num_vars(), prob.num_constraints());
+        let status = check_termination(&prob, &scaling, &state_balanced, 10, &criteria);
+        assert!(
+            !matches!(status, Some(SolveStatus::PrimalInfeasible)),
+            "Balanced τ/κ should not trigger infeasibility"
+        );
+
+        // Case 2: τ/(τ+κ) ≈ 1e-10 - SHOULD detect infeasibility
+        let state_infeas = HsdeState {
+            x: vec![0.0],
+            s: vec![0.0],
+            z: vec![1.0],
+            tau: 1e-10,
+            kappa: 1.0,
+            xi: vec![0.0],
+        };
+
+        let status = check_termination(&prob, &scaling, &state_infeas, 10, &criteria);
+        assert!(
+            matches!(status, Some(SolveStatus::PrimalInfeasible)),
+            "κ >> τ should trigger infeasibility detection"
+        );
+    }
 }

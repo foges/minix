@@ -692,6 +692,8 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_simple_qp_conversion() {
@@ -717,5 +719,82 @@ mod tests {
         assert_eq!(prob.num_vars(), 2);
         assert!(prob.P.is_some());
         assert_eq!(prob.q.len(), 2);
+    }
+
+    fn write_temp_qps(content: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("Failed to create temp file");
+        file.write_all(content.as_bytes()).expect("Failed to write temp file");
+        file.flush().expect("Failed to flush temp file");
+        file
+    }
+
+    #[test]
+    fn test_fixed_width_parsing_with_spaces_in_names() {
+        // Test that variable names with internal spaces are parsed correctly
+        // using fixed-width column format (MPS standard).
+        // This was the root cause of the QFORPLAN bug where "DEDO3 11" was
+        // incorrectly split into two tokens.
+        let qps_content = r#"NAME          TESTPROB
+ROWS
+ N  COST
+ E  ROW1
+COLUMNS
+    VAR 1     COST                 1.0   ROW1                 1.0
+    VAR 2     COST                 2.0   ROW1                 1.0
+RHS
+    RHS1      ROW1                 5.0
+BOUNDS
+ UP BOUND1    VAR 1                10.0
+ UP BOUND1    VAR 2                10.0
+ENDATA
+"#;
+        let temp_file = write_temp_qps(qps_content);
+        let qps = parse_qps(temp_file.path()).expect("Should parse QPS with spaced names");
+
+        // Should have 2 variables, not more (if split_whitespace was used, "VAR" and "1"
+        // would be separate, causing wrong variable count)
+        assert_eq!(qps.n, 2, "Expected 2 variables");
+        assert_eq!(qps.var_names.len(), 2);
+        assert!(qps.var_names.contains(&"VAR 1".to_string()),
+            "Variable name 'VAR 1' should be preserved with space");
+        assert!(qps.var_names.contains(&"VAR 2".to_string()),
+            "Variable name 'VAR 2' should be preserved with space");
+    }
+
+    #[test]
+    fn test_fixed_width_row_type_position() {
+        // Test that row type can be at position 1 or 2 (different files use different positions)
+        // Position 1: " N  COST" (type at index 1)
+        // Position 2: "  N COST" (type at index 2)
+        let qps_pos1 = r#"NAME          TEST1
+ROWS
+ N  OBJ
+ E  CON1
+COLUMNS
+    X1        OBJ                  1.0   CON1                 1.0
+RHS
+    RHS1      CON1                 1.0
+ENDATA
+"#;
+        let qps_pos2 = r#"NAME          TEST2
+ROWS
+  N OBJ
+  E CON1
+COLUMNS
+    X1        OBJ                  1.0   CON1                 1.0
+RHS
+    RHS1      CON1                 1.0
+ENDATA
+"#;
+
+        let temp1 = write_temp_qps(qps_pos1);
+        let temp2 = write_temp_qps(qps_pos2);
+        let result1 = parse_qps(temp1.path()).expect("Position 1 format");
+        let result2 = parse_qps(temp2.path()).expect("Position 2 format");
+
+        assert_eq!(result1.n, 1, "Position 1: expected 1 variable");
+        assert_eq!(result1.m, 1, "Position 1: expected 1 constraint");
+        assert_eq!(result2.n, 1, "Position 2: expected 1 variable");
+        assert_eq!(result2.m, 1, "Position 2: expected 1 constraint");
     }
 }
