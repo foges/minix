@@ -247,15 +247,15 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
     let mut obj_sense = 1.0; // 1 = minimize, -1 = maximize
 
     for line_result in reader.lines() {
-        let line = line_result?;
-        let line = line.trim();
+        let line_raw = line_result?;
+        let line = line_raw.trim();
 
         // Skip empty lines and comments
         if line.is_empty() || line.starts_with('*') {
             continue;
         }
 
-        // Check for section headers
+        // Check for section headers (use trimmed line)
         if line.starts_with("NAME") {
             name = line.split_whitespace().nth(1).unwrap_or("unknown").to_string();
             section = "NAME".to_string();
@@ -294,135 +294,321 @@ pub fn parse_qps<P: AsRef<Path>>(path: P) -> Result<QpsProblem> {
                 }
             }
             "ROWS" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let rtype = parts[0].chars().next().unwrap_or('E');
-                    let rname = parts[1].to_string();
+                // MPS format: type at columns 2-3 (1-indexed), name at columns 5-12
+                // Some files put type at position 1, others at position 2 (0-indexed)
+                let line_bytes = line_raw.as_bytes();
+                let line_len = line_bytes.len();
 
-                    if rtype == 'N' {
-                        // Objective row
-                        if obj_row.is_none() {
-                            obj_row = Some(rname.clone());
-                        }
+                // Find row type - look for N/E/L/G at position 1 or 2
+                let rtype = if line_len >= 3 {
+                    let c1 = line_bytes[1] as char;
+                    let c2 = line_bytes[2] as char;
+                    if matches!(c1, 'N' | 'E' | 'L' | 'G') {
+                        c1
+                    } else if matches!(c2, 'N' | 'E' | 'L' | 'G') {
+                        c2
                     } else {
-                        // Constraint row
-                        let idx = con_names.len();
-                        con_map.insert(rname.clone(), idx);
-                        con_names.push(rname.clone());
+                        continue;
                     }
-                    row_types.insert(rname.clone(), rtype);
-                    row_order.push(rname);
+                } else if line_len >= 2 {
+                    line_bytes[1] as char
+                } else {
+                    continue;
+                };
+
+                // Extract row name (columns 5-12, 0-indexed 4-11)
+                let rname = if line_len >= 12 {
+                    String::from_utf8_lossy(&line_bytes[4..12]).trim().to_string()
+                } else if line_len > 4 {
+                    String::from_utf8_lossy(&line_bytes[4..]).trim().to_string()
+                } else {
+                    continue;
+                };
+
+                if rname.is_empty() {
+                    continue;
                 }
+
+                if rtype == 'N' {
+                    // Objective row
+                    if obj_row.is_none() {
+                        obj_row = Some(rname.clone());
+                    }
+                } else {
+                    // Constraint row
+                    let idx = con_names.len();
+                    con_map.insert(rname.clone(), idx);
+                    con_names.push(rname.clone());
+                }
+                row_types.insert(rname.clone(), rtype);
+                row_order.push(rname);
             }
             "COLUMNS" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let var_name = parts[0].to_string();
+                // MPS fixed-width format: fields at columns 5-12, 15-22, 25-36, 40-47, 50-61
+                // (0-indexed: 4-11, 14-21, 24-35, 39-46, 49-60)
+                let line_bytes = line_raw.as_bytes();
+                let line_len = line_bytes.len();
 
-                    // Get or create variable index
-                    let var_idx = *var_map.entry(var_name.clone()).or_insert_with(|| {
-                        let idx = var_names.len();
-                        var_names.push(var_name.clone());
-                        idx
-                    });
+                // Extract variable name (columns 5-12, 0-indexed 4-11)
+                let var_name = if line_len >= 12 {
+                    String::from_utf8_lossy(&line_bytes[4..12]).trim().to_string()
+                } else if line_len > 4 {
+                    String::from_utf8_lossy(&line_bytes[4..]).trim().to_string()
+                } else {
+                    continue;
+                };
 
-                    // Parse pairs of (row_name, value)
-                    let mut i = 1;
-                    while i + 1 < parts.len() {
-                        let row_name = parts[i];
-                        let value: f64 = parts[i + 1].parse().unwrap_or(0.0);
+                if var_name.is_empty() {
+                    continue;
+                }
 
-                        if Some(row_name.to_string()) == obj_row {
-                            // Objective coefficient
+                // Get or create variable index
+                let var_idx = *var_map.entry(var_name.clone()).or_insert_with(|| {
+                    let idx = var_names.len();
+                    var_names.push(var_name.clone());
+                    idx
+                });
+
+                // Parse first (row_name, value) pair at columns 15-22, 25-36
+                if line_len >= 25 {
+                    let row_name = String::from_utf8_lossy(
+                        &line_bytes[14..22.min(line_len)]
+                    ).trim().to_string();
+                    let value_str = if line_len >= 36 {
+                        String::from_utf8_lossy(&line_bytes[24..36]).trim().to_string()
+                    } else if line_len > 24 {
+                        String::from_utf8_lossy(&line_bytes[24..]).trim().to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    if !row_name.is_empty() && !value_str.is_empty() {
+                        let value: f64 = value_str.parse().unwrap_or(0.0);
+
+                        if Some(row_name.clone()) == obj_row {
                             q_coeffs.insert(var_name.clone(), value);
-                        } else if let Some(&con_idx) = con_map.get(row_name) {
-                            // Constraint coefficient
+                        } else if let Some(&con_idx) = con_map.get(&row_name) {
                             a_triplets.push((con_idx, var_idx, value));
                         }
+                    }
+                }
 
-                        i += 2;
+                // Parse second (row_name, value) pair at columns 40-47, 50-61
+                if line_len >= 50 {
+                    let row_name = String::from_utf8_lossy(
+                        &line_bytes[39..47.min(line_len)]
+                    ).trim().to_string();
+                    let value_str = if line_len >= 61 {
+                        String::from_utf8_lossy(&line_bytes[49..61]).trim().to_string()
+                    } else if line_len > 49 {
+                        String::from_utf8_lossy(&line_bytes[49..]).trim().to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    if !row_name.is_empty() && !value_str.is_empty() {
+                        let value: f64 = value_str.parse().unwrap_or(0.0);
+
+                        if Some(row_name.clone()) == obj_row {
+                            q_coeffs.insert(var_name.clone(), value);
+                        } else if let Some(&con_idx) = con_map.get(&row_name) {
+                            a_triplets.push((con_idx, var_idx, value));
+                        }
                     }
                 }
             }
             "RHS" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    // Skip RHS name (first field), parse pairs
-                    let mut i = 1;
-                    while i + 1 < parts.len() {
-                        let row_name = parts[i].to_string();
-                        let value: f64 = parts[i + 1].parse().unwrap_or(0.0);
+                // MPS fixed-width format: RHS name at columns 5-12, then pairs at 15-22/25-36 and 40-47/50-61
+                let line_bytes = line_raw.as_bytes();
+                let line_len = line_bytes.len();
+
+                // First pair: row name at columns 15-22, value at 25-36
+                if line_len >= 25 {
+                    let row_name = String::from_utf8_lossy(
+                        &line_bytes[14..22.min(line_len)]
+                    ).trim().to_string();
+                    let value_str = if line_len >= 36 {
+                        String::from_utf8_lossy(&line_bytes[24..36]).trim().to_string()
+                    } else if line_len > 24 {
+                        String::from_utf8_lossy(&line_bytes[24..]).trim().to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    if !row_name.is_empty() && !value_str.is_empty() {
+                        let value: f64 = value_str.parse().unwrap_or(0.0);
                         rhs.insert(row_name, value);
-                        i += 2;
+                    }
+                }
+
+                // Second pair: row name at columns 40-47, value at 50-61
+                if line_len >= 50 {
+                    let row_name = String::from_utf8_lossy(
+                        &line_bytes[39..47.min(line_len)]
+                    ).trim().to_string();
+                    let value_str = if line_len >= 61 {
+                        String::from_utf8_lossy(&line_bytes[49..61]).trim().to_string()
+                    } else if line_len > 49 {
+                        String::from_utf8_lossy(&line_bytes[49..]).trim().to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    if !row_name.is_empty() && !value_str.is_empty() {
+                        let value: f64 = value_str.parse().unwrap_or(0.0);
+                        rhs.insert(row_name, value);
                     }
                 }
             }
             "RANGES" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let mut i = 1;
-                    while i + 1 < parts.len() {
-                        let row_name = parts[i].to_string();
-                        let value: f64 = parts[i + 1].parse().unwrap_or(0.0);
+                // MPS fixed-width format: same as RHS
+                let line_bytes = line_raw.as_bytes();
+                let line_len = line_bytes.len();
+
+                // First pair: row name at columns 15-22, value at 25-36
+                if line_len >= 25 {
+                    let row_name = String::from_utf8_lossy(
+                        &line_bytes[14..22.min(line_len)]
+                    ).trim().to_string();
+                    let value_str = if line_len >= 36 {
+                        String::from_utf8_lossy(&line_bytes[24..36]).trim().to_string()
+                    } else if line_len > 24 {
+                        String::from_utf8_lossy(&line_bytes[24..]).trim().to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    if !row_name.is_empty() && !value_str.is_empty() {
+                        let value: f64 = value_str.parse().unwrap_or(0.0);
                         ranges.insert(row_name, value.abs());
-                        i += 2;
+                    }
+                }
+
+                // Second pair: row name at columns 40-47, value at 50-61
+                if line_len >= 50 {
+                    let row_name = String::from_utf8_lossy(
+                        &line_bytes[39..47.min(line_len)]
+                    ).trim().to_string();
+                    let value_str = if line_len >= 61 {
+                        String::from_utf8_lossy(&line_bytes[49..61]).trim().to_string()
+                    } else if line_len > 49 {
+                        String::from_utf8_lossy(&line_bytes[49..]).trim().to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    if !row_name.is_empty() && !value_str.is_empty() {
+                        let value: f64 = value_str.parse().unwrap_or(0.0);
+                        ranges.insert(row_name, value.abs());
                     }
                 }
             }
             "BOUNDS" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let btype = parts[0];
-                    let var_name = parts[2].to_string();
-                    let value: f64 = if parts.len() > 3 {
-                        parts[3].parse().unwrap_or(0.0)
-                    } else {
-                        0.0
-                    };
+                // MPS fixed-width format: type at columns 2-3, bound name at 5-12, var name at 15-22, value at 25-36
+                let line_bytes = line_raw.as_bytes();
+                let line_len = line_bytes.len();
 
-                    match btype {
-                        "LO" => {
-                            var_lower.insert(var_name, value);
-                        }
-                        "UP" => {
-                            var_upper.insert(var_name, value);
-                        }
-                        "FX" => {
-                            var_lower.insert(var_name.clone(), value);
-                            var_upper.insert(var_name, value);
-                        }
-                        "FR" => {
-                            var_lower.insert(var_name.clone(), f64::NEG_INFINITY);
-                            var_upper.insert(var_name, f64::INFINITY);
-                        }
-                        "MI" => {
-                            var_lower.insert(var_name, f64::NEG_INFINITY);
-                        }
-                        "PL" => {
-                            var_upper.insert(var_name, f64::INFINITY);
-                        }
-                        "BV" => {
-                            // Binary variable
-                            var_lower.insert(var_name.clone(), 0.0);
-                            var_upper.insert(var_name, 1.0);
-                        }
-                        _ => {}
+                // Extract bound type (columns 2-3, 0-indexed 1-2)
+                let btype = if line_len >= 3 {
+                    String::from_utf8_lossy(&line_bytes[1..3]).trim().to_string()
+                } else {
+                    continue;
+                };
+
+                // Extract variable name (columns 15-22, 0-indexed 14-21)
+                let var_name = if line_len >= 22 {
+                    String::from_utf8_lossy(&line_bytes[14..22]).trim().to_string()
+                } else if line_len > 14 {
+                    String::from_utf8_lossy(&line_bytes[14..]).trim().to_string()
+                } else {
+                    continue;
+                };
+
+                if var_name.is_empty() {
+                    continue;
+                }
+
+                // Extract value (columns 25-36, 0-indexed 24-35)
+                let value: f64 = if line_len >= 25 {
+                    let value_str = if line_len >= 36 {
+                        String::from_utf8_lossy(&line_bytes[24..36]).trim().to_string()
+                    } else {
+                        String::from_utf8_lossy(&line_bytes[24..]).trim().to_string()
+                    };
+                    value_str.parse().unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+
+                match btype.as_str() {
+                    "LO" => {
+                        var_lower.insert(var_name, value);
                     }
+                    "UP" => {
+                        var_upper.insert(var_name, value);
+                    }
+                    "FX" => {
+                        var_lower.insert(var_name.clone(), value);
+                        var_upper.insert(var_name, value);
+                    }
+                    "FR" => {
+                        var_lower.insert(var_name.clone(), f64::NEG_INFINITY);
+                        var_upper.insert(var_name, f64::INFINITY);
+                    }
+                    "MI" => {
+                        var_lower.insert(var_name, f64::NEG_INFINITY);
+                    }
+                    "PL" => {
+                        var_upper.insert(var_name, f64::INFINITY);
+                    }
+                    "BV" => {
+                        // Binary variable
+                        var_lower.insert(var_name.clone(), 0.0);
+                        var_upper.insert(var_name, 1.0);
+                    }
+                    _ => {}
                 }
             }
             "QUADOBJ" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let var1 = parts[0].to_string();
-                    let var2 = parts[1].to_string();
-                    let value: f64 = parts[2].parse().unwrap_or(0.0);
+                // MPS fixed-width format for QUADOBJ: var1 at 5-12, var2 at 15-22, value at 25-36
+                let line_bytes = line_raw.as_bytes();
+                let line_len = line_bytes.len();
 
-                    if let (Some(&i), Some(&j)) = (var_map.get(&var1), var_map.get(&var2)) {
-                        // Store upper triangle only
-                        let (row, col) = if i <= j { (i, j) } else { (j, i) };
-                        // QPS stores Q such that obj = 0.5 x'Qx, so we use value directly
-                        p_triplets.push((row, col, value));
-                    }
+                // Extract var1 (columns 5-12, 0-indexed 4-11)
+                let var1 = if line_len >= 12 {
+                    String::from_utf8_lossy(&line_bytes[4..12]).trim().to_string()
+                } else if line_len > 4 {
+                    String::from_utf8_lossy(&line_bytes[4..]).trim().to_string()
+                } else {
+                    continue;
+                };
+
+                // Extract var2 (columns 15-22, 0-indexed 14-21)
+                let var2 = if line_len >= 22 {
+                    String::from_utf8_lossy(&line_bytes[14..22]).trim().to_string()
+                } else if line_len > 14 {
+                    String::from_utf8_lossy(&line_bytes[14..]).trim().to_string()
+                } else {
+                    continue;
+                };
+
+                // Extract value (columns 25-36, 0-indexed 24-35)
+                let value: f64 = if line_len >= 25 {
+                    let value_str = if line_len >= 36 {
+                        String::from_utf8_lossy(&line_bytes[24..36]).trim().to_string()
+                    } else {
+                        String::from_utf8_lossy(&line_bytes[24..]).trim().to_string()
+                    };
+                    value_str.parse().unwrap_or(0.0)
+                } else {
+                    continue;
+                };
+
+                if let (Some(&i), Some(&j)) = (var_map.get(&var1), var_map.get(&var2)) {
+                    // Store upper triangle only
+                    let (row, col) = if i <= j { (i, j) } else { (j, i) };
+                    // QPS stores Q such that obj = 0.5 x'Qx, so we use value directly
+                    p_triplets.push((row, col, value));
                 }
             }
             _ => {}

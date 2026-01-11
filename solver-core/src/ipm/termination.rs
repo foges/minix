@@ -41,11 +41,11 @@ pub struct TerminationCriteria {
 impl Default for TerminationCriteria {
     fn default() -> Self {
         Self {
-            tol_feas: 1e-9,
-            tol_gap: 1e-9,
-            tol_gap_rel: 1e-9,  // Match Clarabel standard
-            tol_infeas: 1e-9,
-            tau_min: 1e-9,
+            tol_feas: 1e-8,      // Industry standard (Clarabel, OSQP, Gurobi)
+            tol_gap: 1e-8,       // Changed from 1e-9 for fair comparison
+            tol_gap_rel: 1e-8,   // Match Clarabel/OSQP defaults
+            tol_infeas: 1e-8,    // Infeasibility detection tolerance
+            tau_min: 1e-9,       // HSDE tau threshold (keep strict)
             max_iter: 200,
             min_progress: 1e-12,
         }
@@ -91,8 +91,11 @@ pub fn check_termination(
         return Some(SolveStatus::MaxIters);
     }
 
-    // τ ≈ 0: check infeasibility certificates.
-    if state.tau < criteria.tau_min {
+    // Scale-invariant infeasibility gate: use τ/(τ+κ) ratio, not absolute τ.
+    // After τ+κ normalization, absolute τ can be small even for feasible problems.
+    let tau_ratio = state.tau / (state.tau + state.kappa).max(1e-100);
+    if tau_ratio < 1e-6 {
+        // κ >> τ: HSDE signals infeasibility/unboundedness
         return check_infeasibility(prob, scaling, state, criteria);
     }
 
@@ -192,14 +195,16 @@ pub fn check_termination(
     None
 }
 
-/// Check for infeasibility certificates when τ ≈ 0.
+/// Check for infeasibility certificates when κ >> τ.
 fn check_infeasibility(
     prob: &ProblemData,
     scaling: &RuizScaling,
     state: &HsdeState,
     criteria: &TerminationCriteria,
 ) -> Option<SolveStatus> {
-    if state.tau > criteria.tau_min {
+    // Scale-invariant check: only consider infeasibility when κ >> τ
+    let tau_ratio = state.tau / (state.tau + state.kappa).max(1e-100);
+    if tau_ratio > 1e-6 {
         return None;
     }
 

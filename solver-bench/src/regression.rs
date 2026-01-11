@@ -130,10 +130,6 @@ fn expected_behavior(name: &str) -> (Option<SolveStatus>, Option<usize>) {
         "BOYD1" => (Some(SolveStatus::NumericalLimit), Some(50)),
         "BOYD2" => (Some(SolveStatus::NumericalLimit), Some(50)),
 
-        // QFORPLAN: Fundamental convergence failure (gap stuck at 97.5%)
-        // Not a numerical limit - different failure mode (HSDE infeasibility signals)
-        "QFORPLAN" => (Some(SolveStatus::MaxIters), Some(50)),
-
         // Add more specific expected behaviors here as needed
         // For most problems: (None, None) means expect Optimal with variable iterations
         _ => (None, None),
@@ -388,52 +384,52 @@ fn synthetic_cases() -> Vec<(&'static str, ProblemData)> {
     cases
 }
 
-/// Expected iterations for each problem - measured from v18 (commit 6cef882)
+/// Expected iterations for each problem - measured with 1e-8 tolerance (industry standard)
 /// These are EXACT iteration counts with no margin/slop allowed.
 fn expected_iterations(name: &str) -> Option<usize> {
     match name {
         // HS problems
-        "HS21" => Some(9), "HS35" => Some(7), "HS35MOD" => Some(14),
-        "HS51" => Some(5), "HS52" => Some(4), "HS53" => Some(6),
+        "HS21" => Some(9), "HS35" => Some(6), "HS35MOD" => Some(12),
+        "HS51" => Some(4), "HS52" => Some(4), "HS53" => Some(6),
         "HS76" => Some(6), "HS118" => Some(11), "HS268" => Some(10),
         // Small problems
-        "TAME" => Some(5), "S268" => Some(10), "ZECEVIC2" => Some(8),
-        "LOTSCHD" => Some(8), "QAFIRO" => Some(15),
+        "TAME" => Some(5), "S268" => Some(10), "ZECEVIC2" => Some(7),
+        "LOTSCHD" => Some(8), "QAFIRO" => Some(14),
         // CVXQP family
-        "CVXQP1_S" => Some(9), "CVXQP2_S" => Some(9), "CVXQP3_S" => Some(11),
-        "CVXQP1_M" => Some(11), "CVXQP2_M" => Some(10), "CVXQP3_M" => Some(12),
-        "CVXQP1_L" => Some(11), "CVXQP2_L" => Some(11), "CVXQP3_L" => Some(11),
+        "CVXQP1_S" => Some(8), "CVXQP2_S" => Some(9), "CVXQP3_S" => Some(10),
+        "CVXQP1_M" => Some(10), "CVXQP2_M" => Some(9), "CVXQP3_M" => Some(12),
+        "CVXQP1_L" => Some(11), "CVXQP2_L" => Some(11), "CVXQP3_L" => Some(10),
         // DUAL/PRIMAL
-        "DUAL1" => Some(11), "DUAL2" => Some(11), "DUAL3" => Some(11), "DUAL4" => Some(10),
+        "DUAL1" => Some(11), "DUAL2" => Some(11), "DUAL3" => Some(10), "DUAL4" => Some(10),
         "DUALC1" => Some(13), "DUALC2" => Some(10), "DUALC5" => Some(10), "DUALC8" => Some(10),
-        "PRIMAL1" => Some(11), "PRIMAL2" => Some(9), "PRIMAL3" => Some(11), "PRIMAL4" => Some(10),
-        "PRIMALC1" => Some(16), "PRIMALC2" => Some(15), "PRIMALC5" => Some(9), "PRIMALC8" => Some(13),
+        "PRIMAL1" => Some(10), "PRIMAL2" => Some(9), "PRIMAL3" => Some(10), "PRIMAL4" => Some(9),
+        "PRIMALC1" => Some(16), "PRIMALC2" => Some(14), "PRIMALC5" => Some(9), "PRIMALC8" => Some(13),
         // AUG family
-        "AUG2D" => Some(7), "AUG2DC" => Some(7), "AUG2DCQP" => Some(14), "AUG2DQP" => Some(15),
-        "AUG3D" => Some(6), "AUG3DC" => Some(6), "AUG3DCQP" => Some(12), "AUG3DQP" => Some(15),
-        // CONT family
+        "AUG2D" => Some(7), "AUG2DC" => Some(7), "AUG2DCQP" => Some(13), "AUG2DQP" => Some(14),
+        "AUG3D" => Some(6), "AUG3DC" => Some(6), "AUG3DCQP" => Some(11), "AUG3DQP" => Some(13),
+        // CONT family (updated after scale-invariant infeasibility detection)
         "CONT-050" => Some(10), "CONT-100" => Some(11), "CONT-101" => Some(10),
-        "CONT-200" => Some(12), "CONT-201" => Some(11), "CONT-300" => Some(13),
+        "CONT-200" => Some(12), "CONT-201" => Some(10), "CONT-300" => Some(12),
         // LISWET family (many hit 200 iter limit)
         "LISWET1" => Some(200), "LISWET2" => Some(22), "LISWET3" => Some(30), "LISWET4" => Some(200),
         "LISWET5" => Some(48), "LISWET6" => Some(200), "LISWET7" => Some(200), "LISWET8" => Some(200),
         "LISWET9" => Some(200), "LISWET10" => Some(200), "LISWET11" => Some(200), "LISWET12" => Some(200),
         // STADAT/QGROW
         "STADAT1" => Some(13), "STADAT2" => Some(26), "STADAT3" => Some(27),
-        "QGROW7" => Some(25), "QGROW15" => Some(25), "QGROW22" => Some(30),
+        "QGROW7" => Some(22), "QGROW15" => Some(24), "QGROW22" => Some(28),
         // Other Q* problems
-        "QETAMACR" => Some(22), "QISRAEL" => Some(28), "QPCBLEND" => Some(18),
-        "QPCBOEI2" => Some(25), "QPCSTAIR" => Some(22), "QRECIPE" => Some(19),
-        "QSC205" => Some(17), "QSCSD1" => Some(10), "QSCSD6" => Some(13), "QSCSD8" => Some(12),
+        "QETAMACR" => Some(21), "QISRAEL" => Some(28), "QPCBLEND" => Some(17),
+        "QPCBOEI2" => Some(24), "QPCSTAIR" => Some(21), "QRECIPE" => Some(17),
+        "QSC205" => Some(16), "QSCSD1" => Some(9), "QSCSD6" => Some(13), "QSCSD8" => Some(12),
         "QSCTAP1" => Some(20), "QSCTAP2" => Some(12), "QSCTAP3" => Some(13),
-        "QSEBA" => Some(24), "QSHARE2B" => Some(18), "QSHELL" => Some(39),
-        "QSIERRA" => Some(200), "QSTAIR" => Some(21), "QSTANDAT" => Some(19),
+        "QSEBA" => Some(24), "QSHARE2B" => Some(17), "QSHELL" => Some(37),
+        "QSIERRA" => Some(34), "QSTAIR" => Some(21), "QSTANDAT" => Some(18),
         // Other
-        "DPKLO1" => Some(4), "DTOC3" => Some(6), "EXDATA" => Some(11),
-        "GOULDQP2" => Some(16), "GOULDQP3" => Some(9),
-        "HUES-MOD" => Some(11), "HUESTIS" => Some(11), "KSIP" => Some(13), "LASER" => Some(10),
-        "MOSARQP1" => Some(11), "MOSARQP2" => Some(11), "POWELL20" => Some(10),
-        "STCQP2" => Some(9), "UBH1" => Some(71), "VALUES" => Some(19), "YAO" => Some(200),
+        "DPKLO1" => Some(4), "DTOC3" => Some(5), "EXDATA" => Some(13),
+        "GOULDQP2" => Some(14), "GOULDQP3" => Some(8),
+        "HUES-MOD" => Some(10), "HUESTIS" => Some(10), "KSIP" => Some(13), "LASER" => Some(9),
+        "MOSARQP1" => Some(10), "MOSARQP2" => Some(10), "POWELL20" => Some(9),
+        "STCQP2" => Some(8), "UBH1" => Some(63), "VALUES" => Some(18), "YAO" => Some(200),
         // BOYD (large) - these hit MaxIters, no expected value
         // Synthetic (measured exact)
         "SYN_LP_NONNEG" => Some(5), "SYN_SOC_FEAS" => Some(9),
@@ -524,11 +520,17 @@ mod tests {
                 }
             }
 
-            // For problems with expected NumericalLimit status, don't require Optimal
-            let is_expected_numerical_limit = matches!(res.expected_status, Some(SolveStatus::NumericalLimit));
+            // For problems with expected non-optimal status, don't require Optimal
+            let is_expected_non_optimal = matches!(
+                res.expected_status,
+                Some(SolveStatus::NumericalLimit)
+                    | Some(SolveStatus::PrimalInfeasible)
+                    | Some(SolveStatus::DualInfeasible)
+                    | Some(SolveStatus::MaxIters)
+            );
 
-            // Not expected to fail - require pass (or expected NumericalLimit)
-            if !is_expected_numerical_limit
+            // Not expected to fail - require pass (unless expected non-optimal status)
+            if !is_expected_non_optimal
                 && (!matches!(res.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal)
                     || !res.rel_p.is_finite()
                     || !res.rel_d.is_finite()
@@ -564,8 +566,8 @@ mod tests {
                 failures.push(msg);
                 continue;
             }
-            // Skip tolerance check for NumericalLimit problems (they're expected to be stuck)
-            if !is_expected_numerical_limit && (res.rel_p > tol_feas || res.rel_d > tol_feas || res.gap_rel > tol_gap) {
+            // Skip tolerance check for problems with expected non-optimal status
+            if !is_expected_non_optimal && (res.rel_p > tol_feas || res.rel_d > tol_feas || res.gap_rel > tol_gap) {
                 let msg = format!(
                     "{}: rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
                     res.name, res.rel_p, res.rel_d, res.gap_rel

@@ -1580,7 +1580,12 @@ fn check_infeasibility_unscaled(
     state: &HsdeState,
     ws: &mut IpmWorkspace,
 ) -> Option<SolveStatus> {
-    if state.tau > criteria.tau_min {
+    // Scale-invariant infeasibility gate: use τ/(τ+κ) ratio, not absolute τ.
+    // After τ+κ normalization, absolute τ can be small even for feasible problems.
+    // We only consider infeasibility when κ >> τ (HSDE signals infeas/unbounded).
+    let tau_ratio = state.tau / (state.tau + state.kappa).max(1e-100);
+    if tau_ratio > 1e-6 {
+        // τ is still significant relative to κ - not in infeasibility regime
         return None;
     }
 
@@ -1607,38 +1612,56 @@ fn check_infeasibility_unscaled(
     let s_inf = inf_norm(s);
     let z_inf = inf_norm(z);
 
-    let btz = dot(&prob.b, z);
-    if btz < -criteria.tol_infeas {
-        let mut atz_inf = 0.0_f64;
+    // Primal infeasibility certificate (scale-invariant formulation):
+    // Normalize z to get a direction, then check:
+    //   b^T z_hat < -eps  (objective improving in infeasible direction)
+    //   ||A^T z_hat||_inf <= eps  (z_hat in null space of A^T)
+    //   z_hat ∈ K*  (normalized direction in dual cone)
+    let z_norm = z_inf.max(1e-10);
+    let btz_normalized = dot(&prob.b, z) / z_norm;
+
+    if btz_normalized < -criteria.tol_infeas {
+        // Compute A^T z in normalized space
+        let mut atz_inf_normalized = 0.0_f64;
         for i in 0..prob.num_vars() {
-            let val = ws.r_d[i] - ws.p_x[i] - prob.q[i];
-            atz_inf = atz_inf.max(val.abs());
+            let atz_i = ws.r_d[i] - ws.p_x[i] - prob.q[i];
+            atz_inf_normalized = atz_inf_normalized.max((atz_i / z_norm).abs());
         }
-        let bound = criteria.tol_infeas * (x_inf + z_inf).max(1.0) * btz.abs();
-        let z_cone_ok = dual_cone_ok(prob, z, criteria.tol_infeas);
-        if atz_inf <= bound && z_cone_ok {
+        // Check if normalized z is in dual cone
+        let z_cone_ok = dual_cone_ok(prob, z, criteria.tol_infeas * z_norm);
+
+        // Scale-invariant check: ||A^T z_hat|| should be tiny
+        if atz_inf_normalized <= criteria.tol_infeas && z_cone_ok {
             return Some(SolveStatus::PrimalInfeasible);
         }
     }
 
-    let qtx = dot(&prob.q, x);
-    if qtx < -criteria.tol_infeas {
-        let p_x_inf = inf_norm(&ws.p_x);
-        let px_bound = criteria.tol_infeas * x_inf.max(1.0) * qtx.abs();
+    // Dual infeasibility certificate (scale-invariant formulation):
+    // Normalize x to get a direction, then check:
+    //   q^T x_hat < -eps  (objective unbounded below)
+    //   ||P x_hat||_inf <= eps  (x_hat in null space of P)
+    //   ||A x_hat + s_hat||_inf <= eps  (feasible direction)
+    let x_norm = x_inf.max(1e-10);
+    let qtx_normalized = dot(&prob.q, x) / x_norm;
 
-        let mut ax_s_inf = 0.0_f64;
+    if qtx_normalized < -criteria.tol_infeas {
+        let p_x_inf_normalized = inf_norm(&ws.p_x) / x_norm;
+
+        let mut ax_s_inf_normalized = 0.0_f64;
         for i in 0..prob.num_constraints() {
-            let val = ws.r_p[i] + prob.b[i];
-            ax_s_inf = ax_s_inf.max(val.abs());
+            let ax_s_i = ws.r_p[i] + prob.b[i];  // Ax + s
+            ax_s_inf_normalized = ax_s_inf_normalized.max((ax_s_i / x_norm).abs());
         }
-        let axs_bound = criteria.tol_infeas * (x_inf + s_inf).max(1.0) * qtx.abs();
 
-        if p_x_inf <= px_bound && ax_s_inf <= axs_bound {
+        // Scale-invariant check
+        if p_x_inf_normalized <= criteria.tol_infeas && ax_s_inf_normalized <= criteria.tol_infeas {
             return Some(SolveStatus::DualInfeasible);
         }
     }
 
-    Some(SolveStatus::NumericalError)
+    // No certificate satisfied - let solver continue
+    // (HSDE may be in distress but we should try to recover)
+    None
 }
 
 #[inline]
