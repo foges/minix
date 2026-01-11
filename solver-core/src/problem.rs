@@ -214,12 +214,12 @@ impl Default for SolverSettings {
             .unwrap_or(2);
 
         Self {
-            max_iter: 50,
+            max_iter: 100,
             time_limit_ms: None,
             verbose: false,
-            tol_feas: 1e-9,
-            tol_gap: 1e-9,
-            tol_infeas: 1e-9,
+            tol_feas: 1e-8,    // Match Clarabel/OSQP industry standard
+            tol_gap: 1e-8,     // Match Clarabel/OSQP industry standard
+            tol_infeas: 1e-8,  // Infeasibility detection tolerance
             ruiz_iters: 10,
             static_reg: 1e-8,
             dynamic_reg_min_pivot: 1e-13,

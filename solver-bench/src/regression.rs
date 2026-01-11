@@ -391,16 +391,16 @@ fn expected_iterations(name: &str) -> Option<usize> {
         // HS problems
         "HS21" => Some(9), "HS35" => Some(6), "HS35MOD" => Some(12),
         "HS51" => Some(4), "HS52" => Some(4), "HS53" => Some(6),
-        "HS76" => Some(6), "HS118" => Some(11), "HS268" => Some(10),
+        "HS76" => Some(6), "HS118" => Some(11), "HS268" => Some(8),
         // Small problems
-        "TAME" => Some(5), "S268" => Some(10), "ZECEVIC2" => Some(7),
+        "TAME" => Some(4), "S268" => Some(8), "ZECEVIC2" => Some(7),
         "LOTSCHD" => Some(8), "QAFIRO" => Some(14),
         // CVXQP family
         "CVXQP1_S" => Some(8), "CVXQP2_S" => Some(9), "CVXQP3_S" => Some(10),
         "CVXQP1_M" => Some(10), "CVXQP2_M" => Some(9), "CVXQP3_M" => Some(12),
-        "CVXQP1_L" => Some(11), "CVXQP2_L" => Some(11), "CVXQP3_L" => Some(10),
+        "CVXQP1_L" => Some(11), "CVXQP2_L" => Some(10), "CVXQP3_L" => Some(10),
         // DUAL/PRIMAL
-        "DUAL1" => Some(11), "DUAL2" => Some(11), "DUAL3" => Some(10), "DUAL4" => Some(10),
+        "DUAL1" => Some(12), "DUAL2" => Some(11), "DUAL3" => Some(12), "DUAL4" => Some(12),
         "DUALC1" => Some(13), "DUALC2" => Some(10), "DUALC5" => Some(10), "DUALC8" => Some(10),
         "PRIMAL1" => Some(10), "PRIMAL2" => Some(9), "PRIMAL3" => Some(10), "PRIMAL4" => Some(9),
         "PRIMALC1" => Some(16), "PRIMALC2" => Some(14), "PRIMALC5" => Some(9), "PRIMALC8" => Some(13),
@@ -410,29 +410,29 @@ fn expected_iterations(name: &str) -> Option<usize> {
         // CONT family (updated after scale-invariant infeasibility detection)
         "CONT-050" => Some(10), "CONT-100" => Some(11), "CONT-101" => Some(10),
         "CONT-200" => Some(12), "CONT-201" => Some(10), "CONT-300" => Some(12),
-        // LISWET family (many hit 200 iter limit)
-        "LISWET1" => Some(200), "LISWET2" => Some(22), "LISWET3" => Some(30), "LISWET4" => Some(200),
-        "LISWET5" => Some(48), "LISWET6" => Some(200), "LISWET7" => Some(200), "LISWET8" => Some(200),
-        "LISWET9" => Some(200), "LISWET10" => Some(200), "LISWET11" => Some(200), "LISWET12" => Some(200),
+        // LISWET family (all converge after recent fixes)
+        "LISWET1" => Some(27), "LISWET2" => Some(18), "LISWET3" => Some(26), "LISWET4" => Some(36),
+        "LISWET5" => Some(20), "LISWET6" => Some(25), "LISWET7" => Some(32), "LISWET8" => Some(32),
+        "LISWET9" => Some(38), "LISWET10" => Some(25), "LISWET11" => Some(30), "LISWET12" => Some(38),
         // STADAT/QGROW
-        "STADAT1" => Some(13), "STADAT2" => Some(26), "STADAT3" => Some(27),
+        "STADAT1" => Some(12), "STADAT2" => Some(26), "STADAT3" => Some(27),
         "QGROW7" => Some(22), "QGROW15" => Some(24), "QGROW22" => Some(28),
         // Other Q* problems
-        "QETAMACR" => Some(21), "QISRAEL" => Some(28), "QPCBLEND" => Some(17),
+        "QETAMACR" => Some(21), "QISRAEL" => Some(27), "QPCBLEND" => Some(17),
         "QPCBOEI2" => Some(24), "QPCSTAIR" => Some(21), "QRECIPE" => Some(17),
         "QSC205" => Some(16), "QSCSD1" => Some(9), "QSCSD6" => Some(13), "QSCSD8" => Some(12),
-        "QSCTAP1" => Some(20), "QSCTAP2" => Some(12), "QSCTAP3" => Some(13),
+        "QSCTAP1" => Some(19), "QSCTAP2" => Some(11), "QSCTAP3" => Some(13),
         "QSEBA" => Some(24), "QSHARE2B" => Some(17), "QSHELL" => Some(37),
         "QSIERRA" => Some(34), "QSTAIR" => Some(21), "QSTANDAT" => Some(18),
         // Other
         "DPKLO1" => Some(4), "DTOC3" => Some(5), "EXDATA" => Some(13),
         "GOULDQP2" => Some(14), "GOULDQP3" => Some(8),
-        "HUES-MOD" => Some(10), "HUESTIS" => Some(10), "KSIP" => Some(13), "LASER" => Some(9),
+        "HUES-MOD" => Some(10), "HUESTIS" => Some(10), "KSIP" => Some(12), "LASER" => Some(9),
         "MOSARQP1" => Some(10), "MOSARQP2" => Some(10), "POWELL20" => Some(9),
-        "STCQP2" => Some(8), "UBH1" => Some(63), "VALUES" => Some(18), "YAO" => Some(200),
+        "STCQP2" => Some(8), "UBH1" => Some(63), "VALUES" => Some(13), "YAO" => Some(44),
         // BOYD (large) - these hit MaxIters, no expected value
-        // Synthetic (measured exact)
-        "SYN_LP_NONNEG" => Some(5), "SYN_SOC_FEAS" => Some(9),
+        // Synthetic (measured exact with 1e-8 tolerances)
+        "SYN_LP_NONNEG" => Some(4), "SYN_SOC_FEAS" => Some(5),
         _ => None,
     }
 }
