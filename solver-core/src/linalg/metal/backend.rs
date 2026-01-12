@@ -342,13 +342,33 @@ impl MetalKktBackend {
         let temp_rhs = self.handle.create_buffer(n * std::mem::size_of::<f32>())?;
         let temp_sol = self.handle.create_buffer(n * std::mem::size_of::<f32>())?;
 
-        // Build level schedule for triangular solves
-        // For now, use simple row-by-row schedule (no parallelism)
-        // TODO: Compute proper level schedule from etree
+        // Use level schedules from symbolic analysis
+        let (level_ptr_lower, level_rows_lower_vec) = &symbolic.solve_levels_lower;
+        let (level_ptr_upper, level_rows_upper_vec) = &symbolic.solve_levels_upper;
 
-        let level_ptr = self.handle.create_buffer((n + 1) * std::mem::size_of::<u32>())?;
-        let level_rows_lower = self.handle.create_buffer(n * std::mem::size_of::<u32>())?;
-        let level_rows_upper = self.handle.create_buffer(n * std::mem::size_of::<u32>())?;
+        // Compute level sizes
+        let num_levels_lower = if level_ptr_lower.len() > 1 { level_ptr_lower.len() - 1 } else { 0 };
+        let num_levels_upper = if level_ptr_upper.len() > 1 { level_ptr_upper.len() - 1 } else { 0 };
+
+        let level_sizes_lower: Vec<usize> = (0..num_levels_lower)
+            .map(|i| level_ptr_lower[i + 1] - level_ptr_lower[i])
+            .collect();
+        let level_sizes_upper: Vec<usize> = (0..num_levels_upper)
+            .map(|i| level_ptr_upper[i + 1] - level_ptr_upper[i])
+            .collect();
+
+        // Upload level schedules to GPU
+        let level_ptr = self.handle.create_buffer_with_data(
+            &level_ptr_lower.iter().map(|&x| x as u32).collect::<Vec<_>>()
+        )?;
+        let level_rows_lower = self.handle.create_buffer_with_data(
+            &level_rows_lower_vec.iter().map(|&x| x as u32).collect::<Vec<_>>()
+        )?;
+        let level_rows_upper = self.handle.create_buffer_with_data(
+            &level_rows_upper_vec.iter().map(|&x| x as u32).collect::<Vec<_>>()
+        )?;
+
+        let num_levels = num_levels_lower.max(num_levels_upper);
 
         self.solve_buffers = Some(SolveBuffers {
             temp_rhs,
@@ -356,10 +376,190 @@ impl MetalKktBackend {
             level_ptr,
             level_rows_lower,
             level_rows_upper,
-            num_levels: n, // One level per row (no parallelism yet)
-            level_sizes_lower: vec![1; n],
-            level_sizes_upper: vec![1; n],
+            num_levels,
+            level_sizes_lower,
+            level_sizes_upper,
         });
+
+        if self.handle.config().verbose {
+            println!(
+                "[Metal] Solve buffers: {} levels (lower), {} levels (upper)",
+                num_levels_lower, num_levels_upper
+            );
+        }
+
+        Ok(())
+    }
+
+    /// GPU-accelerated solve using level-scheduled SpTRSV.
+    ///
+    /// This dispatches Metal compute commands for:
+    /// 1. Permute RHS
+    /// 2. Forward solve (L)
+    /// 3. Diagonal solve (D^{-1})
+    /// 4. Backward solve (L^T)
+    /// 5. Inverse permute
+    #[allow(dead_code)]
+    fn gpu_solve(
+        &self,
+        rhs: &[f32],
+        solution: &mut [f32],
+        symbolic: &SymbolicAnalysis,
+    ) -> MetalResult<()> {
+        let n = symbolic.n;
+
+        let factor_buffers = self.factor_buffers.as_ref()
+            .ok_or(MetalError::Solve("No factor buffers".to_string()))?;
+        let solve_buffers = self.solve_buffers.as_ref()
+            .ok_or(MetalError::Solve("No solve buffers".to_string()))?;
+
+        // Upload RHS to GPU
+        let rhs_ptr = solve_buffers.temp_rhs.contents() as *mut f32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(rhs.as_ptr(), rhs_ptr, n);
+        }
+
+        // Create command buffer
+        let command_buffer = self.handle.queue().new_command_buffer();
+
+        // Step 1: Permute RHS
+        // y[i] = rhs[perm_inv[i]]
+        self.encode_permute(
+            command_buffer,
+            &solve_buffers.temp_rhs,
+            &factor_buffers.perm_inv,
+            &solve_buffers.temp_sol,
+            n,
+        )?;
+
+        // Step 2: Forward solve (L * z = y)
+        // For level-scheduled SpTRSV, we dispatch one kernel per level
+        // Note: This is a simplified version; full implementation would use CSR factor
+        // For now, we skip GPU solve and use CPU fallback
+
+        // Step 3: Diagonal solve (z = D^{-1} * z)
+        self.encode_dinv_apply(
+            command_buffer,
+            &solve_buffers.temp_sol,
+            &factor_buffers.d_inv,
+            n,
+        )?;
+
+        // Step 4: Backward solve (L^T * x = z) - would be level-scheduled
+
+        // Step 5: Inverse permute
+        // solution[perm[i]] = x[i]
+        self.encode_permute_inv(
+            command_buffer,
+            &solve_buffers.temp_sol,
+            &factor_buffers.perm,
+            &solve_buffers.temp_rhs, // Reuse as output
+            n,
+        )?;
+
+        // Commit and wait
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Download solution
+        let sol_ptr = solve_buffers.temp_rhs.contents() as *const f32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(sol_ptr, solution.as_mut_ptr(), n);
+        }
+
+        Ok(())
+    }
+
+    fn encode_permute(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        input: &metal::Buffer,
+        perm: &metal::Buffer,
+        output: &metal::Buffer,
+        n: usize,
+    ) -> MetalResult<()> {
+        let pipeline = self.handle.pipeline(super::kernels::PERMUTE_GATHER)
+            .ok_or(MetalError::Solve("Missing permute_gather pipeline".to_string()))?;
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(input), 0);
+        encoder.set_buffer(1, Some(perm), 0);
+        encoder.set_buffer(2, Some(output), 0);
+
+        let n_u32 = n as u32;
+        encoder.set_bytes(3, std::mem::size_of::<u32>() as u64, &n_u32 as *const u32 as *const _);
+
+        let threadgroup_size = metal::MTLSize::new(
+            self.handle.config().threadgroup_size_1d as u64,
+            1,
+            1,
+        );
+        let grid_size = metal::MTLSize::new(n as u64, 1, 1);
+        encoder.dispatch_threads(grid_size, threadgroup_size);
+        encoder.end_encoding();
+
+        Ok(())
+    }
+
+    fn encode_permute_inv(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        input: &metal::Buffer,
+        perm: &metal::Buffer,
+        output: &metal::Buffer,
+        n: usize,
+    ) -> MetalResult<()> {
+        let pipeline = self.handle.pipeline(super::kernels::PERMUTE_SCATTER)
+            .ok_or(MetalError::Solve("Missing permute_scatter pipeline".to_string()))?;
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(input), 0);
+        encoder.set_buffer(1, Some(perm), 0);
+        encoder.set_buffer(2, Some(output), 0);
+
+        let n_u32 = n as u32;
+        encoder.set_bytes(3, std::mem::size_of::<u32>() as u64, &n_u32 as *const u32 as *const _);
+
+        let threadgroup_size = metal::MTLSize::new(
+            self.handle.config().threadgroup_size_1d as u64,
+            1,
+            1,
+        );
+        let grid_size = metal::MTLSize::new(n as u64, 1, 1);
+        encoder.dispatch_threads(grid_size, threadgroup_size);
+        encoder.end_encoding();
+
+        Ok(())
+    }
+
+    fn encode_dinv_apply(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        x: &metal::Buffer,
+        dinv: &metal::Buffer,
+        n: usize,
+    ) -> MetalResult<()> {
+        let pipeline = self.handle.pipeline(super::kernels::APPLY_DINV_INPLACE)
+            .ok_or(MetalError::Solve("Missing apply_dinv_inplace pipeline".to_string()))?;
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(x), 0);
+        encoder.set_buffer(1, Some(dinv), 0);
+
+        let n_u32 = n as u32;
+        encoder.set_bytes(2, std::mem::size_of::<u32>() as u64, &n_u32 as *const u32 as *const _);
+
+        let threadgroup_size = metal::MTLSize::new(
+            self.handle.config().threadgroup_size_1d as u64,
+            1,
+            1,
+        );
+        let grid_size = metal::MTLSize::new(n as u64, 1, 1);
+        encoder.dispatch_threads(grid_size, threadgroup_size);
+        encoder.end_encoding();
 
         Ok(())
     }
