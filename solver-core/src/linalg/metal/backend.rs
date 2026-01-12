@@ -144,6 +144,23 @@ pub struct MetalFactorization {
     pub max_pivot: f64,
 }
 
+/// Sparse LDL^T factorization result (CSR format for L and L^T, plus D diagonal)
+#[cfg(target_os = "macos")]
+struct SparseLdltResult {
+    // L in CSR format (for forward solve)
+    l_csr_values: Vec<f32>,
+    l_csr_col_ind: Vec<u32>,
+    l_csr_row_ptr: Vec<u32>,
+
+    // L^T in CSR format (for backward solve)
+    lt_csr_values: Vec<f32>,
+    lt_csr_col_ind: Vec<u32>,
+    lt_csr_row_ptr: Vec<u32>,
+
+    // Diagonal D
+    d: Vec<f32>,
+}
+
 #[cfg(target_os = "macos")]
 impl MetalKktBackend {
     /// Create a new Metal KKT backend with the given configuration.
@@ -238,12 +255,14 @@ impl MetalKktBackend {
     ) -> MetalResult<MetalFactorization> {
         let start = std::time::Instant::now();
 
-        let symbolic = self.symbolic.as_ref()
-            .ok_or(MetalError::NumericFactorization(
-                "Must call symbolic_analysis first".to_string()
-            ))?;
-
-        let n = symbolic.n;
+        // Extract what we need from symbolic up front to avoid borrow issues
+        let (n, nnz_l, perm, perm_inv) = {
+            let symbolic = self.symbolic.as_ref()
+                .ok_or(MetalError::NumericFactorization(
+                    "Must call symbolic_analysis first".to_string()
+                ))?;
+            (symbolic.n, symbolic.nnz_l, symbolic.perm.clone(), symbolic.perm_inv.clone())
+        };
 
         // For now, implement a simple CPU factorization and upload to GPU
         // TODO: Implement GPU supernodal factorization
@@ -252,12 +271,13 @@ impl MetalKktBackend {
         let values_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
 
         // Permute and factorize on CPU
-        let factor_result = self.cpu_ldlt_factorize(
+        let factor_result = self.cpu_ldlt_factorize_with_perm(
             n,
             col_ptr,
             row_ind,
             &values_f32,
-            symbolic,
+            &perm,
+            &perm_inv,
         )?;
 
         // Upload to GPU
@@ -271,7 +291,7 @@ impl MetalKktBackend {
 
         Ok(MetalFactorization {
             n,
-            nnz_l: symbolic.nnz_l,
+            nnz_l,
             success: true,
             min_pivot: min_pivot as f64,
             max_pivot: max_pivot as f64,
@@ -718,29 +738,14 @@ impl MetalKktBackend {
         Ok(())
     }
 
-    /// Sparse LDL^T factorization result (CSR format for L and L^T, plus D diagonal)
-    struct SparseLdltResult {
-        // L in CSR format (for forward solve)
-        l_csr_values: Vec<f32>,
-        l_csr_col_ind: Vec<u32>,
-        l_csr_row_ptr: Vec<u32>,
-
-        // L^T in CSR format (for backward solve)
-        lt_csr_values: Vec<f32>,
-        lt_csr_col_ind: Vec<u32>,
-        lt_csr_row_ptr: Vec<u32>,
-
-        // Diagonal D
-        d: Vec<f32>,
-    }
-
-    fn cpu_ldlt_factorize(
+    fn cpu_ldlt_factorize_with_perm(
         &self,
         n: usize,
         col_ptr: &[usize],
         row_ind: &[usize],
         values: &[f32],
-        symbolic: &SymbolicAnalysis,
+        perm: &[usize],
+        perm_inv: &[usize],
     ) -> MetalResult<SparseLdltResult> {
         let pivot_min = self.handle.config().pivot_min;
 
@@ -756,10 +761,10 @@ impl MetalKktBackend {
         let mut a = vec![0.0f32; n * n];
 
         for j in 0..n {
-            let pj = symbolic.perm_inv[j]; // Original column for permuted column j
+            let pj = perm_inv[j]; // Original column for permuted column j
             for p in col_ptr[pj]..col_ptr[pj + 1] {
                 let pi = row_ind[p];
-                let i = symbolic.perm[pi]; // Permuted row
+                let i = perm[pi]; // Permuted row
                 let v = values[p];
 
                 a[i * n + j] = v;
@@ -1036,6 +1041,7 @@ impl MetalKktBackend {
 
 use crate::linalg::backend::{BackendError, KktBackend};
 use crate::linalg::sparse::SparseCsc;
+use std::cell::UnsafeCell;
 
 /// Adapter to use MetalKktBackend with the KktBackend trait.
 ///
@@ -1043,8 +1049,10 @@ use crate::linalg::sparse::SparseCsc;
 /// for QdldlBackend in the KktSolver.
 #[cfg(target_os = "macos")]
 pub struct MetalBackendAdapter {
-    inner: MetalKktBackend,
+    // Use UnsafeCell for interior mutability since solve() needs &mut but trait takes &self
+    inner: UnsafeCell<MetalKktBackend>,
     static_reg: f64,
+    #[allow(dead_code)]
     dynamic_reg_min_pivot: f64,
     n: usize,
 }
@@ -1065,7 +1073,7 @@ impl KktBackend for MetalBackendAdapter {
             .expect("Failed to create Metal backend");
 
         Self {
-            inner,
+            inner: UnsafeCell::new(inner),
             static_reg,
             dynamic_reg_min_pivot,
             n,
@@ -1093,46 +1101,46 @@ impl KktBackend for MetalBackendAdapter {
         self.n = n;
 
         // Extract CSC components
-        let col_ptr: Vec<usize> = kkt.indptr().iter().map(|&x| x).collect();
+        let col_ptr: Vec<usize> = kkt.indptr().raw_storage().iter().copied().collect();
         let row_ind: Vec<usize> = kkt.indices().iter().map(|&x| x).collect();
 
-        self.inner
+        // SAFETY: We have &mut self, so exclusive access is guaranteed
+        let inner = unsafe { &mut *self.inner.get() };
+        inner
             .symbolic_analysis(n, &col_ptr, &row_ind)
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
     fn numeric_factorization(&mut self, kkt: &SparseCsc) -> Result<Self::Factorization, BackendError> {
         // Extract CSC components
-        let col_ptr: Vec<usize> = kkt.indptr().iter().map(|&x| x).collect();
+        let col_ptr: Vec<usize> = kkt.indptr().raw_storage().iter().copied().collect();
         let row_ind: Vec<usize> = kkt.indices().iter().map(|&x| x).collect();
         let values: Vec<f64> = kkt.data().to_vec();
 
-        self.inner
+        // SAFETY: We have &mut self, so exclusive access is guaranteed
+        let inner = unsafe { &mut *self.inner.get() };
+        inner
             .numeric_factorization(&col_ptr, &row_ind, &values)
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
     fn solve(&self, _factor: &Self::Factorization, rhs: &[f64], sol: &mut [f64]) {
         // Note: MetalKktBackend stores factor internally, so we ignore the factor parameter
-        // This requires a mutable borrow, but the trait expects &self
-        // For now, we work around this by having solve use the stored factor
-
-        // SAFETY: This is a workaround for the trait signature. The Metal backend
-        // stores the factor internally and doesn't need the factor parameter.
-        // In a proper implementation, we'd want to change the trait or use interior mutability.
-        let inner_ptr = &self.inner as *const MetalKktBackend as *mut MetalKktBackend;
-        unsafe {
-            let inner_mut = &mut *inner_ptr;
-            if let Err(e) = inner_mut.solve(rhs, sol) {
-                // Log error but continue (solve trait method doesn't return Result)
-                eprintln!("[Metal] Solve error: {}", e);
-                sol.fill(0.0);
-            }
+        // SAFETY: The solve method is the only code path that mutates inner through &self.
+        // The trait design requires &self, but we need interior mutability for Metal's
+        // command buffer submission. This is safe because solve() is not reentrant.
+        let inner = unsafe { &mut *self.inner.get() };
+        if let Err(e) = inner.solve(rhs, sol) {
+            // Log error but continue (solve trait method doesn't return Result)
+            eprintln!("[Metal] Solve error: {}", e);
+            sol.fill(0.0);
         }
     }
 
     fn dynamic_bumps(&self) -> u64 {
-        self.inner.stats().dynamic_bumps
+        // SAFETY: Read-only access to stats
+        let inner = unsafe { &*self.inner.get() };
+        inner.stats().dynamic_bumps
     }
 }
 

@@ -144,7 +144,7 @@ impl SymbolicAnalysis {
         }
 
         // Extract CSC components
-        let col_ptr: Vec<usize> = mat.indptr().iter().map(|&x| x).collect();
+        let col_ptr: Vec<usize> = mat.indptr().raw_storage().iter().copied().collect();
         let row_ind: Vec<usize> = mat.indices().iter().map(|&x| x).collect();
 
         Self::analyze(n, &col_ptr, &row_ind, ordering)
