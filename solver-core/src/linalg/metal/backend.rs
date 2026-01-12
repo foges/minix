@@ -1222,4 +1222,132 @@ mod tests {
         assert!((solution[0] - 1.0).abs() < 1e-5, "x[0] = {}", solution[0]);
         assert!((solution[1] - 1.0).abs() < 1e-5, "x[1] = {}", solution[1]);
     }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_indefinite_kkt_like() {
+        // Test with a small indefinite matrix similar to KKT systems
+        // KKT systems have the form:
+        // [P   A^T]
+        // [A   -D ]
+        // where P is positive semidefinite and D is positive diagonal
+        let backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return, // Skip if no Metal device
+        };
+
+        // 3x3 indefinite matrix (2-1 structure):
+        // [ 2  1  1]
+        // [ 1  2  0]
+        // [ 1  0 -1]
+        // This is indefinite (has positive and negative eigenvalues)
+        let n = 3;
+        let col_ptr = vec![0, 3, 5, 7];
+        let row_ind = vec![0, 1, 2, 0, 1, 0, 2];
+        let values: Vec<f64> = vec![2.0, 1.0, 1.0, 1.0, 2.0, 1.0, -1.0];
+
+        let mut backend = backend;
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+        let _factor = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+
+        // Solve for known RHS
+        let rhs = vec![4.0, 3.0, 0.0];
+        let mut solution = vec![0.0; 3];
+        backend.solve(&rhs, &mut solution).unwrap();
+
+        // Verify Ax = b by computing residual
+        let mut residual = rhs.clone();
+        // Manual symmetric matrix-vector product
+        for col in 0..n {
+            for p in col_ptr[col]..col_ptr[col + 1] {
+                let row = row_ind[p];
+                let val = values[p];
+                residual[row] -= val * solution[col];
+                if row != col {
+                    residual[col] -= val * solution[row];
+                }
+            }
+        }
+
+        let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(res_norm < 1e-4, "Residual too large: {}", res_norm);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_larger_spd() {
+        // 5x5 SPD tridiagonal matrix
+        let backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        let n = 5;
+        // Tridiagonal: 2 on diagonal, -1 on off-diagonals (lower triangle in CSC)
+        let col_ptr = vec![0, 2, 4, 6, 8, 9];
+        let row_ind = vec![0, 1, 1, 2, 2, 3, 3, 4, 4];
+        let values: Vec<f64> = vec![2.0, -1.0, 2.0, -1.0, 2.0, -1.0, 2.0, -1.0, 2.0];
+
+        let mut backend = backend;
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+        let _factor = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+
+        // RHS that gives nice solution
+        let rhs = vec![1.0, 0.0, 0.0, 0.0, 1.0];
+        let mut solution = vec![0.0; n];
+        backend.solve(&rhs, &mut solution).unwrap();
+
+        // Verify with residual check
+        let mut residual = rhs.clone();
+        for col in 0..n {
+            for p in col_ptr[col]..col_ptr[col + 1] {
+                let row = row_ind[p];
+                let val = values[p];
+                residual[row] -= val * solution[col];
+                if row != col {
+                    residual[col] -= val * solution[row];
+                }
+            }
+        }
+
+        let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(res_norm < 1e-4, "Residual too large: {}", res_norm);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_refactorization() {
+        // Test that we can refactorize with different values
+        let backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        let n = 2;
+        let col_ptr = vec![0, 2, 4];
+        let row_ind = vec![0, 1, 0, 1];
+
+        let mut backend = backend;
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+
+        // First factorization
+        let values1: Vec<f64> = vec![4.0, 1.0, 1.0, 3.0];
+        let _f1 = backend.numeric_factorization(&col_ptr, &row_ind, &values1).unwrap();
+
+        let rhs1 = vec![5.0, 4.0];
+        let mut sol1 = vec![0.0; 2];
+        backend.solve(&rhs1, &mut sol1).unwrap();
+
+        // Second factorization with different values
+        let values2: Vec<f64> = vec![2.0, 0.5, 0.5, 2.0];
+        let _f2 = backend.numeric_factorization(&col_ptr, &row_ind, &values2).unwrap();
+
+        let rhs2 = vec![2.5, 2.5];
+        let mut sol2 = vec![0.0; 2];
+        backend.solve(&rhs2, &mut sol2).unwrap();
+
+        // Both should give approximately [1, 1]
+        assert!((sol1[0] - 1.0).abs() < 1e-4, "sol1[0] = {}", sol1[0]);
+        assert!((sol2[0] - 1.0).abs() < 1e-4, "sol2[0] = {}", sol2[0]);
+    }
 }
