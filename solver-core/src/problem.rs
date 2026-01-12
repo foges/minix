@@ -208,15 +208,21 @@ pub struct SolverSettings {
     /// Adds P[j,j] += rho for variables with zero A-column and zero q[j].
     /// Helps stabilize Newton system for degenerate SDPs. Set to 0 to disable.
     pub proximal_rho: f64,
+
+    /// Enable chordal decomposition for sparse SDPs.
+    /// Decomposes large PSD cones into smaller overlapping ones based on sparsity.
+    /// None = auto (enabled for PSD cones >= 10), Some(false) = disable.
+    pub chordal_decomp: Option<bool>,
 }
 
 impl Default for SolverSettings {
     fn default() -> Self {
         // Allow environment variable override for refinement iterations
+        // Default to 10 (matching CLARABEL) for better accuracy on ill-conditioned problems
         let kkt_refine_iters = std::env::var("MINIX_REFINE_ITERS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(2);
+            .unwrap_or(10);
 
         // Allow environment variable override for Ruiz scaling iterations
         // Set MINIX_RUIZ_ITERS=0 to disable scaling entirely
@@ -224,6 +230,10 @@ impl Default for SolverSettings {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(10);
+        let mcc_iters = std::env::var("MINIX_MCC_ITERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
 
         Self {
             max_iter: 100,
@@ -237,7 +247,7 @@ impl Default for SolverSettings {
             dynamic_reg_min_pivot: 1e-13,
             kkt_refine_iters,
             feas_weight_floor: 0.05,
-            mcc_iters: 0,
+            mcc_iters,
             centrality_beta: 0.1,
             centrality_gamma: 10.0,
             sigma_max: 0.999,
@@ -256,6 +266,10 @@ impl Default for SolverSettings {
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(1e-4),  // Default: enabled with rho=1e-4
+            // Chordal decomposition for sparse SDPs - auto-enable by default
+            chordal_decomp: std::env::var("MINIX_CHORDAL")
+                .ok()
+                .map(|s| s != "0" && s.to_lowercase() != "false"),
         }
     }
 }

@@ -68,6 +68,7 @@ pub mod ipm2;
 pub mod presolve;
 pub mod postsolve;
 pub mod util;
+pub mod chordal;
 
 // Re-export main types
 pub use problem::{

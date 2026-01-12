@@ -59,6 +59,36 @@ fn kkt_diagnostics_enabled() -> bool {
     })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KktRefineMode {
+    Regularized,
+    QdldlDebias,
+    FullUnreg,
+}
+
+fn kkt_refine_mode() -> KktRefineMode {
+    static MODE: OnceLock<KktRefineMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        if let Ok(v) = std::env::var("MINIX_KKT_REFINE_MODE") {
+            match v.to_lowercase().as_str() {
+                "off" | "0" | "false" | "regularized" => KktRefineMode::Regularized,
+                "full" | "unreg" | "unregularized" => KktRefineMode::FullUnreg,
+                "qdldl" | "debias" | "debiased" => KktRefineMode::QdldlDebias,
+                _ => KktRefineMode::QdldlDebias,
+            }
+        } else if let Ok(v) = std::env::var("MINIX_KKT_UNREG_REFINE") {
+            if v == "0" || v.to_lowercase() == "false" {
+                KktRefineMode::Regularized
+            } else {
+                KktRefineMode::FullUnreg
+            }
+        } else {
+            // Default to full unregularized refinement for better accuracy on ill-conditioned problems (SDPs)
+            KktRefineMode::FullUnreg
+        }
+    })
+}
+
 fn psd_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -244,6 +274,7 @@ fn solve_permuted_with_refinement<B: KktBackend>(
     factor: &B::Factorization,
     rhs_kind: RhsPermKind,
     refine_iters: usize,
+    reg_diag_sign: Option<&[f64]>,
     tag: Option<&'static str>,
 ) {
     let rhs_perm = match rhs_kind {
@@ -251,6 +282,7 @@ fn solve_permuted_with_refinement<B: KktBackend>(
         RhsPermKind::Secondary => &ws.rhs_perm2,
     };
     let kkt_dim = rhs_perm.len();
+    let use_adjust = reg_diag_sign.is_some() && static_reg != 0.0;
 
     backend.solve(factor, rhs_perm, &mut ws.sol_perm);
 
@@ -266,6 +298,12 @@ fn solve_permuted_with_refinement<B: KktBackend>(
                 }
                 for i in 0..kkt_dim {
                     ws.res[i] = rhs_perm[i] - ws.kx[i];
+                }
+                if use_adjust {
+                    let reg_sign = reg_diag_sign.unwrap();
+                    for i in 0..kkt_dim {
+                        ws.res[i] += static_reg * reg_sign[i] * ws.sol_perm[i];
+                    }
                 }
 
                 let res_norm = ws
@@ -298,6 +336,12 @@ fn solve_permuted_with_refinement<B: KktBackend>(
                 }
                 for i in 0..kkt_dim {
                     ws.res[i] = rhs_perm[i] - ws.kx[i];
+                }
+                if use_adjust {
+                    let reg_sign = reg_diag_sign.unwrap();
+                    for i in 0..kkt_dim {
+                        ws.res[i] += static_reg * reg_sign[i] * ws.sol_perm[i];
+                    }
                 }
                 let res_inf = ws
                     .res
@@ -879,6 +923,9 @@ pub struct KktSolverImpl<B: KktBackend> {
     /// Workspace to make repeated solves allocation-free.
     solve_ws: SolveWorkspace,
 
+    /// Regularization sign pattern (permuted) for unregularized refinement.
+    reg_diag_sign: Vec<f64>,
+
     /// Cached KKT positions for H block updates (used for non-diagonal blocks).
     h_block_positions: Option<Vec<HBlockPositions>>,
 
@@ -972,6 +1019,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
             perm_inv: None,
             h_diag_positions: None,
             solve_ws: SolveWorkspace::new(n, m_reduced),
+            reg_diag_sign: vec![0.0; kkt_dim],
             h_block_positions: None,
             soc_scratch: SocKktScratch::new(0),
             singleton,
@@ -1637,9 +1685,16 @@ impl<B: KktBackend> KktSolverImpl<B> {
     ) {
         assert_eq!(rhs_x.len(), self.n);
         assert_eq!(sol_x.len(), self.n);
+        let static_reg = self.static_reg;
+        let refine_mode = kkt_refine_mode();
+        let reg_diag_sign = if refine_mode != KktRefineMode::Regularized && static_reg != 0.0 {
+            self.fill_reg_diag_sign(refine_mode);
+            Some(self.reg_diag_sign.as_slice())
+        } else {
+            None
+        };
         let perm = self.perm.as_deref();
         let perm_inv = self.perm_inv.as_deref();
-        let static_reg = self.static_reg;
         let kkt = self.kkt_mat.as_ref();
         let backend = &self.backend;
         let ws = &mut self.solve_ws;
@@ -1657,6 +1712,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
+                reg_diag_sign,
                 tag,
             );
             unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x, &mut ws.sol_z);
@@ -1673,6 +1729,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
+                reg_diag_sign,
                 tag,
             );
             unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x, sol_z);
@@ -1800,9 +1857,16 @@ impl<B: KktBackend> KktSolverImpl<B> {
         assert_eq!(rhs_x2.len(), self.n);
         assert_eq!(sol_x1.len(), self.n);
         assert_eq!(sol_x2.len(), self.n);
+        let static_reg = self.static_reg;
+        let refine_mode = kkt_refine_mode();
+        let reg_diag_sign = if refine_mode != KktRefineMode::Regularized && static_reg != 0.0 {
+            self.fill_reg_diag_sign(refine_mode);
+            Some(self.reg_diag_sign.as_slice())
+        } else {
+            None
+        };
         let perm = self.perm.as_deref();
         let perm_inv = self.perm_inv.as_deref();
-        let static_reg = self.static_reg;
         let kkt = self.kkt_mat.as_ref();
         let backend = &self.backend;
         let ws = &mut self.solve_ws;
@@ -1823,6 +1887,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
+                reg_diag_sign,
                 tag1,
             );
             unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x1, &mut ws.sol_z);
@@ -1838,6 +1903,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 factor,
                 RhsPermKind::Secondary,
                 refine_iters,
+                reg_diag_sign,
                 tag2,
             );
             unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x2, &mut ws.sol_z);
@@ -1867,6 +1933,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
+                reg_diag_sign,
                 tag1,
             );
             unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x1, sol_z1);
@@ -1879,9 +1946,39 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 factor,
                 RhsPermKind::Secondary,
                 refine_iters,
+                reg_diag_sign,
                 tag2,
             );
             unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x2, sol_z2);
+        }
+    }
+
+    fn fill_reg_diag_sign(&mut self, mode: KktRefineMode) {
+        let kkt_dim = self.n + self.m;
+        if self.reg_diag_sign.len() != kkt_dim {
+            self.reg_diag_sign.resize(kkt_dim, 0.0);
+        }
+        let (primal_sign, dual_sign) = match mode {
+            KktRefineMode::Regularized => (0.0, 0.0),
+            KktRefineMode::QdldlDebias => (1.0, 0.0),
+            KktRefineMode::FullUnreg => (2.0, -1.0),
+        };
+        if let Some(perm) = self.perm.as_ref() {
+            for new_idx in 0..kkt_dim {
+                let old_idx = perm[new_idx];
+                self.reg_diag_sign[new_idx] = if old_idx < self.n {
+                    primal_sign
+                } else {
+                    dual_sign
+                };
+            }
+        } else {
+            for i in 0..self.n {
+                self.reg_diag_sign[i] = primal_sign;
+            }
+            for i in self.n..kkt_dim {
+                self.reg_diag_sign[i] = dual_sign;
+            }
         }
     }
 

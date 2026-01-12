@@ -7,6 +7,7 @@
 use std::time::Instant;
 
 use crate::cones::{ConeKernel, NonNegCone, SocCone, ZeroCone, ExpCone, PowCone, PsdCone};
+use crate::cones::psd::svec_to_mat;
 use crate::ipm::hsde::{HsdeResiduals, HsdeState, compute_mu, compute_residuals};
 use crate::ipm::termination::TerminationCriteria;
 use crate::ipm2::{
@@ -17,6 +18,7 @@ use crate::ipm2::{
 use crate::ipm2::predcorr::predictor_corrector_step_in_place;
 use crate::linalg::kkt_trait::KktSolverTrait;
 use crate::linalg::unified_kkt::UnifiedKktSolver;
+use crate::chordal::{ChordalSettings, analyze_problem as analyze_chordal, decompose_problem};
 use crate::presolve::apply_presolve;
 use crate::presolve::proximal::{detect_free_variables_eq, add_proximal_regularization};
 use crate::presolve::ruiz::equilibrate;
@@ -25,6 +27,7 @@ use crate::postsolve::PostsolveMap;
 use crate::problem::{
     ConeSpec, ProblemData, SolveInfo, SolveResult, SolveStatus, SolverSettings,
 };
+use nalgebra::linalg::SymmetricEigen;
 
 /// Check if CLARABEL-style HSDE rescaling by max(tau, kappa) is enabled.
 ///
@@ -37,6 +40,133 @@ fn hsde_rescale_by_max() -> bool {
             .map(|v| v.to_lowercase() != "threshold")
             .unwrap_or(true)  // Default: use max-based rescaling
     })
+}
+
+fn psd_reg_strict_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MINIX_PSD_REG_STRICT")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
+fn psd_reg_dynamic_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MINIX_PSD_REG_DYNAMIC")
+            .map(|v| v != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn psd_reg_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MINIX_PSD_REG_LOG")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false)
+    })
+}
+
+fn psd_diag_avg_abs(svec: &[f64], n: usize) -> f64 {
+    let mut sum = 0.0;
+    let mut idx = 0usize;
+    for j in 0..n {
+        for i in 0..=j {
+            if i == j {
+                sum += svec[idx].abs();
+            }
+            idx += 1;
+        }
+    }
+    if n == 0 { 0.0 } else { sum / n as f64 }
+}
+
+fn psd_scale_from_state(state: &HsdeState, cones: &[Box<dyn ConeKernel>]) -> Option<f64> {
+    let mut offset = 0usize;
+    let mut total = 0.0;
+    let mut count = 0usize;
+
+    for cone in cones {
+        let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+        if cone.barrier_degree() == 0 {
+            offset += dim;
+            continue;
+        }
+
+        let is_psd = (cone.as_ref() as &dyn std::any::Any).is::<PsdCone>();
+        if is_psd {
+            let n = if let Some(psd) = (cone.as_ref() as &dyn std::any::Any).downcast_ref::<PsdCone>() {
+                psd.size()
+            } else {
+                offset += dim;
+                continue;
+            };
+            let s_block = &state.s[offset..offset + dim];
+            let z_block = &state.z[offset..offset + dim];
+            let s_avg = psd_diag_avg_abs(s_block, n);
+            let z_avg = psd_diag_avg_abs(z_block, n);
+            let scale = 0.5 * (s_avg + z_avg);
+            if scale.is_finite() && scale > 0.0 {
+                total += scale;
+                count += 1;
+            }
+        }
+
+        offset += dim;
+    }
+
+    if count == 0 { None } else { Some(total / count as f64) }
+}
+
+fn psd_min_eigs_from_state(state: &HsdeState, cones: &[Box<dyn ConeKernel>]) -> Option<(f64, f64)> {
+    let mut offset = 0usize;
+    let mut min_s = f64::INFINITY;
+    let mut min_z = f64::INFINITY;
+    let mut found = false;
+
+    for cone in cones {
+        let dim = cone.dim();
+        if dim == 0 {
+            continue;
+        }
+        if cone.barrier_degree() == 0 {
+            offset += dim;
+            continue;
+        }
+
+        if let Some(psd) = (cone.as_ref() as &dyn std::any::Any).downcast_ref::<PsdCone>() {
+            let n = psd.size();
+            let s_block = &state.s[offset..offset + dim];
+            let z_block = &state.z[offset..offset + dim];
+
+            let s_mat = svec_to_mat(s_block, n);
+            let z_mat = svec_to_mat(z_block, n);
+            let eig_s = SymmetricEigen::new(s_mat);
+            let eig_z = SymmetricEigen::new(z_mat);
+
+            if let Some(&val) = eig_s.eigenvalues.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+                if val.is_finite() {
+                    min_s = min_s.min(val);
+                    found = true;
+                }
+            }
+            if let Some(&val) = eig_z.eigenvalues.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+                if val.is_finite() {
+                    min_z = min_z.min(val);
+                    found = true;
+                }
+            }
+        }
+
+        offset += dim;
+    }
+
+    if found { Some((min_s, min_z)) } else { None }
 }
 
 /// Main ipm2 solver entry point.
@@ -144,6 +274,48 @@ pub fn solve_ipm2(
         integrality: prob.integrality.clone(),
     };
 
+    // Apply chordal decomposition for sparse SDPs
+    // NOTE: Chordal decomposition transform is incomplete - disable for now
+    // The transform_problem function doesn't properly expand the constraint matrix
+    // TODO: Complete the chordal constraint matrix expansion
+    let chordal_settings = ChordalSettings {
+        enabled: false, // Disabled until transform is complete
+        min_size: 10,
+        ..Default::default()
+    };
+    let chordal_analysis = analyze_chordal(&scaled_prob, &chordal_settings);
+    if settings.verbose {
+        // Count PSD cones
+        let psd_cones: Vec<_> = scaled_prob.cones.iter()
+            .filter_map(|c| if let ConeSpec::Psd { n } = c { Some(*n) } else { None })
+            .collect();
+        if !psd_cones.is_empty() {
+            eprintln!(
+                "chordal: PSD cones {:?}, decompositions found: {}, beneficial: {}",
+                psd_cones, chordal_analysis.decompositions.len(), chordal_analysis.beneficial
+            );
+        }
+    }
+    let (scaled_prob, chordal_decomposed) = if chordal_analysis.beneficial {
+        if settings.verbose {
+            eprintln!(
+                "chordal: decomposing {} PSD cone(s) into {} cliques",
+                chordal_analysis.decomposed_cones.len(),
+                chordal_analysis.total_cliques
+            );
+        }
+        decompose_problem(&scaled_prob, &chordal_analysis)
+    } else {
+        (scaled_prob, crate::chordal::DecomposedPsd {
+            decompositions: vec![],
+            original_cone_indices: vec![],
+            cone_mapping: vec![],
+            new_cone_offsets: vec![],
+            num_overlap_constraints: 0,
+        })
+    };
+    let _ = &chordal_decomposed; // Will use later for solution recovery
+
     // Normal equations are now automatically used by UnifiedKktSolver
     // when appropriate (m > 5n, n <= 500, Zero+NonNeg cones only).
 
@@ -196,10 +368,9 @@ pub fn solve_ipm2(
     stall.polish_mu_thresh = (settings.tol_gap * 100.0).max(1e-12);
     let mut solve_mode = SolveMode::Normal;
     let mut reg_policy = RegularizationPolicy::default();
-    // For PSD cones, the H diagonal is ~1 at initialization. Using tiny regularization
-    // (1e-8) causes huge Schur complement pivots in LDLT, leading to numerical errors.
-    // Detect PSD cones and use larger regularization (sqrt(eps) * H_scale).
-    // For exp cones, the BFGS scaling can also produce ill-conditioned matrices.
+    // PSD cones are sensitive to over-regularization; keep the floor small
+    // and scale regularization relative to the PSD block magnitude.
+    // Exp cones can still require stronger regularization due to BFGS scaling.
     let has_psd = cones.iter().any(|c| {
         use std::any::Any;
         (c.as_ref() as &dyn Any).is::<crate::cones::PsdCone>()
@@ -208,20 +379,69 @@ pub fn solve_ipm2(
         use std::any::Any;
         (c.as_ref() as &dyn Any).is::<crate::cones::ExpCone>()
     });
-    let base_reg = if has_exp {
-        // For Exp cones, BFGS scaling is prone to ill-conditioning; use strong regularization
-        settings.static_reg.max(1e-3)
-    } else if has_psd {
-        // For PSD cones, use 1e-4 (sqrt of typical 1e-8) to match H diagonal scale
-        settings.static_reg.max(1e-4)
+    let psd_reg_floor = std::env::var("MINIX_PSD_REG_FLOOR")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(1e-8);
+    let psd_reg_eps_env = std::env::var("MINIX_PSD_REG_EPS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok());
+    let mut psd_reg_cap = std::env::var("MINIX_PSD_REG_CAP")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(1e-6);
+    if !psd_reg_cap.is_finite() || psd_reg_cap <= 0.0 {
+        psd_reg_cap = 1e-6;
+    }
+    psd_reg_cap = psd_reg_cap.max(psd_reg_floor);
+
+    let psd_reg_strict = psd_reg_strict_enabled();
+    let psd_reg_dynamic = psd_reg_dynamic_enabled();
+
+    let psd_scale_init = if has_psd {
+        psd_scale_from_state(&state, &cones).unwrap_or(1.0)
     } else {
-        settings.static_reg.max(1e-8)
+        1.0
     };
-    reg_policy.static_reg = base_reg;
+    let mut psd_reg_eps = psd_reg_eps_env.unwrap_or_else(|| {
+        let scale = psd_scale_init.max(1.0);
+        settings.static_reg / scale
+    });
+    if !psd_reg_eps.is_finite() || psd_reg_eps < 0.0 {
+        psd_reg_eps = settings.static_reg;
+    }
+    let mut reg_scale = if has_psd { psd_scale_init } else { 1.0 };
+    if has_exp {
+        reg_scale = 1.0;
+    }
+
+    if has_exp {
+        // For Exp cones, BFGS scaling is prone to ill-conditioning; use strong regularization.
+        reg_policy.static_reg = settings.static_reg.max(1e-3);
+    } else if has_psd {
+        // For PSD cones, use a relative regularization: δ = eps * scale, clamped by floor/cap.
+        reg_policy.static_reg = psd_reg_eps;
+        reg_policy.static_reg_min = reg_policy.static_reg_min.max(psd_reg_floor);
+        reg_policy.static_reg_max = reg_policy.static_reg_max.min(psd_reg_cap);
+    } else {
+        reg_policy.static_reg = settings.static_reg.max(1e-8);
+    }
     reg_policy.dynamic_min_pivot = settings.dynamic_reg_min_pivot;
     reg_policy.polish_static_reg =
         (reg_policy.static_reg * 0.01).max(reg_policy.static_reg_min);
-    let mut reg_state = reg_policy.init_state(1.0);
+    let mut reg_state = reg_policy.init_state(reg_scale);
+    if has_psd && diag.is_debug() {
+        eprintln!(
+            "psd_reg init: eps={:.3e} floor={:.3e} cap={:.3e} scale={:.3e} eff={:.3e} strict={} dynamic={}",
+            reg_policy.static_reg,
+            reg_policy.static_reg_min,
+            reg_policy.static_reg_max,
+            reg_scale,
+            reg_state.static_reg_eff,
+            psd_reg_strict,
+            psd_reg_dynamic,
+        );
+    }
     // Compute correct full size for s/z recovery (postsolve may change bound count)
     let sz_full_len = postsolve.expected_sz_full_len(m);
     let mut ws = IpmWorkspace::new_with_sz_len(n, m, orig_n, sz_full_len);
@@ -269,9 +489,7 @@ pub fn solve_ipm2(
 
     let start = Instant::now();
     let mut early_polish_result: Option<(crate::ipm2::polish::PolishResult, crate::ipm2::UnscaledMetrics)> = None;
-    // Use fixed regularization (like ipm1) instead of scaling-dependent regularization.
-    // This avoids regularization drift on problems with extreme cost_scale.
-    let reg_scale = 1.0;
+    // Regularization scale: fixed unless MINIX_PSD_REG_DYNAMIC=1 and PSD cones are present.
 
     // P1.1: Progress-based iteration budget for large problems
     // Use ORIGINAL dimensions (before presolve) to classify problem size
@@ -307,24 +525,34 @@ pub fn solve_ipm2(
                 iter, unscaled.rel_p, unscaled.rel_d, unscaled.gap, unscaled.gap_rel, mu);
         }
 
+        if has_psd && psd_reg_dynamic {
+            if let Some(scale) = psd_scale_from_state(&state, &cones) {
+                reg_scale = scale;
+            }
+        }
+
         reg_state.static_reg_eff = reg_policy
             .effective_static_reg(reg_scale)
             .max(kkt.static_reg());
-        // Base refinement from settings, plus adaptive boost for stagnation
+        let allow_reg_bumps = !(has_psd && psd_reg_strict);
+
+        // Base refinement from settings, plus adaptive boost for stagnation.
         reg_state.refine_iters = settings.kkt_refine_iters + adaptive_refine_iters;
         match solve_mode {
             SolveMode::Normal => {}
             SolveMode::StallRecovery => {
                 reg_state.refine_iters =
                     (reg_state.refine_iters + 2).min(reg_policy.max_refine_iters);
-                reg_state.static_reg_eff = (reg_state.static_reg_eff * 10.0)
-                    .min(reg_policy.static_reg_max);
+                if allow_reg_bumps {
+                    reg_state.static_reg_eff = (reg_state.static_reg_eff * 10.0)
+                        .min(reg_policy.static_reg_max);
+                }
             }
             SolveMode::Polish => {
                 // V19: If dual is stalling, increase regularization BEFORE enter_polish()
                 // This helps BOYD-class problems where Polish triggers before StallRecovery
-                if stall.dual_stalling() {
-                    // Increase static_reg aggressively (10x per iteration, capped at 1e-4)
+                if stall.dual_stalling() && allow_reg_bumps {
+                    // Increase static_reg aggressively (10x per iteration, capped by policy)
                     reg_state.static_reg_eff = (reg_state.static_reg_eff * 10.0)
                         .min(reg_policy.static_reg_max);
                     if diag.should_log(iter) {
@@ -341,9 +569,11 @@ pub fn solve_ipm2(
         // If we recently hit numerical failures, temporarily ramp up regularization and
         // iterative refinement. This often turns a hard failure into a slow-but-robust step.
         if numeric_recovery_level > 0 {
-            let bump_factor = 10.0_f64.powi(numeric_recovery_level as i32);
-            reg_state.static_reg_eff =
-                (reg_state.static_reg_eff * bump_factor).min(reg_policy.static_reg_max);
+            if allow_reg_bumps {
+                let bump_factor = 10.0_f64.powi(numeric_recovery_level as i32);
+                reg_state.static_reg_eff =
+                    (reg_state.static_reg_eff * bump_factor).min(reg_policy.static_reg_max);
+            }
             reg_state.refine_iters = (reg_state.refine_iters + 2 * numeric_recovery_level)
                 .min(reg_policy.max_refine_iters);
 
@@ -915,6 +1145,21 @@ pub fn solve_ipm2(
                 metrics.gap_rel,
                 state.tau,
                 metrics.rp_inf,
+            );
+        }
+        if has_psd && (diag.is_debug() || psd_reg_log_enabled()) && diag.should_log(iter) {
+            let (min_eig_s, min_eig_z) = psd_min_eigs_from_state(&state, &cones)
+                .unwrap_or((f64::NAN, f64::NAN));
+            let hit_cap = reg_state.static_reg_eff >= reg_policy.static_reg_max * 0.999;
+            eprintln!(
+                "  psd_reg: eff={:.3e} floor={:.3e} cap={:.3e} scale={:.3e} min_eig_s={:.3e} min_eig_z={:.3e} hit_cap={}",
+                reg_state.static_reg_eff,
+                reg_policy.static_reg_min,
+                reg_policy.static_reg_max,
+                reg_scale,
+                min_eig_s,
+                min_eig_z,
+                hit_cap,
             );
         }
 
