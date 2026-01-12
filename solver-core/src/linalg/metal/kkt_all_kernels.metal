@@ -148,7 +148,7 @@ kernel void dot_partial_f32(
     device const float* b       [[buffer(1)]],
     device float*       partial [[buffer(2)]],
     constant uint&      n       [[buffer(3)]],
-    uint gid [[thread_position_in_grid]],
+    uint3 gid [[thread_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint3 tpg [[threads_per_grid]],
     uint3 tgpos [[threadgroup_position_in_grid]]
@@ -156,9 +156,10 @@ kernel void dot_partial_f32(
     threadgroup float scratch[HSDE_TG_SIZE];
 
     const uint stride = tpg.x;
+    const uint gid_x = gid.x;
 
     float sum = 0.0f;
-    for (uint i = gid; i < n; i += stride) {
+    for (uint i = gid_x; i < n; i += stride) {
         sum += a[i] * b[i];
     }
 
@@ -182,7 +183,7 @@ kernel void reduce_sum_partial_f32(
     device const float* in_partial  [[buffer(0)]],
     device float*       out_partial [[buffer(1)]],
     constant uint&      n           [[buffer(2)]],
-    uint gid [[thread_position_in_grid]],
+    uint3 gid [[thread_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint3 tpg [[threads_per_grid]],
     uint3 tgpos [[threadgroup_position_in_grid]]
@@ -190,9 +191,10 @@ kernel void reduce_sum_partial_f32(
     threadgroup float scratch[HSDE_TG_SIZE];
 
     const uint stride = tpg.x;
+    const uint gid_x = gid.x;
 
     float sum = 0.0f;
-    for (uint i = gid; i < n; i += stride) {
+    for (uint i = gid_x; i < n; i += stride) {
         sum += in_partial[i];
     }
 

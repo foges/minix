@@ -153,7 +153,9 @@ impl DssHandle {
             kernels::PERMUTE_VEC_INV,
             // Triangular solves
             kernels::SPTRSV_LOWER_LEVEL,
+            kernels::SPTRSV_LOWER_LEVEL_UNITDIAG,
             kernels::SPTRSV_UPPER_LEVEL,
+            kernels::SPTRSV_UPPER_LEVEL_UNITDIAG,
             kernels::APPLY_DINV_INPLACE,
             // Dense supernodal
             kernels::DENSE_LDLT_BATCHED,
