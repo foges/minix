@@ -291,7 +291,8 @@ pub fn sdpa_to_conic_dual(sdpa: &SdpaData) -> Result<ProblemData, String> {
             let block_size = sdpa.block_struct[entry.block - 1];
             let row = svec_index(entry.i, entry.j, block_size, offset);
             let scale = svec_scale(entry.i, entry.j, block_size);
-            triplets.push((row, col, entry.value * scale));
+            // Negate: A[:, i] = -svec(Fi) for the dual form
+            triplets.push((row, col, -entry.value * scale));
         }
     }
     let a = sparse::from_triplets(total_dim, sdpa.m_dim, triplets);

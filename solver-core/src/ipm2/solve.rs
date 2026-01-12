@@ -275,14 +275,17 @@ pub fn solve_ipm2(
     };
 
     // Apply chordal decomposition for sparse SDPs
-    // NOTE: Chordal decomposition transform is incomplete - disable for now
-    // The transform_problem function doesn't properly expand the constraint matrix
-    // TODO: Complete the chordal constraint matrix expansion
+    // NOTE: Chordal decomposition transform is implemented but causes termination
+    // issues due to condition number explosion. Disabled by default for now.
+    let chordal_enabled = std::env::var("MINIX_CHORDAL")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false); // Disabled by default until termination is fixed
     let chordal_settings = ChordalSettings {
-        enabled: false, // Disabled until transform is complete
+        enabled: chordal_enabled,
         min_size: 10,
         ..Default::default()
     };
+    let original_cones = scaled_prob.cones.clone(); // Save for solution recovery
     let chordal_analysis = analyze_chordal(&scaled_prob, &chordal_settings);
     if settings.verbose {
         // Count PSD cones
@@ -296,6 +299,7 @@ pub fn solve_ipm2(
             );
         }
     }
+    let original_slack_dim: usize = scaled_prob.cones.iter().map(|c| c.dim()).sum();
     let (scaled_prob, chordal_decomposed) = if chordal_analysis.beneficial {
         if settings.verbose {
             eprintln!(
@@ -311,10 +315,53 @@ pub fn solve_ipm2(
             original_cone_indices: vec![],
             cone_mapping: vec![],
             new_cone_offsets: vec![],
+            original_cone_offsets: vec![],
             num_overlap_constraints: 0,
+            new_slack_dim: original_slack_dim,
+            original_slack_dim,
         })
     };
-    let _ = &chordal_decomposed; // Will use later for solution recovery
+    let _ = (&chordal_decomposed, &original_cones); // Will use for solution recovery
+
+    // Update problem dimensions after chordal decomposition
+    let n = scaled_prob.num_vars();
+    let m = scaled_prob.num_constraints();
+
+    // Transform scaling vectors if chordal decomposition was applied
+    let scaling = if chordal_decomposed.decompositions.is_empty() {
+        scaling
+    } else {
+        // Build new row_scale vector for decomposed problem
+        let mut new_row_scale = vec![1.0; m];
+
+        for (new_cone_idx, &(decomp_idx, clique_idx)) in chordal_decomposed.cone_mapping.iter().enumerate() {
+            let new_offset = chordal_decomposed.new_cone_offsets[new_cone_idx];
+
+            if decomp_idx == usize::MAX {
+                // Non-decomposed cone: direct mapping from original
+                let orig_cone_idx = clique_idx;
+                let orig_offset = chordal_decomposed.original_cone_offsets[orig_cone_idx];
+                let cone_dim = original_cones[orig_cone_idx].dim();
+                for i in 0..cone_dim {
+                    new_row_scale[new_offset + i] = scaling.row_scale[orig_offset + i];
+                }
+            } else {
+                // Decomposed cone: map from original entries via selector
+                let decomp = &chordal_decomposed.decompositions[decomp_idx];
+                let selector = &decomp.selectors[clique_idx];
+                let orig_offset = decomp.offset;
+                for (clique_svec_idx, &orig_svec_idx) in selector.to_original.iter().enumerate() {
+                    new_row_scale[new_offset + clique_svec_idx] = scaling.row_scale[orig_offset + orig_svec_idx];
+                }
+            }
+        }
+
+        crate::presolve::ruiz::RuizScaling {
+            row_scale: new_row_scale,
+            col_scale: scaling.col_scale.clone(),
+            cost_scale: scaling.cost_scale,
+        }
+    };
 
     // Normal equations are now automatically used by UnifiedKktSolver
     // when appropriate (m > 5n, n <= 500, Zero+NonNeg cones only).
@@ -510,19 +557,43 @@ pub fn solve_ipm2(
             compute_residuals(&scaled_prob, &state, &mut residuals);
         }
 
-        // Verbose iteration logging at Debug level (MINIX_VERBOSE=3)
-        if diag.is_debug() && (iter >= 25 && iter <= 30 || iter % 10 == 0) {
-            let mu = compute_mu(&state, barrier_degree);
+        // CLARABEL-style iteration logging (always in verbose mode)
+        // Print header on first iteration
+        if diag.is_verbose() && iter == 0 {
+            eprintln!("{:>4} {:>12} {:>12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8}",
+                "iter", "pcost", "dcost", "gap", "pres", "dres", "k/t", "μ", "step");
+            eprintln!("{}", "-".repeat(94));
+        }
+
+        // Compute and print metrics every iteration in verbose mode
+        let current_mu = compute_mu(&state, barrier_degree);
+        if diag.is_verbose() {
             let mut rp_temp = vec![0.0; m];
             let mut rd_temp = vec![0.0; n];
             let mut px_temp = vec![0.0; n];
             let unscaled = compute_unscaled_metrics(
-                &prob.A, prob.P.as_ref(), &prob.q, &prob.b,
+                &scaled_prob.A, scaled_prob.P.as_ref(), &scaled_prob.q, &scaled_prob.b,
                 &state.x, &state.s, &state.z,
                 &mut rp_temp, &mut rd_temp, &mut px_temp,
             );
-            eprintln!("Iter {:3}: r_p={:.3e} r_d={:.3e} gap={:.3e} gap_rel={:.3e} mu={:.3e}",
-                iter, unscaled.rel_p, unscaled.rel_d, unscaled.gap, unscaled.gap_rel, mu);
+            let kt = state.kappa / state.tau.max(1e-12);
+            eprintln!("{:4} {:12.4e} {:12.4e} {:10.2e} {:10.2e} {:10.2e} {:10.2e} {:10.2e} {:>8}",
+                iter, unscaled.obj_p, unscaled.obj_d, unscaled.gap, unscaled.rel_p, unscaled.rel_d,
+                kt, current_mu, "------");
+        }
+
+        // Debug level logging (MINIX_VERBOSE=3) - more detailed
+        if diag.is_debug() && (iter >= 25 && iter <= 30 || iter % 10 == 0) {
+            let mut rp_temp = vec![0.0; m];
+            let mut rd_temp = vec![0.0; n];
+            let mut px_temp = vec![0.0; n];
+            let unscaled = compute_unscaled_metrics(
+                &scaled_prob.A, scaled_prob.P.as_ref(), &scaled_prob.q, &scaled_prob.b,
+                &state.x, &state.s, &state.z,
+                &mut rp_temp, &mut rd_temp, &mut px_temp,
+            );
+            eprintln!("  [debug] tau={:.3e} kappa={:.3e} gap_rel={:.3e}",
+                state.tau, state.kappa, unscaled.gap_rel);
         }
 
         if has_psd && psd_reg_dynamic {
@@ -685,6 +756,14 @@ pub fn solve_ipm2(
                 continue;
             }
         };
+
+        // Update iteration line with step size (CLARABEL style)
+        if diag.is_verbose() {
+            // Overwrite the "------" with actual step size using ANSI escape (move up and overwrite)
+            // Actually, just print a continuation line with sigma and step
+            eprintln!("     sigma={:.2e} step={:.2e} alpha_sz={:.2e}",
+                step_result.sigma, step_result.alpha, step_result.alpha_sz);
+        }
 
         // Merit function check: reject steps that cause μ explosion without residual improvement.
         // This prevents HSDE scaling ray runaway (QFORPLAN-type pathology).

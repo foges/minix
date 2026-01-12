@@ -119,7 +119,7 @@ fn analyze_psd_cone(
     prob: &ProblemData,
     cone_idx: usize,
     n: usize,
-    settings: &ChordalSettings,
+    _settings: &ChordalSettings,
 ) -> Option<PsdDecomposition> {
     // Find the offset of this PSD cone in the constraint matrix
     let mut offset = 0;
@@ -142,7 +142,7 @@ fn analyze_psd_cone(
     let clique_tree = CliqueTree::from_chordal(&chordal);
 
     // Apply merge strategy
-    let merged = merge_cliques(&clique_tree, settings.merge_strategy);
+    let merged = merge_cliques(&clique_tree, MergeStrategy::CliqueGraph);
 
     Some(PsdDecomposition::new(n, merged, offset))
 }
@@ -161,6 +161,7 @@ pub fn recover_solution(
     x: &[f64],
     s: &[f64],
     z: &[f64],
+    original_cones: &[ConeSpec],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    decompose::recover_solution(decomposed, x, s, z)
+    decompose::recover_solution(decomposed, x, s, z, original_cones)
 }
