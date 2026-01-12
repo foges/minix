@@ -36,17 +36,30 @@ pub struct MetalKktBackend {
 /// GPU buffers for storing the LDL^T factorization.
 #[cfg(target_os = "macos")]
 struct FactorBuffers {
-    /// L factor values (CSR or dense supernodal panels).
-    l_values: metal::Buffer,
+    /// L factor values in CSR format (for forward solve).
+    l_csr_values: metal::Buffer,
+
+    /// L column indices in CSR format.
+    l_csr_col_ind: metal::Buffer,
+
+    /// L row pointers in CSR format.
+    l_csr_row_ptr: metal::Buffer,
+
+    /// L^T factor values in CSR format (for backward solve).
+    /// This is L stored in CSC format, interpreted as L^T CSR.
+    lt_csr_values: metal::Buffer,
+
+    /// L^T column indices in CSR format (L row indices).
+    lt_csr_col_ind: metal::Buffer,
+
+    /// L^T row pointers in CSR format (L column pointers).
+    lt_csr_row_ptr: metal::Buffer,
 
     /// D diagonal values.
     d_values: metal::Buffer,
 
-    /// L row indices (for CSR storage).
-    l_row_ind: metal::Buffer,
-
-    /// L column pointers (for CSR storage).
-    l_col_ptr: metal::Buffer,
+    /// Inverse diagonal (1/D) for solve phase.
+    d_inv: metal::Buffer,
 
     /// Permutation vector.
     perm: metal::Buffer,
@@ -54,8 +67,11 @@ struct FactorBuffers {
     /// Inverse permutation vector.
     perm_inv: metal::Buffer,
 
-    /// Inverse diagonal (1/D) for solve phase.
-    d_inv: metal::Buffer,
+    /// Matrix dimension.
+    n: usize,
+
+    /// Number of nonzeros in L.
+    nnz_l: usize,
 }
 
 /// GPU buffers for solve workspace.
@@ -235,8 +251,8 @@ impl MetalKktBackend {
         // Convert to f32 for GPU
         let values_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
 
-        // Permute and factorize on CPU (placeholder)
-        let (l_values, d_values) = self.cpu_ldlt_factorize(
+        // Permute and factorize on CPU
+        let factor_result = self.cpu_ldlt_factorize(
             n,
             col_ptr,
             row_ind,
@@ -245,10 +261,10 @@ impl MetalKktBackend {
         )?;
 
         // Upload to GPU
-        self.upload_factor_to_gpu(&l_values, &d_values)?;
+        self.upload_factor_to_gpu(&factor_result)?;
 
-        let min_pivot = d_values.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_pivot = d_values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min_pivot = factor_result.d.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_pivot = factor_result.d.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
         self.stats.num_numeric += 1;
         self.stats.time_numeric += start.elapsed().as_secs_f64();
@@ -311,11 +327,21 @@ impl MetalKktBackend {
         let n = symbolic.n;
         let nnz_l = symbolic.nnz_l;
 
-        let l_values = self.handle.create_buffer(nnz_l * std::mem::size_of::<f32>())?;
+        // CSR format for L (for forward solve)
+        let l_csr_values = self.handle.create_buffer(nnz_l * std::mem::size_of::<f32>())?;
+        let l_csr_col_ind = self.handle.create_buffer(nnz_l * std::mem::size_of::<u32>())?;
+        let l_csr_row_ptr = self.handle.create_buffer((n + 1) * std::mem::size_of::<u32>())?;
+
+        // L^T in CSR format (for backward solve) - same size as L
+        let lt_csr_values = self.handle.create_buffer(nnz_l * std::mem::size_of::<f32>())?;
+        let lt_csr_col_ind = self.handle.create_buffer(nnz_l * std::mem::size_of::<u32>())?;
+        let lt_csr_row_ptr = self.handle.create_buffer((n + 1) * std::mem::size_of::<u32>())?;
+
+        // Diagonal values
         let d_values = self.handle.create_buffer(n * std::mem::size_of::<f32>())?;
         let d_inv = self.handle.create_buffer(n * std::mem::size_of::<f32>())?;
-        let l_row_ind = self.handle.create_buffer(nnz_l * std::mem::size_of::<u32>())?;
-        let l_col_ptr = self.handle.create_buffer((n + 1) * std::mem::size_of::<u32>())?;
+
+        // Permutation vectors
         let perm = self.handle.create_buffer_with_data(
             &symbolic.perm.iter().map(|&p| p as u32).collect::<Vec<_>>()
         )?;
@@ -324,13 +350,18 @@ impl MetalKktBackend {
         )?;
 
         self.factor_buffers = Some(FactorBuffers {
-            l_values,
+            l_csr_values,
+            l_csr_col_ind,
+            l_csr_row_ptr,
+            lt_csr_values,
+            lt_csr_col_ind,
+            lt_csr_row_ptr,
             d_values,
-            l_row_ind,
-            l_col_ptr,
+            d_inv,
             perm,
             perm_inv,
-            d_inv,
+            n,
+            nnz_l,
         });
 
         Ok(())
@@ -432,10 +463,28 @@ impl MetalKktBackend {
             n,
         )?;
 
-        // Step 2: Forward solve (L * z = y)
-        // For level-scheduled SpTRSV, we dispatch one kernel per level
-        // Note: This is a simplified version; full implementation would use CSR factor
-        // For now, we skip GPU solve and use CPU fallback
+        // Step 2: Forward solve (L * z = y) using level-scheduled SpTRSV
+        // We dispatch one kernel per level, with synchronization between levels
+        let (level_ptr_lower, _) = &symbolic.solve_levels_lower;
+        let num_levels_lower = if level_ptr_lower.len() > 1 { level_ptr_lower.len() - 1 } else { 0 };
+
+        for level in 0..num_levels_lower {
+            let level_start = level_ptr_lower[level];
+            let level_size = level_ptr_lower[level + 1] - level_start;
+
+            if level_size > 0 {
+                self.encode_sptrsv_lower_level(
+                    command_buffer,
+                    &factor_buffers.l_csr_values,
+                    &factor_buffers.l_csr_col_ind,
+                    &factor_buffers.l_csr_row_ptr,
+                    &solve_buffers.temp_sol, // Input b (in-place, becomes y)
+                    &solve_buffers.level_rows_lower,
+                    level_start,
+                    level_size,
+                )?;
+            }
+        }
 
         // Step 3: Diagonal solve (z = D^{-1} * z)
         self.encode_dinv_apply(
@@ -445,7 +494,27 @@ impl MetalKktBackend {
             n,
         )?;
 
-        // Step 4: Backward solve (L^T * x = z) - would be level-scheduled
+        // Step 4: Backward solve (L^T * x = z) using level-scheduled SpTRSV
+        let (level_ptr_upper, _) = &symbolic.solve_levels_upper;
+        let num_levels_upper = if level_ptr_upper.len() > 1 { level_ptr_upper.len() - 1 } else { 0 };
+
+        for level in 0..num_levels_upper {
+            let level_start = level_ptr_upper[level];
+            let level_size = level_ptr_upper[level + 1] - level_start;
+
+            if level_size > 0 {
+                self.encode_sptrsv_upper_level(
+                    command_buffer,
+                    &factor_buffers.lt_csr_values,
+                    &factor_buffers.lt_csr_col_ind,
+                    &factor_buffers.lt_csr_row_ptr,
+                    &solve_buffers.temp_sol, // Input b (in-place, becomes x)
+                    &solve_buffers.level_rows_upper,
+                    level_start,
+                    level_size,
+                )?;
+            }
+        }
 
         // Step 5: Inverse permute
         // solution[perm[i]] = x[i]
@@ -466,6 +535,90 @@ impl MetalKktBackend {
         unsafe {
             std::ptr::copy_nonoverlapping(sol_ptr, solution.as_mut_ptr(), n);
         }
+
+        Ok(())
+    }
+
+    /// Encode level-scheduled lower triangular solve kernel.
+    fn encode_sptrsv_lower_level(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        l_values: &metal::Buffer,
+        l_col_ind: &metal::Buffer,
+        l_row_ptr: &metal::Buffer,
+        y: &metal::Buffer, // In-place: input b, output y
+        level_rows: &metal::Buffer,
+        level_start: usize,
+        level_size: usize,
+    ) -> MetalResult<()> {
+        let pipeline = self.handle.pipeline(super::kernels::SPTRSV_LOWER_LEVEL_UNITDIAG)
+            .ok_or(MetalError::Solve("Missing sptrsv_lower_level pipeline".to_string()))?;
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+
+        // Buffer layout matches kernel signature:
+        // buffer(0): values, buffer(1): col_indices, buffer(2): row_ptr,
+        // buffer(3): b (input), buffer(4): y (output, same buffer for in-place)
+        // buffer(5): level_rows, buffer(6): level_size
+        encoder.set_buffer(0, Some(l_values), 0);
+        encoder.set_buffer(1, Some(l_col_ind), 0);
+        encoder.set_buffer(2, Some(l_row_ptr), 0);
+        encoder.set_buffer(3, Some(y), 0); // b (input)
+        encoder.set_buffer(4, Some(y), 0); // y (output, in-place)
+        encoder.set_buffer(5, Some(level_rows), (level_start * std::mem::size_of::<u32>()) as u64);
+
+        let level_size_u32 = level_size as u32;
+        encoder.set_bytes(6, std::mem::size_of::<u32>() as u64, &level_size_u32 as *const u32 as *const _);
+
+        let threadgroup_size = metal::MTLSize::new(
+            self.handle.config().threadgroup_size_1d.min(level_size) as u64,
+            1,
+            1,
+        );
+        let grid_size = metal::MTLSize::new(level_size as u64, 1, 1);
+        encoder.dispatch_threads(grid_size, threadgroup_size);
+        encoder.end_encoding();
+
+        Ok(())
+    }
+
+    /// Encode level-scheduled upper triangular solve kernel.
+    fn encode_sptrsv_upper_level(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        lt_values: &metal::Buffer,
+        lt_col_ind: &metal::Buffer,
+        lt_row_ptr: &metal::Buffer,
+        x: &metal::Buffer, // In-place: input b, output x
+        level_rows: &metal::Buffer,
+        level_start: usize,
+        level_size: usize,
+    ) -> MetalResult<()> {
+        let pipeline = self.handle.pipeline(super::kernels::SPTRSV_UPPER_LEVEL_UNITDIAG)
+            .ok_or(MetalError::Solve("Missing sptrsv_upper_level pipeline".to_string()))?;
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+
+        encoder.set_buffer(0, Some(lt_values), 0);
+        encoder.set_buffer(1, Some(lt_col_ind), 0);
+        encoder.set_buffer(2, Some(lt_row_ptr), 0);
+        encoder.set_buffer(3, Some(x), 0); // b (input)
+        encoder.set_buffer(4, Some(x), 0); // x (output, in-place)
+        encoder.set_buffer(5, Some(level_rows), (level_start * std::mem::size_of::<u32>()) as u64);
+
+        let level_size_u32 = level_size as u32;
+        encoder.set_bytes(6, std::mem::size_of::<u32>() as u64, &level_size_u32 as *const u32 as *const _);
+
+        let threadgroup_size = metal::MTLSize::new(
+            self.handle.config().threadgroup_size_1d.min(level_size) as u64,
+            1,
+            1,
+        );
+        let grid_size = metal::MTLSize::new(level_size as u64, 1, 1);
+        encoder.dispatch_threads(grid_size, threadgroup_size);
+        encoder.end_encoding();
 
         Ok(())
     }
@@ -564,6 +717,22 @@ impl MetalKktBackend {
         Ok(())
     }
 
+    /// Sparse LDL^T factorization result (CSR format for L and L^T, plus D diagonal)
+    struct SparseLdltResult {
+        // L in CSR format (for forward solve)
+        l_csr_values: Vec<f32>,
+        l_csr_col_ind: Vec<u32>,
+        l_csr_row_ptr: Vec<u32>,
+
+        // L^T in CSR format (for backward solve)
+        lt_csr_values: Vec<f32>,
+        lt_csr_col_ind: Vec<u32>,
+        lt_csr_row_ptr: Vec<u32>,
+
+        // Diagonal D
+        d: Vec<f32>,
+    }
+
     fn cpu_ldlt_factorize(
         &self,
         n: usize,
@@ -571,22 +740,20 @@ impl MetalKktBackend {
         row_ind: &[usize],
         values: &[f32],
         symbolic: &SymbolicAnalysis,
-    ) -> MetalResult<(Vec<f32>, Vec<f32>)> {
-        // Simple dense LDL^T factorization for now (placeholder)
-        // TODO: Implement proper sparse supernodal factorization
-
+    ) -> MetalResult<SparseLdltResult> {
         let pivot_min = self.handle.config().pivot_min;
 
-        // Build dense matrix (only for small n, for testing)
-        if n > 1000 {
+        // For now, use dense factorization for small matrices
+        // TODO: Implement proper sparse supernodal factorization
+        if n > 2000 {
             return Err(MetalError::NotImplemented(
                 "Sparse factorization not yet implemented; matrix too large for dense fallback".to_string()
             ));
         }
 
+        // Build dense matrix with permutation applied
         let mut a = vec![0.0f32; n * n];
 
-        // Fill dense matrix from sparse
         for j in 0..n {
             let pj = symbolic.perm_inv[j]; // Original column for permuted column j
             for p in col_ptr[pj]..col_ptr[pj + 1] {
@@ -626,43 +793,139 @@ impl MetalKktBackend {
             }
         }
 
-        // Extract L values (lower triangle, column by column)
-        let mut l_values = Vec::with_capacity(symbolic.nnz_l);
-        for j in 0..n {
-            for i in j..n {
-                if i == j {
-                    l_values.push(1.0f32); // Unit diagonal
-                } else {
-                    l_values.push(a[i * n + j]);
+        // Convert dense L to CSR format (lower triangular with unit diagonal)
+        // CSR: row_ptr[i..i+1] gives range in col_ind/values for row i
+        let mut l_csr_row_ptr = vec![0u32; n + 1];
+        let mut l_csr_col_ind = Vec::new();
+        let mut l_csr_values = Vec::new();
+
+        let drop_tol = 1e-14f32;
+
+        for i in 0..n {
+            // Row i of L has entries in columns 0..=i
+            // Unit diagonal at (i,i), off-diagonal entries at (i, j) for j < i
+            for j in 0..i {
+                let val = a[i * n + j];
+                if val.abs() > drop_tol {
+                    l_csr_col_ind.push(j as u32);
+                    l_csr_values.push(val);
+                }
+            }
+            // Unit diagonal (store explicitly for GPU kernel)
+            l_csr_col_ind.push(i as u32);
+            l_csr_values.push(1.0f32);
+
+            l_csr_row_ptr[i + 1] = l_csr_values.len() as u32;
+        }
+
+        // Compute L^T in CSR format (upper triangular, same as L in CSC)
+        // L^T[i,j] = L[j,i], so row i of L^T contains entries from column i of L
+        let mut lt_csr_row_ptr = vec![0u32; n + 1];
+        let mut lt_csr_col_ind = Vec::new();
+        let mut lt_csr_values = Vec::new();
+
+        // First pass: count entries per row of L^T (= per column of L)
+        let mut col_counts = vec![0usize; n];
+        for i in 0..n {
+            // Diagonal
+            col_counts[i] += 1;
+            // Off-diagonal in column i: entries L[j,i] for j > i
+            for j in (i + 1)..n {
+                let val = a[j * n + i];
+                if val.abs() > drop_tol {
+                    col_counts[i] += 1;
                 }
             }
         }
 
-        Ok((l_values, d))
+        // Build row pointers for L^T
+        for i in 0..n {
+            lt_csr_row_ptr[i + 1] = lt_csr_row_ptr[i] + col_counts[i] as u32;
+        }
+
+        // Fill L^T values
+        for i in 0..n {
+            // Row i of L^T: diagonal at (i,i), then entries L[j,i] for j > i become L^T[i,j]
+            // Diagonal first
+            lt_csr_col_ind.push(i as u32);
+            lt_csr_values.push(1.0f32);
+
+            // Off-diagonal entries (L^T[i,j] = L[j,i] for j > i)
+            for j in (i + 1)..n {
+                let val = a[j * n + i]; // L[j,i]
+                if val.abs() > drop_tol {
+                    lt_csr_col_ind.push(j as u32);
+                    lt_csr_values.push(val);
+                }
+            }
+        }
+
+        Ok(SparseLdltResult {
+            l_csr_values,
+            l_csr_col_ind,
+            l_csr_row_ptr,
+            lt_csr_values,
+            lt_csr_col_ind,
+            lt_csr_row_ptr,
+            d,
+        })
     }
 
-    fn upload_factor_to_gpu(&mut self, l_values: &[f32], d_values: &[f32]) -> MetalResult<()> {
+    fn upload_factor_to_gpu(&mut self, result: &SparseLdltResult) -> MetalResult<()> {
         let buffers = self.factor_buffers.as_mut()
             .ok_or(MetalError::NumericFactorization("No factor buffers".to_string()))?;
 
-        // Upload L values
-        let l_ptr = buffers.l_values.contents() as *mut f32;
+        // Upload L CSR values
+        let l_val_ptr = buffers.l_csr_values.contents() as *mut f32;
         unsafe {
-            std::ptr::copy_nonoverlapping(l_values.as_ptr(), l_ptr, l_values.len());
+            std::ptr::copy_nonoverlapping(result.l_csr_values.as_ptr(), l_val_ptr, result.l_csr_values.len());
+        }
+
+        // Upload L CSR column indices
+        let l_col_ptr = buffers.l_csr_col_ind.contents() as *mut u32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(result.l_csr_col_ind.as_ptr(), l_col_ptr, result.l_csr_col_ind.len());
+        }
+
+        // Upload L CSR row pointers
+        let l_row_ptr = buffers.l_csr_row_ptr.contents() as *mut u32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(result.l_csr_row_ptr.as_ptr(), l_row_ptr, result.l_csr_row_ptr.len());
+        }
+
+        // Upload L^T CSR values
+        let lt_val_ptr = buffers.lt_csr_values.contents() as *mut f32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(result.lt_csr_values.as_ptr(), lt_val_ptr, result.lt_csr_values.len());
+        }
+
+        // Upload L^T CSR column indices
+        let lt_col_ptr = buffers.lt_csr_col_ind.contents() as *mut u32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(result.lt_csr_col_ind.as_ptr(), lt_col_ptr, result.lt_csr_col_ind.len());
+        }
+
+        // Upload L^T CSR row pointers
+        let lt_row_ptr = buffers.lt_csr_row_ptr.contents() as *mut u32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(result.lt_csr_row_ptr.as_ptr(), lt_row_ptr, result.lt_csr_row_ptr.len());
         }
 
         // Upload D values
         let d_ptr = buffers.d_values.contents() as *mut f32;
         unsafe {
-            std::ptr::copy_nonoverlapping(d_values.as_ptr(), d_ptr, d_values.len());
+            std::ptr::copy_nonoverlapping(result.d.as_ptr(), d_ptr, result.d.len());
         }
 
         // Compute and upload D^{-1}
-        let d_inv: Vec<f32> = d_values.iter().map(|&d| 1.0 / d).collect();
+        let d_inv: Vec<f32> = result.d.iter().map(|&d| 1.0 / d).collect();
         let d_inv_ptr = buffers.d_inv.contents() as *mut f32;
         unsafe {
             std::ptr::copy_nonoverlapping(d_inv.as_ptr(), d_inv_ptr, d_inv.len());
         }
+
+        // Update stored dimensions
+        buffers.nnz_l = result.l_csr_values.len();
 
         Ok(())
     }
@@ -675,59 +938,74 @@ impl MetalKktBackend {
     ) -> MetalResult<()> {
         let n = symbolic.n;
 
-        // Get factor from GPU (for now, we keep a CPU copy implicitly through dense factorization)
-        // TODO: Proper GPU solve
-
         let buffers = self.factor_buffers.as_ref()
             .ok_or(MetalError::Solve("No factor buffers".to_string()))?;
 
-        // Read L and D from GPU buffers
-        let l_ptr = buffers.l_values.contents() as *const f32;
-        let d_inv_ptr = buffers.d_inv.contents() as *const f32;
+        // Read L CSR from GPU buffers (for forward solve)
+        let l_values = buffers.l_csr_values.contents() as *const f32;
+        let l_col_ind = buffers.l_csr_col_ind.contents() as *const u32;
+        let l_row_ptr = buffers.l_csr_row_ptr.contents() as *const u32;
 
-        // Permute RHS: y = P * b
+        // Read L^T CSR from GPU buffers (for backward solve)
+        let lt_values = buffers.lt_csr_values.contents() as *const f32;
+        let lt_col_ind = buffers.lt_csr_col_ind.contents() as *const u32;
+        let lt_row_ptr = buffers.lt_csr_row_ptr.contents() as *const u32;
+
+        let d_inv = buffers.d_inv.contents() as *const f32;
+
+        // Permute RHS: y[i] = rhs[perm_inv[i]]
         let mut y = vec![0.0f32; n];
         for i in 0..n {
             y[i] = rhs[symbolic.perm_inv[i]];
         }
 
-        // Forward solve: L * z = y
-        // With dense L stored column-wise (lower triangle)
-        let mut z = y.clone();
-        let mut l_idx = 0;
-        for j in 0..n {
-            // L[j,j] = 1 (unit diagonal)
-            l_idx += 1;
+        // Forward solve: L * z = y (CSR lower triangular with unit diagonal)
+        // Process rows in order; row i depends on columns j < i
+        let mut z = y;
+        for i in 0..n {
+            let row_start = unsafe { *l_row_ptr.add(i) } as usize;
+            let row_end = unsafe { *l_row_ptr.add(i + 1) } as usize;
 
-            let zj = z[j];
-            for i in (j + 1)..n {
-                let lij = unsafe { *l_ptr.add(l_idx) };
-                z[i] -= lij * zj;
-                l_idx += 1;
+            let mut sum = z[i];
+            // Iterate through off-diagonal entries (col < i)
+            for p in row_start..row_end {
+                let col = unsafe { *l_col_ind.add(p) } as usize;
+                if col < i {
+                    let val = unsafe { *l_values.add(p) };
+                    sum -= val * z[col];
+                }
+                // Diagonal entry (col == i) has val = 1.0, no division needed
             }
+            z[i] = sum;
         }
 
-        // Diagonal solve: D^{-1} * z
+        // Diagonal solve: z = D^{-1} * z
         for i in 0..n {
-            let d_inv_i = unsafe { *d_inv_ptr.add(i) };
+            let d_inv_i = unsafe { *d_inv.add(i) };
             z[i] *= d_inv_i;
         }
 
-        // Backward solve: L^T * x = z
-        // Process columns in reverse
+        // Backward solve: L^T * x = z (using L^T CSR, upper triangular)
+        // Process rows in reverse order; row i depends on columns j > i
         let mut x = z;
-        for j in (0..n).rev() {
-            // Compute L column start index
-            let col_start: usize = (0..j).map(|k| n - k).sum();
+        for i in (0..n).rev() {
+            let row_start = unsafe { *lt_row_ptr.add(i) } as usize;
+            let row_end = unsafe { *lt_row_ptr.add(i + 1) } as usize;
 
-            for i in (j + 1)..n {
-                let lij = unsafe { *l_ptr.add(col_start + 1 + (i - j - 1)) };
-                x[j] -= lij * x[i];
+            let mut sum = x[i];
+            // Iterate through off-diagonal entries (col > i)
+            for p in row_start..row_end {
+                let col = unsafe { *lt_col_ind.add(p) } as usize;
+                if col > i {
+                    let val = unsafe { *lt_values.add(p) };
+                    sum -= val * x[col];
+                }
+                // Diagonal entry (col == i) has val = 1.0, no division needed
             }
-            // L[j,j] = 1, so no division needed
+            x[i] = sum;
         }
 
-        // Inverse permute: solution = P^T * x
+        // Inverse permute: solution[perm[i]] = x[i]
         for i in 0..n {
             solution[symbolic.perm[i]] = x[i];
         }

@@ -89,7 +89,9 @@ pub mod kernels {
 
     // Triangular solves (level-scheduled)
     pub const SPTRSV_LOWER_LEVEL: &str = "sptrsv_lower_level_f32";
+    pub const SPTRSV_LOWER_LEVEL_UNITDIAG: &str = "sptrsv_lower_level_unitdiag_csr_f32";
     pub const SPTRSV_UPPER_LEVEL: &str = "sptrsv_upper_level_f32";
+    pub const SPTRSV_UPPER_LEVEL_UNITDIAG: &str = "sptrsv_upper_level_unitdiag_csr_f32";
     pub const APPLY_DINV_INPLACE: &str = "apply_dinv_inplace_f32";
 
     // Dense supernodal kernels
