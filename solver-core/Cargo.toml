@@ -41,6 +41,10 @@ default = []
 parallel = ["rayon"]
 gpu = []  # Placeholder for future GPU support
 suitesparse-ldl = ["sprs_suitesparse_ldl"]
+metal = ["dep:metal"]  # Metal GPU backend for Apple Silicon
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.29", optional = true }
 
 # Benchmarks will be added later
 # [[bench]]

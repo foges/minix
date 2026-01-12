@@ -8,6 +8,8 @@ pub enum BackendError {
     Message(String),
     #[error(transparent)]
     Qdldl(#[from] QdldlError),
+    #[error("{0}")]
+    Other(String),
 }
 
 pub trait KktBackend {
