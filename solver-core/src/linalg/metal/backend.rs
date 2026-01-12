@@ -738,6 +738,122 @@ impl MetalKktBackend {
         Ok(())
     }
 
+    /// GPU-accelerated dense LDL^T factorization using Metal kernel.
+    fn gpu_ldlt_factorize(
+        &self,
+        n: usize,
+        a: &mut [f32],
+        d: &mut [f32],
+    ) -> MetalResult<()> {
+        let pivot_min = self.handle.config().pivot_min;
+
+        // For matrices up to 64x64, use the fast threadgroup-memory kernel
+        // For larger matrices, the kernel uses a slower single-thread fallback
+        // We could implement blocked factorization for larger matrices in the future
+
+        // Create GPU buffers for A and D
+        let a_buffer = self.handle.create_buffer_with_data(a)?;
+        let d_buffer = self.handle.create_buffer(n * std::mem::size_of::<f32>())?;
+
+        // Create descriptor
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct DenseLDLTDesc {
+            a_offset: u32,
+            d_offset: u32,
+            n: u32,
+            ld: u32,
+            pivot_min: f32,
+        }
+
+        let desc = DenseLDLTDesc {
+            a_offset: 0,
+            d_offset: 0,
+            n: n as u32,
+            ld: n as u32,
+            pivot_min,
+        };
+
+        let desc_buffer = self.handle.create_buffer_with_data(&[desc])?;
+
+        // Get pipeline
+        let pipeline = self.handle.pipeline(super::kernels::DENSE_LDLT_BATCHED)
+            .ok_or(MetalError::NumericFactorization("Missing dense_ldlt pipeline".to_string()))?;
+
+        // Create command buffer and encoder
+        let command_buffer = self.handle.queue().new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+
+        encoder.set_buffer(0, Some(&a_buffer), 0);
+        encoder.set_buffer(1, Some(&d_buffer), 0);
+        encoder.set_buffer(2, Some(&desc_buffer), 0);
+
+        // Dispatch one threadgroup per matrix (we have 1 matrix)
+        // Threadgroup size should be reasonable for the n<=64 fast path
+        let threadgroup_size = metal::MTLSize::new(
+            self.handle.config().threadgroup_size_1d.min(256) as u64,
+            1,
+            1,
+        );
+        let grid_size = metal::MTLSize::new(1, 1, 1); // 1 matrix
+
+        encoder.dispatch_thread_groups(grid_size, threadgroup_size);
+        encoder.end_encoding();
+
+        // Commit and wait
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Read back results
+        let a_ptr = a_buffer.contents() as *const f32;
+        let d_ptr = d_buffer.contents() as *const f32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(a_ptr, a.as_mut_ptr(), n * n);
+            std::ptr::copy_nonoverlapping(d_ptr, d.as_mut_ptr(), n);
+        }
+
+        Ok(())
+    }
+
+    /// CPU fallback for LDL^T factorization (used when GPU is not beneficial or for debugging).
+    fn cpu_ldlt_factorize_inplace(
+        &self,
+        n: usize,
+        a: &mut [f32],
+        d: &mut [f32],
+    ) {
+        let pivot_min = self.handle.config().pivot_min;
+
+        for k in 0..n {
+            // Compute D[k]
+            let mut dkk = a[k * n + k];
+            for j in 0..k {
+                let ljk = a[k * n + j];
+                dkk -= d[j] * ljk * ljk;
+            }
+
+            // Clamp pivot
+            if dkk.abs() < pivot_min {
+                dkk = if dkk >= 0.0 { pivot_min } else { -pivot_min };
+            }
+            d[k] = dkk;
+
+            // Set diagonal to 1 (unit diagonal L)
+            a[k * n + k] = 1.0;
+
+            // Compute L[i,k] for i > k
+            let inv_dkk = 1.0 / dkk;
+            for i in (k + 1)..n {
+                let mut lik = a[i * n + k];
+                for j in 0..k {
+                    lik -= d[j] * a[i * n + j] * a[k * n + j];
+                }
+                a[i * n + k] = lik * inv_dkk;
+            }
+        }
+    }
+
     fn cpu_ldlt_factorize_with_perm(
         &self,
         n: usize,
@@ -747,10 +863,7 @@ impl MetalKktBackend {
         perm: &[usize],
         perm_inv: &[usize],
     ) -> MetalResult<SparseLdltResult> {
-        let pivot_min = self.handle.config().pivot_min;
-
-        // For now, use dense factorization for small matrices
-        // TODO: Implement proper sparse supernodal factorization
+        // For dense fallback, limit matrix size
         if n > 2000 {
             return Err(MetalError::NotImplemented(
                 "Sparse factorization not yet implemented; matrix too large for dense fallback".to_string()
@@ -772,31 +885,17 @@ impl MetalKktBackend {
             }
         }
 
-        // Dense LDL^T factorization (in-place on lower triangle)
+        // Dense LDL^T factorization
         let mut d = vec![0.0f32; n];
 
-        for k in 0..n {
-            // Compute D[k]
-            let mut dkk = a[k * n + k];
-            for j in 0..k {
-                let ljk = a[k * n + j];
-                dkk -= d[j] * ljk * ljk;
-            }
+        // Use GPU for matrices where it's beneficial (n >= 32 gives good parallelism)
+        // and within the kernel's fast path (n <= 64 uses shared memory)
+        let use_gpu = n >= 32 && n <= 64;
 
-            // Clamp pivot
-            if dkk.abs() < pivot_min {
-                dkk = if dkk >= 0.0 { pivot_min } else { -pivot_min };
-            }
-            d[k] = dkk;
-
-            // Compute L[i,k] for i > k
-            for i in (k + 1)..n {
-                let mut lik = a[i * n + k];
-                for j in 0..k {
-                    lik -= d[j] * a[i * n + j] * a[k * n + j];
-                }
-                a[i * n + k] = lik / dkk;
-            }
+        if use_gpu {
+            self.gpu_ldlt_factorize(n, &mut a, &mut d)?;
+        } else {
+            self.cpu_ldlt_factorize_inplace(n, &mut a, &mut d);
         }
 
         // Convert dense L to CSR format (lower triangular with unit diagonal)
@@ -1314,5 +1413,50 @@ mod tests {
 
         let res_norm = compute_residual(n, &col_ptr, &row_ind, &values, &solution, &rhs);
         assert!(res_norm < 1e-3, "10x10 solve residual {} too large", res_norm);
+    }
+
+    /// Test GPU-accelerated factorization path (triggered for 32 <= n <= 64).
+    /// This tests the Metal dense_ldlt_nopivot kernel.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_gpu_factorization_50x50() {
+        let mut backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        // 50x50 SPD tridiagonal matrix (triggers GPU path: 32 <= 50 <= 64)
+        let n = 50;
+        let mut col_ptr = vec![0usize];
+        let mut row_ind = Vec::new();
+        let mut values = Vec::new();
+
+        for col in 0..n {
+            // Diagonal: 3.0
+            row_ind.push(col);
+            values.push(3.0);
+            // Sub-diagonal: -1.0
+            if col < n - 1 {
+                row_ind.push(col + 1);
+                values.push(-1.0);
+            }
+            col_ptr.push(row_ind.len());
+        }
+
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+        let _f = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+
+        // Solve with RHS = [1, 1, ..., 1]
+        let rhs: Vec<f64> = vec![1.0; n];
+        let mut solution = vec![0.0; n];
+        backend.solve(&rhs, &mut solution).unwrap();
+
+        let res_norm = compute_residual(n, &col_ptr, &row_ind, &values, &solution, &rhs);
+        assert!(res_norm < 1e-2, "50x50 GPU factorization residual {} too large", res_norm);
+
+        // Verify stats show factorization was performed
+        assert_eq!(backend.stats().num_symbolic, 1);
+        assert_eq!(backend.stats().num_numeric, 1);
+        assert_eq!(backend.stats().num_solves, 1);
     }
 }
