@@ -18,12 +18,26 @@ use crate::ipm2::predcorr::predictor_corrector_step_in_place;
 use crate::linalg::kkt_trait::KktSolverTrait;
 use crate::linalg::unified_kkt::UnifiedKktSolver;
 use crate::presolve::apply_presolve;
+use crate::presolve::proximal::{detect_free_variables_eq, add_proximal_regularization};
 use crate::presolve::ruiz::equilibrate;
 use crate::presolve::singleton::detect_singleton_rows;
 use crate::postsolve::PostsolveMap;
 use crate::problem::{
     ConeSpec, ProblemData, SolveInfo, SolveResult, SolveStatus, SolverSettings,
 };
+
+/// Check if CLARABEL-style HSDE rescaling by max(tau, kappa) is enabled.
+///
+/// Default is true (use max-based rescaling). Set MINIX_HSDE_RESCALE=threshold
+/// to use the original threshold-based normalization.
+fn hsde_rescale_by_max() -> bool {
+    static USE_MAX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *USE_MAX.get_or_init(|| {
+        std::env::var("MINIX_HSDE_RESCALE")
+            .map(|v| v.to_lowercase() != "threshold")
+            .unwrap_or(true)  // Default: use max-based rescaling
+    })
+}
 
 /// Main ipm2 solver entry point.
 pub fn solve_ipm2(
@@ -69,6 +83,43 @@ pub fn solve_ipm2(
             if settings.verbose {
                 eprintln!("conditioning: applied row scaling");
             }
+        }
+    }
+
+    // Apply proximal regularization for free variables (zero A-column + zero q)
+    // This stabilizes the Newton system for degenerate SDPs.
+    // For SDP problems with identity embedding, we only look at equality constraint rows.
+    if settings.proximal_rho > 0.0 {
+        // Compute the Zero cone dimension (equality constraints)
+        let zero_cone_dim: usize = prob.cones.iter()
+            .filter_map(|c| match c {
+                ConeSpec::Zero { dim } => Some(*dim),
+                _ => None,
+            })
+            .sum();
+
+        // If there's a Zero cone, use it to identify equality rows; otherwise use all rows
+        let eq_rows = if zero_cone_dim > 0 { zero_cone_dim } else { m };
+
+        let free_vars = detect_free_variables_eq(
+            &prob.A,
+            &prob.q,
+            prob.P.as_ref(),
+            eq_rows,
+            1e-10,  // A column norm tolerance
+            1e-10,  // cost coefficient tolerance
+        );
+        if !free_vars.is_empty() {
+            if settings.verbose {
+                eprintln!("proximal: detected {} free variables (zero A-columns in {} eq rows), adding rho={:.1e}",
+                    free_vars.len(), eq_rows, settings.proximal_rho);
+            }
+            prob.P = add_proximal_regularization(
+                prob.P.clone(),
+                n,
+                &free_vars,
+                settings.proximal_rho,
+            );
         }
     }
 
@@ -501,10 +552,19 @@ pub fn solve_ipm2(
             mu = compute_mu(&state, barrier_degree);
         }
 
-        // Keep HSDE scaling stable by normalizing τ when it drifts too far from 1.
-        // This helps DUAL/QGROW families that otherwise stall due to τ drift.
-        // Thresholds are intentionally wide; we just avoid extreme drift.
-        if state.normalize_tau_if_needed(0.2, 5.0) {
+        // HSDE normalization: prevent tau/kappa drift from causing residual floors.
+        //
+        // Two strategies available via MINIX_HSDE_RESCALE env var:
+        // - "max" (default): CLARABEL-style rescale by max(tau, kappa) each iteration.
+        //   This keeps both tau and kappa bounded and prevents the -α*dtau*b residual
+        //   floor that causes SDP convergence issues (control1).
+        // - "threshold": Original threshold-based normalization that only triggers
+        //   when tau drifts outside [0.2, 5.0].
+        if hsde_rescale_by_max() {
+            if state.rescale_by_max() {
+                mu = compute_mu(&state, barrier_degree);
+            }
+        } else if state.normalize_tau_if_needed(0.2, 5.0) {
             // Recompute mu after normalization (s,z,τ,κ all scaled)
             mu = compute_mu(&state, barrier_degree);
         }
@@ -842,7 +902,7 @@ pub fn solve_ipm2(
             let min_s = state.s.iter().copied().fold(f64::INFINITY, f64::min);
             let min_z = state.z.iter().copied().fold(f64::INFINITY, f64::min);
             eprintln!(
-                "iter {:4} mu={:.3e} alpha={:.3e} alpha_sz={:.3e} min_s={:.3e} min_z={:.3e} sigma={:.3e} rel_p={:.3e} rel_d={:.3e} gap_rel={:.3e}",
+                "iter {:4} mu={:.3e} alpha={:.3e} alpha_sz={:.3e} min_s={:.3e} min_z={:.3e} sigma={:.3e} rel_p={:.3e} rel_d={:.3e} gap_rel={:.3e} tau={:.3e} rp_abs={:.3e}",
                 iter,
                 mu,
                 step_result.alpha,
@@ -853,6 +913,8 @@ pub fn solve_ipm2(
                 metrics.rel_p,
                 metrics.rel_d,
                 metrics.gap_rel,
+                state.tau,
+                metrics.rp_inf,
             );
         }
 

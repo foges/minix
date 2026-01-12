@@ -363,6 +363,38 @@ impl HsdeState {
         let tau_kappa = self.tau * self.kappa;
         (sz, tau_kappa)
     }
+
+    /// Rescale homogeneous coordinates by max(τ, κ) so that max(τ, κ) = 1.
+    ///
+    /// This is CLARABEL's normalization approach. By normalizing by the maximum,
+    /// we keep both tau and kappa bounded while preserving their ratio.
+    /// This prevents tau from drifting too far from 1 which can cause
+    /// primal residual floors due to the -α*dtau*b term in HSDE updates.
+    ///
+    /// Returns true if rescaling was applied (max != 1).
+    pub fn rescale_by_max(&mut self) -> bool {
+        let max_val = self.tau.max(self.kappa);
+        if !max_val.is_finite() || max_val <= 0.0 || max_val == 1.0 {
+            return false;
+        }
+
+        let scale = 1.0 / max_val;
+
+        for v in &mut self.x {
+            *v *= scale;
+        }
+        for v in &mut self.z {
+            *v *= scale;
+        }
+        for v in &mut self.s {
+            *v *= scale;
+        }
+
+        self.tau *= scale;
+        self.kappa *= scale;
+
+        true
+    }
 }
 
 /// HSDE residuals.

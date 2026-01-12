@@ -49,6 +49,35 @@ fn trace_enabled() -> bool {
     })
 }
 
+/// Check if tau should be frozen to 1.0 (for debugging tau dynamics issues).
+/// Set MINIX_FREEZE_TAU=1 to enable. This prevents tau drift that can cause
+/// primal residual floors in HSDE. See: _planning/v22/LOG.md
+fn freeze_tau_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MINIX_FREEZE_TAU")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false)
+    })
+}
+
+/// Check if full feasibility weighting should be used (feas_weight=1.0).
+///
+/// The default Mehrotra predictor-corrector uses feas_weight = 1 - sigma,
+/// which can downweight feasibility when sigma is high. This causes
+/// "chasing complementarity while ignoring feasibility" failures on SDPs.
+///
+/// MINIX_FULL_FEAS=0 to use original formula; otherwise use feas_weight=1.0.
+/// See: _planning/v23/improvements
+fn full_feas_weight_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MINIX_FULL_FEAS")
+            .map(|v| v != "0")
+            .unwrap_or(true)  // Default: full feasibility weighting
+    })
+}
+
 fn all_finite(v: &[f64]) -> bool {
     v.iter().all(|x| x.is_finite())
 }
@@ -1007,11 +1036,21 @@ pub fn predictor_corrector_step_in_place(
     let mut refine_iters = settings.kkt_refine_iters;
     let mut final_feas_weight = 0.0;
 
+    // Full feasibility weighting: don't downweight feasibility RHS based on sigma.
+    // This prevents "chasing complementarity while ignoring feasibility" which
+    // causes SDP convergence issues (e.g., control1).
+    // MINIX_FULL_FEAS=1 (or unset) uses feas_weight=1.0; =0 uses original formula.
+    let use_full_feas = full_feas_weight_enabled();
+
     let max_retries = 2usize;
     for attempt in 0..=max_retries {
         let mut has_mcc = false;
         sigma_used = sigma_eff;
-        let feas_weight = (1.0 - sigma_eff).max(feas_weight_floor);
+        let feas_weight = if use_full_feas {
+            1.0
+        } else {
+            (1.0 - sigma_eff).max(feas_weight_floor)
+        };
         final_feas_weight = feas_weight;
         let target_mu = sigma_eff * mu;
 
@@ -1048,6 +1087,9 @@ pub fn predictor_corrector_step_in_place(
                     // PSD cone: proper Jordan-algebra Mehrotra corrector with Sylvester solve
                     // This is the PSD analogue of the SOC corrector below
                     if let ScalingBlock::PsdStructured { w_factor, n } = &ws.scaling[cone_idx] {
+                        if trace_enabled() && corr_iter == 0 {
+                            eprintln!("PSD Mehrotra correction: block {} (n={})", cone_idx, *n);
+                        }
                         let n_psd = *n;
                         debug_assert_eq!(dim, n_psd * (n_psd + 1) / 2);
 
@@ -1638,11 +1680,17 @@ pub fn predictor_corrector_step_in_place(
         offset += dim;
     }
 
-    state.tau += alpha * dtau;
-    state.kappa += alpha * dkappa;
+    // In direct mode, freeze tau=1 and kappa=0 (no homogeneous embedding updates)
+    if settings.direct_mode {
+        state.tau = 1.0;
+        state.kappa = 0.0;
+    } else {
+        state.tau += alpha * dtau;
+        state.kappa += alpha * dkappa;
 
-    if state.kappa < 1e-12 {
-        state.kappa = 1e-12;
+        if state.kappa < 1e-12 {
+            state.kappa = 1e-12;
+        }
     }
 
     for i in 0..n {

@@ -172,13 +172,13 @@ pub fn sdp_trace_minimization(n: usize) -> ProblemData {
 
     // Objective: minimize trace(X)
     // trace(X) = sum_i X_ii
-    // In svec format (with sqrt(2) scaling on off-diagonals):
-    // X_ii are at indices 0, 1+n, 1+n+(n-1), ...
+    // In svec format (upper-triangular column-major):
+    // Element (i,j) with i<=j is at index j*(j+1)/2 + i
+    // So diagonal X_kk is at index k*(k+1)/2 + k = k*(k+3)/2
     let mut q = vec![0.0; sdp_dim];
-    let mut idx = 0;
-    for i in 0..n {
-        q[idx] = 1.0;
-        idx += n - i;
+    for k in 0..n {
+        let diag_idx = k * (k + 3) / 2;
+        q[diag_idx] = 1.0;
     }
 
     // Constraints are partitioned into two blocks:
@@ -190,11 +190,10 @@ pub fn sdp_trace_minimization(n: usize) -> ProblemData {
     let mut triplets = Vec::new();
 
     // Block 1: Zero cone constraints (rows 0..n)
-    // X_ii + s_zero[i] = 1, where s_zero[i] must be 0
-    idx = 0;
-    for i in 0..n {
-        triplets.push((i, idx, 1.0));
-        idx += n - i;
+    // X_kk + s_zero[k] = 1, where s_zero[k] must be 0
+    for k in 0..n {
+        let diag_idx = k * (k + 3) / 2;
+        triplets.push((k, diag_idx, 1.0));
     }
 
     // Block 2: PSD cone constraints (rows n..n+sdp_dim)
@@ -243,10 +242,10 @@ pub fn sdp_maxcut(n: usize, edges: &[(usize, usize, f64)]) -> ProblemData {
     let mut q = vec![0.0; sdp_dim];
 
     // Helper: get svec index for (i,j) with i <= j
+    // Upper-triangular column-major: index = j*(j+1)/2 + i
     let svec_idx = |i: usize, j: usize| -> usize {
         assert!(i <= j);
-        let base = (0..i).map(|k| n - k).sum::<usize>();
-        base + (j - i)
+        j * (j + 1) / 2 + i
     };
 
     for &(i, j, w) in edges {
@@ -375,11 +374,59 @@ mod tests {
     }
 
     #[test]
+    fn test_sdp_simple_psd_only() {
+        // Simple PSD-only test: minimize trace(X) subject to X ⪰ 0
+        // No Zero cone constraints. Optimal is X = 0 (trace = 0).
+        let n = 2;  // Start with 2x2 to debug
+        let sdp_dim = n * (n + 1) / 2;  // 3 for 2x2
+
+        // Objective: minimize trace(X) = X_00 + X_11 + X_22
+        let mut q = vec![0.0; sdp_dim];
+        for k in 0..n {
+            let diag_idx = k * (k + 3) / 2;
+            q[diag_idx] = 1.0;
+        }
+
+        // Single constraint: s_psd = x (just PSD cone)
+        let mut triplets = Vec::new();
+        for i in 0..sdp_dim {
+            triplets.push((i, i, -1.0));
+        }
+
+        let a = sparse::from_triplets(sdp_dim, sdp_dim, triplets);
+        let b = vec![0.0; sdp_dim];
+
+        let prob = ProblemData {
+            P: None,
+            q,
+            A: a,
+            b,
+            cones: vec![ConeSpec::Psd { n }],
+            var_bounds: None,
+            integrality: None,
+        };
+
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 50;
+        settings.verbose = true;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== Simple PSD Test (minimize trace, X >= 0) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+
+        // Optimal is X = 0, trace = 0
+        assert!(result.obj_val >= -0.1, "Objective should be >= 0, got {}", result.obj_val);
+    }
+
+    #[test]
     fn test_sdp_trace_minimization() {
         let n = 3;
         let prob = sdp_trace_minimization(n);
         let mut settings = SolverSettings::default();
-        settings.max_iter = 200;
+        settings.max_iter = 50;
+        settings.verbose = true;
 
         let result = solve(&prob, &settings).unwrap();
         println!("\n=== SDP Trace Minimization ===");
@@ -408,5 +455,315 @@ mod tests {
 
         // Should get some reasonable approximation
         // For triangle with unit weights, SDP bound is around 1.25 * optimal_cut
+    }
+
+    #[test]
+    fn test_sdp_trace_minimization_4x4() {
+        let n = 4;
+        let prob = sdp_trace_minimization(n);
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 100;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== SDP Trace Minimization (4x4) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!((result.obj_val - n as f64).abs() < 0.1,
+            "Objective should be ~{}, got {}", n, result.obj_val);
+    }
+
+    #[test]
+    fn test_sdp_trace_minimization_5x5() {
+        let n = 5;
+        let prob = sdp_trace_minimization(n);
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 100;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== SDP Trace Minimization (5x5) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!((result.obj_val - n as f64).abs() < 0.1,
+            "Objective should be ~{}, got {}", n, result.obj_val);
+    }
+
+    #[test]
+    fn test_sdp_maxcut_path() {
+        // Path graph: 0 - 1 - 2 - 3 (4 nodes, 3 edges)
+        // Optimal cut: separate into {0,2} and {1,3}, value = 3
+        let edges = vec![(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0)];
+        let prob = sdp_maxcut(4, &edges);
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 100;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== MaxCut SDP (Path Graph) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+
+        assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal),
+            "Status should be Optimal or AlmostOptimal, got {:?}", result.status);
+        // SDP bound for path graph with 3 edges is -0.75 (minimization form)
+        assert!(result.obj_val < 0.0, "Objective should be negative for maxcut");
+    }
+
+    #[test]
+    fn test_sdp_maxcut_complete_4() {
+        // Complete graph K4: 4 nodes, 6 edges (all pairs connected)
+        // Optimal cut: separate into 2 groups of 2, value = 4
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            for j in (i+1)..4 {
+                edges.push((i, j, 1.0));
+            }
+        }
+        let prob = sdp_maxcut(4, &edges);
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 100;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== MaxCut SDP (K4 Complete) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+    }
+
+    #[test]
+    fn test_sdp_maxcut_star() {
+        // Star graph: center node 0 connected to 1, 2, 3, 4
+        // Optimal cut: separate center from rest, value = 4
+        let edges = vec![(0, 1, 1.0), (0, 2, 1.0), (0, 3, 1.0), (0, 4, 1.0)];
+        let prob = sdp_maxcut(5, &edges);
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 100;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== MaxCut SDP (Star Graph) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+    }
+
+    #[test]
+    fn test_sdp_lovasz_theta() {
+        // Lovász theta function for pentagon (C5)
+        // theta(C5) = sqrt(5) ≈ 2.236
+        //
+        // maximize t
+        // subject to: t * I - X + sum_ij A_ij * Y_ij = 0  (equality)
+        //             X_ii = 1
+        //             X >= 0 (PSD)
+        //
+        // Simplified: maximize trace(J * X) subject to X_ii = 1, X_ij = 0 for edges, X >= 0
+        // where J is all-ones matrix
+        let n = 5;  // Pentagon
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)];  // Cycle C5
+
+        let sdp_dim = n * (n + 1) / 2;
+
+        // Objective: maximize sum of X_ij = trace(J * X)
+        // In minimization form: minimize -sum of X_ij
+        let mut q = vec![0.0; sdp_dim];
+
+        // svec index helper
+        let svec_idx = |i: usize, j: usize| -> usize {
+            let (i, j) = if i <= j { (i, j) } else { (j, i) };
+            j * (j + 1) / 2 + i
+        };
+
+        // All entries contribute (but off-diagonals have sqrt(2) factor in svec)
+        for i in 0..n {
+            for j in i..n {
+                let idx = svec_idx(i, j);
+                if i == j {
+                    q[idx] = -1.0;  // Diagonal
+                } else {
+                    q[idx] = -std::f64::consts::SQRT_2;  // Off-diagonal (appears twice, but svec scales)
+                }
+            }
+        }
+
+        // Constraints:
+        // 1. X_ii = 1 for all i (n constraints)
+        // 2. X_ij = 0 for all edges (5 constraints for pentagon)
+        // 3. X >= 0 (PSD cone)
+
+        let n_eq = n + edges.len();  // Diagonal + edge constraints
+        let mut triplets = Vec::new();
+
+        // Diagonal constraints: X_ii = 1
+        for i in 0..n {
+            let diag_idx = svec_idx(i, i);
+            triplets.push((i, diag_idx, 1.0));
+        }
+
+        // Edge constraints: X_ij = 0 for (i,j) in edges
+        for (k, &(i, j)) in edges.iter().enumerate() {
+            let idx = svec_idx(i, j);
+            triplets.push((n + k, idx, 1.0));
+        }
+
+        // PSD cone constraint: -x + s_psd = 0
+        for i in 0..sdp_dim {
+            triplets.push((n_eq + i, i, -1.0));
+        }
+
+        let a = sparse::from_triplets(n_eq + sdp_dim, sdp_dim, triplets);
+        let mut b = vec![1.0; n];  // X_ii = 1
+        b.extend(vec![0.0; edges.len()]);  // X_ij = 0 for edges
+        b.extend(vec![0.0; sdp_dim]);  // PSD constraint
+
+        let cones = vec![
+            ConeSpec::Zero { dim: n_eq },  // Equality constraints
+            ConeSpec::Psd { n },           // PSD cone
+        ];
+
+        let prob = ProblemData {
+            P: None,
+            q,
+            A: a,
+            b,
+            cones,
+            var_bounds: None,
+            integrality: None,
+        };
+
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 100;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== Lovász Theta (Pentagon C5) ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        // theta(C5) = sqrt(5) ≈ 2.236
+        // Our objective is -trace(J*X), so should be around -5 * sqrt(5) / 5 = -sqrt(5)
+        // Actually trace(J*X) = sum_ij X_ij, and X optimal has theta(G) = sqrt(5)
+    }
+
+    #[test]
+    fn test_sdp_min_eigenvalue() {
+        // Find minimum eigenvalue of a matrix via SDP
+        // Given symmetric C, find:
+        //   maximize t
+        //   subject to C - t*I >= 0 (PSD)
+        //
+        // Standard form (minimize):
+        //   minimize -t
+        //   subject to s = C - t*I, s in PSD cone
+        //
+        // Rewritten with slack:
+        //   Variables: t, s (svec form)
+        //   Minimize: -t
+        //   Subject to: t*I + s = C  (Zero cone for equality)
+        //               s in PSD cone
+
+        let n = 3;
+        let sdp_dim = n * (n + 1) / 2;  // 6 for 3x3
+
+        // Test matrix C (symmetric, with known eigenvalues)
+        // C = [3, 1, 0; 1, 2, 1; 0, 1, 1]
+        // Eigenvalues approximately: 3.73, 1.62, 0.65
+        let c_mat = vec![
+            3.0, 1.0, 0.0,
+            1.0, 2.0, 1.0,
+            0.0, 1.0, 1.0,
+        ];
+
+        // Convert C to svec format
+        let mut c_svec = vec![0.0; sdp_dim];
+        let svec_idx = |i: usize, j: usize| -> usize {
+            let (i, j) = if i <= j { (i, j) } else { (j, i) };
+            j * (j + 1) / 2 + i
+        };
+
+        for i in 0..n {
+            for j in i..n {
+                let idx = svec_idx(i, j);
+                let val = c_mat[i * n + j];
+                c_svec[idx] = if i == j { val } else { val * std::f64::consts::SQRT_2 };
+            }
+        }
+
+        // Variables: x = [t, s_0, s_1, ..., s_{sdp_dim-1}]
+        // Objective: minimize -t => q = [-1, 0, 0, ..., 0]
+        let num_vars = 1 + sdp_dim;
+        let mut q = vec![0.0; num_vars];
+        q[0] = -1.0;  // Minimize -t (maximize t)
+
+        // Constraints:
+        // 1. Zero cone (equality): t * svec(I) + s_eq = C  (sdp_dim rows)
+        // 2. PSD cone: -s + s_psd = 0 => s_psd = s  (sdp_dim rows)
+        //
+        // For constraint 1: t * svec(I)[i] + s[i] + slack[i] = C[i]
+        // where slack is in Zero cone (so slack = 0)
+
+        let mut triplets = Vec::new();
+
+        // Equality constraints: t * svec(I) + s = C
+        // A has coefficients for [t, s_0, ..., s_{sdp_dim-1}]
+        for k in 0..n {
+            let diag_idx = k * (k + 3) / 2;
+            triplets.push((diag_idx, 0, 1.0));  // t coefficient on diagonals
+        }
+        for i in 0..sdp_dim {
+            triplets.push((i, 1 + i, 1.0));  // s_i coefficient
+        }
+
+        // PSD cone constraints: -s + s_psd = 0
+        for i in 0..sdp_dim {
+            triplets.push((sdp_dim + i, 1 + i, -1.0));
+        }
+
+        let a = sparse::from_triplets(2 * sdp_dim, num_vars, triplets);
+
+        let mut b = c_svec.clone();  // RHS for equality: C
+        b.extend(vec![0.0; sdp_dim]);  // RHS for PSD cone: 0
+
+        let cones = vec![
+            ConeSpec::Zero { dim: sdp_dim },  // Equality constraints
+            ConeSpec::Psd { n },              // PSD cone for s
+        ];
+
+        let prob = ProblemData {
+            P: None,
+            q,
+            A: a,
+            b,
+            cones,
+            var_bounds: None,
+            integrality: None,
+        };
+
+        let mut settings = SolverSettings::default();
+        settings.max_iter = 100;
+
+        let result = solve(&prob, &settings).unwrap();
+        println!("\n=== Min Eigenvalue SDP ===");
+        println!("Status: {:?}", result.status);
+        println!("Iterations: {}", result.info.iters);
+        println!("Objective: {:.6}", result.obj_val);
+        println!("t (min eigenvalue) = {:.6}", -result.obj_val);
+
+        assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal),
+            "Status should be Optimal or AlmostOptimal, got {:?}", result.status);
+        // The minimum eigenvalue of C = [3,1,0; 1,2,1; 0,1,1] is approximately 0.27
+        // (roots of characteristic polynomial -λ³ + 6λ² - 9λ + 2 = 0)
+        let min_eig = -result.obj_val;
+        assert!(min_eig > 0.1 && min_eig < 0.5,
+            "Min eigenvalue should be ~0.27, got {}", min_eig);
     }
 }

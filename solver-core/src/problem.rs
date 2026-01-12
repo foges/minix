@@ -203,6 +203,11 @@ pub struct SolverSettings {
     /// This can reduce iteration count at the cost of more step size computation.
     /// Experimental feature - may help with exponential cones.
     pub use_proximity_step_control: bool,
+
+    /// Proximal regularization strength for free variables.
+    /// Adds P[j,j] += rho for variables with zero A-column and zero q[j].
+    /// Helps stabilize Newton system for degenerate SDPs. Set to 0 to disable.
+    pub proximal_rho: f64,
 }
 
 impl Default for SolverSettings {
@@ -213,6 +218,13 @@ impl Default for SolverSettings {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(2);
 
+        // Allow environment variable override for Ruiz scaling iterations
+        // Set MINIX_RUIZ_ITERS=0 to disable scaling entirely
+        let ruiz_iters = std::env::var("MINIX_RUIZ_ITERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(10);
+
         Self {
             max_iter: 100,
             time_limit_ms: None,
@@ -220,7 +232,7 @@ impl Default for SolverSettings {
             tol_feas: 1e-8,    // Match Clarabel/OSQP industry standard
             tol_gap: 1e-8,     // Match Clarabel/OSQP industry standard
             tol_infeas: 1e-8,  // Infeasibility detection tolerance
-            ruiz_iters: 10,
+            ruiz_iters,
             static_reg: 1e-8,
             dynamic_reg_min_pivot: 1e-13,
             kkt_refine_iters,
@@ -231,9 +243,19 @@ impl Default for SolverSettings {
             sigma_max: 0.999,
             line_search_max_iters: 0,
             warm_start: None,
-            direct_mode: false,  // Opt-in for now
+            // Allow environment variable to enable direct mode (no HSDE tau/kappa)
+            direct_mode: std::env::var("MINIX_DIRECT_MODE")
+                .ok()
+                .map(|s| s == "1")
+                .unwrap_or(false),
             enable_conditioning: None,  // Defaults to true
             use_proximity_step_control: false,  // Experimental, opt-in
+            // Proximal regularization for free variables (zero A-column + zero q)
+            // Set MINIX_PROXIMAL_RHO=0.0 to disable, or a positive value like 1e-4
+            proximal_rho: std::env::var("MINIX_PROXIMAL_RHO")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1e-4),  // Default: enabled with rho=1e-4
         }
     }
 }

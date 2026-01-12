@@ -182,6 +182,19 @@ pub fn nt_scaling_psd(
         }
     }
 
+    // Verify WZW = S property if diagnostics enabled
+    if std::env::var("MINIX_VERIFY_NT").is_ok() {
+        let wzw = &w * &z_mat * &w;
+        let x_mat = svec_to_mat(s, n);
+        let diff = &wzw - &x_mat;
+        let err = diff.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+        let scale = x_mat.iter().fold(0.0f64, |acc, &v| acc.max(v.abs())).max(1.0);
+        let rel_err = err / scale;
+        if rel_err > 1e-10 {
+            eprintln!("NT VERIFY: WZW != S, rel_err={:.3e} (n={})", rel_err, n);
+        }
+    }
+
     Ok(ScalingBlock::PsdStructured { w_factor, n })
 }
 
