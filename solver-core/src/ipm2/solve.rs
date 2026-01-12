@@ -96,11 +96,11 @@ pub fn solve_ipm2(
     // Normal equations are now automatically used by UnifiedKktSolver
     // when appropriate (m > 5n, n <= 500, Zero+NonNeg cones only).
 
-    // ipm2 scaffolding
-    let diag = DiagnosticsConfig::from_env();
+    // ipm2 scaffolding: create diagnostics config respecting settings.verbose
+    let diag = DiagnosticsConfig::from_settings_verbose(settings.verbose);
 
     let singleton_partition = detect_singleton_rows(&scaled_prob.A);
-    if diag.enabled || settings.verbose {
+    if diag.is_verbose() {
         eprintln!(
             "presolve: singleton_rows={} non_singleton_rows={}",
             singleton_partition.singleton_rows.len(),
@@ -131,7 +131,7 @@ pub fn solve_ipm2(
     if settings.direct_mode {
         state.tau = 1.0;
         state.kappa = 0.0;
-        if diag.enabled || settings.verbose {
+        if diag.is_verbose() {
             eprintln!("direct mode: tau=1, kappa=0 (no homogeneous embedding)");
         }
     }
@@ -241,8 +241,8 @@ pub fn solve_ipm2(
             compute_residuals(&scaled_prob, &state, &mut residuals);
         }
 
-        // Verbose iteration logging via MINIX_ITER_LOG env var
-        if std::env::var("MINIX_ITER_LOG").is_ok() && (iter >= 25 && iter <= 30 || iter % 10 == 0) {
+        // Verbose iteration logging at Debug level (MINIX_VERBOSE=3)
+        if diag.is_debug() && (iter >= 25 && iter <= 30 || iter % 10 == 0) {
             let mu = compute_mu(&state, barrier_degree);
             let mut rp_temp = vec![0.0; m];
             let mut rd_temp = vec![0.0; n];
@@ -377,7 +377,7 @@ pub fn solve_ipm2(
                 if let Some(cond) = kkt.estimate_condition_number() {
                     if cond > 1e12 && diag.should_log(iter) {
                         eprintln!("iter {} condition number: {:.3e} (ill-conditioned KKT)", iter, cond);
-                    } else if cond > 1e15 && diag.enabled {
+                    } else if cond > 1e15 && diag.enabled() {
                         eprintln!("iter {} condition number: {:.3e} (severely ill-conditioned!)", iter, cond);
                     }
                 }
@@ -387,7 +387,7 @@ pub fn solve_ipm2(
             Err(e) => {
                 consecutive_failures += 1;
                 numeric_recovery_level = (numeric_recovery_level + 1).min(MAX_NUMERIC_RECOVERY_LEVEL);
-                if diag.enabled {
+                if diag.enabled() {
                     eprintln!("predictor-corrector step failed at iter {}: {}", iter, e);
                 }
 
@@ -420,8 +420,8 @@ pub fn solve_ipm2(
             );
         }
 
-        // QFORPLAN-style comprehensive diagnostics (enabled via MINIX_QFORPLAN_DIAG=1)
-        if std::env::var("MINIX_QFORPLAN_DIAG").is_ok() {
+        // QFORPLAN-style comprehensive diagnostics at Trace level (MINIX_VERBOSE=4)
+        if diag.is_trace() {
             log_qforplan_diagnostics(iter, &scaled_prob, &state, &mut ws, mu);
         }
 
@@ -438,7 +438,7 @@ pub fn solve_ipm2(
             if res_norm > 0.1 {
                 consecutive_failures += 1;
                 numeric_recovery_level = (numeric_recovery_level + 1).min(MAX_NUMERIC_RECOVERY_LEVEL);
-                if diag.enabled {
+                if diag.enabled() {
                     let (mu_sz, mu_tk) = state.mu_decomposition();
                     eprintln!(
                         "merit reject: mu {:.3e} -> {:.3e} ({}x), res_norm={:.3e}, tau={:.3e}, kappa={:.3e}, mu_sz={:.3e}, mu_tk={:.3e}",
@@ -467,7 +467,7 @@ pub fn solve_ipm2(
 
                 // Only do recovery if residuals are still significant
                 if res_norm > 1e-5 {
-                    if diag.enabled {
+                    if diag.enabled() {
                         eprintln!(
                             "cone interior recovery at iter {}: alpha_sz={:.3e}, stalls={}, res_norm={:.3e}, forcing to interior",
                             iter, step_result.alpha_sz, cone_interior_stalls, res_norm
@@ -477,7 +477,7 @@ pub fn solve_ipm2(
                     // This helps when the step direction points out of the cone
                     state.force_to_interior(&cones, 1e-1); // Use larger margin for recovery
                     mu = compute_mu(&state, barrier_degree);
-                } else if diag.enabled {
+                } else if diag.enabled() {
                     eprintln!(
                         "cone interior recovery skipped at iter {}: res_norm={:.3e} is small, already near optimal",
                         iter, res_norm
@@ -520,7 +520,7 @@ pub fn solve_ipm2(
         if tau_kappa_sum > 1e6 || (tau_kappa_sum < 1e-3 && tau_kappa_sum > 0.0) {
             if state.normalize_tau_kappa_if_needed(1e-2, 1e5, 1.0) {
                 mu = compute_mu(&state, barrier_degree);
-                if diag.enabled {
+                if diag.enabled() {
                     let kappa_ratio = state.kappa / (state.tau + state.kappa).max(1e-100);
                     eprintln!("  → τ+κ normalization: τ+κ {:.3e} → 1.0 (κ/(τ+κ)={:.3e})",
                         tau_kappa_sum, kappa_ratio);
@@ -576,7 +576,7 @@ pub fn solve_ipm2(
                     let x_for_recovery = postsolve.recover_x(&x_bar);
                     let s_for_recovery = postsolve.recover_s(&s_bar, &x_for_recovery);
 
-                    if diag.enabled {
+                    if diag.enabled() {
                         eprintln!("dual_recovery attempt at iter {}: rel_p={:.3e} rel_d={:.3e}",
                             iter, metrics.rel_p, metrics.rel_d);
                     }
@@ -612,7 +612,7 @@ pub fn solve_ipm2(
                                             rec_metrics.gap_rel <= metrics.gap_rel * 2.0;
 
                         if dual_improved && primal_still_ok {
-                            if diag.enabled {
+                            if diag.enabled() {
                                 eprintln!("dual_recovery SUCCESS: rel_d {:.3e} -> {:.3e}",
                                     metrics.rel_d, rec_metrics.rel_d);
                             }
@@ -624,7 +624,7 @@ pub fn solve_ipm2(
                                 status = SolveStatus::Optimal;
                                 break;
                             }
-                        } else if diag.enabled {
+                        } else if diag.enabled() {
                             eprintln!("dual_recovery REJECTED: dual_improved={} primal_ok={} rel_d={:.3e}",
                                 dual_improved, primal_still_ok, rec_metrics.rel_d);
                         }
@@ -662,7 +662,7 @@ pub fn solve_ipm2(
                     let s_for_polish = postsolve.recover_s(&s_bar, &x_for_polish);
                     let z_for_polish = postsolve.recover_z(&z_bar);
 
-                    if diag.enabled {
+                    if diag.enabled() {
                         eprintln!("early polish check at iter {}: primal_ok={} gap_ok={} gap_close={} dual_ok={} x_len={} n_orig={}",
                             iter, primal_ok, gap_ok, gap_close, dual_ok, x_for_polish.len(), orig_prob_bounds.num_vars());
                     }
@@ -701,14 +701,14 @@ pub fn solve_ipm2(
                         let dual_improved = dual_rel_after < metrics.rel_d * 0.1;
                         let primal_still_ok = primal_rel_after < criteria.tol_feas;
 
-                        if diag.enabled && iter < 20 {
+                        if diag.enabled() && iter < 20 {
                             eprintln!("polish eval at iter {}: rel_d {:.3e} -> {:.3e} (need <{:.3e}), rel_p {:.3e} -> {:.3e}, gap_rel {:.3e} -> {:.3e}",
                                 iter, metrics.rel_d, dual_rel_after, metrics.rel_d * 0.1,
                                 metrics.rel_p, primal_rel_after, metrics.gap_rel, gap_rel_after);
                         }
 
                         if dual_improved && primal_still_ok && gap_acceptable {
-                            if diag.enabled {
+                            if diag.enabled() {
                                 eprintln!("early polish SUCCESS at iter {}: rel_d {:.3e} -> {:.3e}, rel_p {:.3e} -> {:.3e}, gap_rel {:.3e} -> {:.3e}",
                                     iter, metrics.rel_d, dual_rel_after, metrics.rel_p, primal_rel_after, metrics.gap_rel, gap_rel_after);
                             }
@@ -754,7 +754,7 @@ pub fn solve_ipm2(
                         }
                     }
 
-                    if diag.enabled {
+                    if diag.enabled() {
                         eprintln!("early primal polish check at iter {}: primal_ok={} dual_ok={} gap_ok={} primal_stalling={}",
                             iter, primal_ok, dual_ok, gap_ok, stall.primal_stalling());
                     }
@@ -786,7 +786,7 @@ pub fn solve_ipm2(
 
                         // Accept if this achieves optimality
                         if is_optimal(&polish_metrics, &criteria) {
-                            if diag.enabled {
+                            if diag.enabled() {
                                 eprintln!(
                                     "early primal polish SUCCESS at iter {}: rel_p={:.3e}->{:.3e}, rel_d={:.3e}->{:.3e}",
                                     iter, metrics.rel_p, polish_metrics.rel_p, metrics.rel_d, polish_metrics.rel_d
@@ -828,7 +828,7 @@ pub fn solve_ipm2(
 
                 if rel_p_progress || rel_d_progress || gap_rel_progress {
                     effective_max_iter = extended_max_iter;
-                    if diag.enabled {
+                    if diag.enabled() {
                         eprintln!(
                             "P1.1: extending max_iter to {} for large problem (progress detected: rel_p={} rel_d={} gap={})",
                             extended_max_iter, rel_p_progress, rel_d_progress, gap_rel_progress
@@ -1021,7 +1021,7 @@ pub fn solve_ipm2(
         let dual_ok = final_metrics.rel_d <= criteria.tol_feas * 100.0; // Allow 100x slack (1e-6 default)
         let gap_ok = final_metrics.gap_rel <= criteria.tol_gap_rel * 10.0; // Allow 10x slack
         if primal_ok && dual_ok && gap_ok {
-            if diag.enabled {
+            if diag.enabled() {
                 eprintln!("almost-optimal: primal={:.3e} dual={:.3e} gap_rel={:.3e}, accepting as Optimal",
                     final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
             }
@@ -1029,8 +1029,8 @@ pub fn solve_ipm2(
         }
     }
 
-    // Dual residual diagnostics for failed problems (enabled via MINIX_DUAL_DIAG env var)
-    if status == SolveStatus::MaxIters && std::env::var("MINIX_DUAL_DIAG").is_ok() {
+    // Dual residual diagnostics for failed problems at Trace level (MINIX_VERBOSE=4)
+    if status == SolveStatus::MaxIters && diag.is_trace() {
         // Get problem name from environment or use default
         let problem_name = std::env::var("MINIX_PROBLEM_NAME").unwrap_or_else(|_| "unknown".to_string());
         // Compute r_d for diagnostic purposes
@@ -1072,7 +1072,7 @@ pub fn solve_ipm2(
         let gap_ok_abs = final_metrics.gap <= criteria.tol_gap * gap_scale_abs;
         let gap_ok = gap_ok_abs || final_metrics.gap_rel <= criteria.tol_gap_rel;
 
-        if diag.enabled {
+        if diag.enabled() {
             eprintln!(
                 "polish check: primal_ok={} dual_ok={} gap_ok={} (gap_ok_abs={}, gap={:.3e} vs limit={:.3e}, gap_rel={:.3e} vs tol={:.3e})",
                 primal_ok, dual_ok, gap_ok, gap_ok_abs,
@@ -1093,7 +1093,7 @@ pub fn solve_ipm2(
 
         // When dual is severely bad, skip active-set polish and go straight to LP dual polish
         if primal_ok && (gap_ok || gap_close) && !dual_ok && dual_severely_bad {
-            if diag.enabled {
+            if diag.enabled() {
                 eprintln!("skipping active-set polish (dual severely bad: rel_d={:.3e} > {:.3e}), trying LP dual polish...",
                     final_metrics.rel_d, criteria.tol_feas * 100.0);
             }
@@ -1142,7 +1142,7 @@ pub fn solve_ipm2(
         }
 
         if primal_ok && (gap_ok || gap_close) && !dual_ok && !dual_severely_bad {
-            if diag.enabled {
+            if diag.enabled() {
                 eprintln!("attempting polish (gap_ok={}, gap_close={})...", gap_ok, gap_close);
             }
             if let Some(polished) = polish_nonneg_active_set(
@@ -1169,7 +1169,7 @@ pub fn solve_ipm2(
                     &mut px_polish,
                 );
 
-                if diag.enabled {
+                if diag.enabled() {
                     eprintln!(
                         "polish result: rp_inf={:.3e} rd_inf={:.3e} gap={:.3e} gap_rel={:.3e}",
                         polish_metrics.rp_inf, polish_metrics.rd_inf, polish_metrics.gap, polish_metrics.gap_rel
@@ -1190,7 +1190,7 @@ pub fn solve_ipm2(
                 let dual_improved = dual_rel_after < dual_rel_before * 0.1;  // Need 10x improvement
 
                 if primal_ok_after && dual_improved {
-                    if diag.enabled {
+                    if diag.enabled() {
                         eprintln!("polish: accepted (rel_d: {:.3e} -> {:.3e}, rel_p: {:.3e} -> {:.3e})",
                             dual_rel_before, dual_rel_after, primal_rel_before, primal_rel_after);
                     }
@@ -1200,12 +1200,12 @@ pub fn solve_ipm2(
                     final_metrics = polish_metrics;
 
                     if is_optimal(&final_metrics, &criteria) {
-                        if diag.enabled {
+                        if diag.enabled() {
                             eprintln!("polish: upgraded to Optimal");
                         }
                         status = SolveStatus::Optimal;
                     }
-                } else if diag.enabled {
+                } else if diag.enabled() {
                     eprintln!("polish: rejected (primal_ok={} [{:.3e} vs {:.3e}], dual_improved={} [{:.3e} vs {:.3e}])",
                         primal_ok_after, primal_rel_after, criteria.tol_feas * 100.0,
                         dual_improved, dual_rel_after, dual_rel_before * 0.1);
@@ -1216,7 +1216,7 @@ pub fn solve_ipm2(
             // This is useful for QSHIP-type problems where active-set polish destroys primal
             // Iterate multiple times as each pass may improve incrementally
             if status != SolveStatus::Optimal {
-                if diag.enabled {
+                if diag.enabled() {
                     eprintln!("attempting polish_lp_dual (z-only adjustment, iterative)...");
                 }
                 let mut z_current = z.clone();
@@ -1245,7 +1245,7 @@ pub fn solve_ipm2(
                             &mut px_polish,
                         );
 
-                        if diag.enabled {
+                        if diag.enabled() {
                             eprintln!("lp_dual polish pass {}: rel_d={:.3e}->{:.3e}",
                                 pass, final_metrics.rel_d, polish_metrics.rel_d);
                         }
@@ -1257,7 +1257,7 @@ pub fn solve_ipm2(
                             final_metrics = polish_metrics;
 
                             if is_optimal(&final_metrics, &criteria) {
-                                if diag.enabled {
+                                if diag.enabled() {
                                     eprintln!("lp_dual polish: upgraded to Optimal");
                                 }
                                 status = SolveStatus::Optimal;
@@ -1277,7 +1277,7 @@ pub fn solve_ipm2(
         // This is the opposite case - project x onto active violating constraints
         // Use combined primal+dual polish to also adjust z for the dual degradation
         if !primal_ok && dual_ok && gap_ok {
-            if diag.enabled {
+            if diag.enabled() {
                 eprintln!("attempting combined primal+dual polish...");
             }
 
@@ -1319,7 +1319,7 @@ pub fn solve_ipm2(
                     &mut px_polish,
                 );
 
-                if diag.enabled {
+                if diag.enabled() {
                     eprintln!("combined polish result: rel_p={:.3e}->{:.3e} rel_d={:.3e}->{:.3e} gap_rel={:.3e}->{:.3e}",
                         final_metrics.rel_p, polish_metrics.rel_p,
                         final_metrics.rel_d, polish_metrics.rel_d,
@@ -1328,7 +1328,7 @@ pub fn solve_ipm2(
 
                 // Check if polish achieves optimality
                 if is_optimal(&polish_metrics, &criteria) {
-                    if diag.enabled {
+                    if diag.enabled() {
                         eprintln!("combined polish: achieves OPTIMAL!");
                     }
                     x = polished.x;
@@ -1342,7 +1342,7 @@ pub fn solve_ipm2(
                     let worst_after = polish_metrics.rel_p.max(polish_metrics.rel_d);
 
                     if worst_after < worst_before {
-                        if diag.enabled {
+                        if diag.enabled() {
                             eprintln!("combined polish: accepted (worst {:.3e}->{:.3e})",
                                 worst_before, worst_after);
                         }
@@ -1350,7 +1350,7 @@ pub fn solve_ipm2(
                         s = polished.s;
                         z = polished.z;
                         final_metrics = polish_metrics;
-                    } else if diag.enabled {
+                    } else if diag.enabled() {
                         eprintln!("combined polish: rejected (no improvement)");
                     }
                 }
@@ -1403,7 +1403,7 @@ pub fn solve_ipm2(
         // and severely ill-conditioned KKT is sufficient to indicate precision floor
         // (don't require stall counter check since it can be reset during mode transitions)
 
-        if diag.enabled {
+        if diag.enabled() {
             eprintln!("\nCondition-aware acceptance checks:");
             eprintln!("  primal_ok: {} (rel_p={:.3e} <= {:.3e})", primal_ok, final_metrics.rel_p, criteria.tol_feas);
             eprintln!("  gap_ok: {} (gap_rel={:.3e} <= 1e-4)", gap_ok, final_metrics.gap_rel);
@@ -1412,7 +1412,7 @@ pub fn solve_ipm2(
         }
 
         if primal_ok && gap_ok && dual_stuck && ill_conditioned {
-            if diag.enabled {
+            if diag.enabled() {
                 eprintln!("\nCondition-aware acceptance:");
                 eprintln!("  rel_p={:.3e} (✓), gap_rel={:.3e} (✓), rel_d={:.3e} (✗)",
                     final_metrics.rel_p, final_metrics.gap_rel, final_metrics.rel_d);

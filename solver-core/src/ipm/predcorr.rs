@@ -7,19 +7,38 @@
 //! This implementation follows §7 of the design doc.
 
 use super::hsde::{HsdeState, HsdeResiduals, compute_mu};
-use crate::cones::{ConeKernel, NonNegCone, SocCone};
+use crate::cones::{ConeKernel, NonNegCone, SocCone, PsdCone};
+use crate::cones::psd::{mat_to_svec, svec_to_mat};
 use crate::linalg::kkt::KktSolver;
 use crate::scaling::{ScalingBlock, nt};
 use crate::problem::{ProblemData, SolverSettings};
+use nalgebra::DMatrix;
 use std::any::Any;
 use std::time::{Duration, Instant};
 
 fn diagnostics_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 2 means verbose)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            return v.parse::<u8>().map(|n| n >= 2).unwrap_or(false);
+        }
+        // Legacy: check MINIX_DIAGNOSTICS
         std::env::var("MINIX_DIAGNOSTICS")
-            .map(|v| v != "0")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false)
+    })
+}
+
+fn trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 4 means trace)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            return v.parse::<u8>().map(|n| n >= 4).unwrap_or(false);
+        }
+        // Legacy: check PSD-specific debug vars
+        std::env::var("MINIX_DEBUG_PSD_DS").ok().as_deref() == Some("1")
     })
 }
 
@@ -832,8 +851,32 @@ pub fn predictor_corrector_step(
                         ds_aff[offset + i] = -state.s[offset + i] - h_dz[i];
                     }
                 }
+                ScalingBlock::PsdStructured { w_factor, n } => {
+                    // For PSD, H = W ⊗ W (Kronecker product in svec form)
+                    // ds = -s - H*dz = -s - W*Dz*W (where Dz is matrix form of dz)
+                    let w = DMatrix::<f64>::from_row_slice(*n, *n, w_factor);
+                    let dz_slice = &dz_aff[offset..offset + dim];
+                    let dz_mat = svec_to_mat(dz_slice, *n);
+                    let h_dz_mat = &w * &dz_mat * &w;
+                    let mut h_dz = vec![0.0; dim];
+                    mat_to_svec(&h_dz_mat, &mut h_dz);
+                    for i in 0..dim {
+                        ds_aff[offset + i] = -state.s[offset + i] - h_dz[i];
+                    }
+
+                    // Debug output at trace level (MINIX_VERBOSE=4)
+                    let debug = trace_enabled();
+                    if debug {
+                        eprintln!("PSD ds_aff: dz={:?}", dz_slice);
+                        eprintln!("  H*dz={:?}", h_dz);
+                        eprintln!("  s={:?}", &state.s[offset..offset + dim]);
+                        eprintln!("  ds_aff={:?}", &ds_aff[offset..offset + dim]);
+                    }
+                }
                 _ => {
-                    // Fallback: assume diagonal with H = s/z
+                    // Fallback for unknown scaling blocks - should not happen
+                    // This now handles Zero blocks which are filtered above,
+                    // Dense3x3 (exp/pow cones), etc.
                     for i in 0..dim {
                         let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
                         ds_aff[offset + i] = -state.s[offset + i] - h_ii * dz_aff[offset + i];
@@ -933,8 +976,31 @@ pub fn predictor_corrector_step(
 
                 let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
                 let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+                let is_psd = (cone.as_ref() as &dyn Any).is::<PsdCone>();
 
-                if is_soc {
+                if is_psd {
+                    // PSD cone: use pure centering (no Mehrotra correction)
+                    // d_s_comb = s - σμ * svec(I)
+                    // This avoids the numerical issues from the diagonal fallback
+                    if let ScalingBlock::PsdStructured { n, .. } = &scaling[cone_idx] {
+                        let n_psd = *n;
+                        // Copy s
+                        for i in 0..dim {
+                            d_s_comb[offset + i] = state.s[offset + i];
+                        }
+                        // Subtract σμ from diagonal elements
+                        // Diagonal (k,k) is at svec index k*(k+3)/2 for k=0..n-1
+                        for k in 0..n_psd {
+                            let diag_idx = k * (k + 3) / 2;
+                            d_s_comb[offset + diag_idx] -= target_mu;
+                        }
+                    } else {
+                        // Fallback: just use s for d_s_comb
+                        for i in 0..dim {
+                            d_s_comb[offset + i] = state.s[offset + i];
+                        }
+                    }
+                } else if is_soc {
                     if let ScalingBlock::SocStructured { w } = &scaling[cone_idx] {
                         let z_slice = &state.z[offset..offset + dim];
                         let ds_aff_slice = &ds_aff[offset..offset + dim];
@@ -1094,8 +1160,20 @@ pub fn predictor_corrector_step(
                                 ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
                             }
                         }
+                        ScalingBlock::PsdStructured { w_factor, n } => {
+                            // For PSD, H = W ⊗ W (Kronecker product in svec form)
+                            // ds = -d_s - H*dz = -d_s - W*Dz*W
+                            let w = DMatrix::<f64>::from_row_slice(*n, *n, w_factor);
+                            let dz_mat = svec_to_mat(&dz[offset..offset + dim], *n);
+                            let h_dz_mat = &w * &dz_mat * &w;
+                            let mut h_dz = vec![0.0; dim];
+                            mat_to_svec(&h_dz_mat, &mut h_dz);
+                            for i in 0..dim {
+                                ds[offset + i] = -d_s_comb[offset + i] - h_dz[i];
+                            }
+                        }
                         _ => {
-                            // Fallback: assume diagonal with H = s/z
+                            // Fallback for Dense3x3 (exp/pow cones), etc.
                             for i in 0..dim {
                                 let h_ii = state.s[offset + i] / state.z[offset + i].max(1e-14);
                                 ds[offset + i] = -d_s_comb[offset + i] - h_ii * dz[offset + i];

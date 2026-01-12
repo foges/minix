@@ -23,8 +23,13 @@ use std::sync::OnceLock;
 fn diagnostics_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 2 means verbose)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            return v.parse::<u8>().map(|n| n >= 2).unwrap_or(false);
+        }
+        // Legacy: check MINIX_DIAGNOSTICS
         std::env::var("MINIX_DIAGNOSTICS")
-            .map(|v| v != "0")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false)
     })
 }

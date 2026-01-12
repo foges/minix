@@ -41,10 +41,35 @@ fn symm_matvec_upper(a: &SparseCsc, x: &[f64], y: &mut [f64]) {
 fn kkt_diagnostics_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 3 means debug)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            if let Ok(n) = v.parse::<u8>() {
+                return n >= 3;
+            }
+        }
+        // Also check MINIX_VERBOSE_KKT for explicit KKT diagnostics
+        if let Ok(v) = std::env::var("MINIX_VERBOSE_KKT") {
+            return v != "0" && v.to_lowercase() != "false";
+        }
+        // Legacy: check MINIX_DIAGNOSTICS_KKT
         std::env::var("MINIX_DIAGNOSTICS_KKT")
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false)
+    })
+}
+
+fn psd_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 4 means trace)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            if let Ok(n) = v.parse::<u8>() {
+                return n >= 4;
+            }
+        }
+        // Legacy: check MINIX_DEBUG_PSD_KKT
+        std::env::var("MINIX_DEBUG_PSD_KKT").ok().as_deref() == Some("1")
     })
 }
 
@@ -367,10 +392,19 @@ fn update_psd_block_in_place(
     let mut col = vec![0.0; dim];
     let mut pos_idx = 0usize;
 
+    let debug = psd_trace_enabled();
+    if debug {
+        eprintln!("PSD KKT: n={}, dim={}, w_factor={:?}", n, dim, w_factor);
+        eprintln!("PSD KKT: W = {:?}", w);
+    }
+
     for col_idx in 0..dim {
         e.fill(0.0);
         e[col_idx] = 1.0;
         apply_psd_scaling(&w, n, &e, &mut col);
+        if debug {
+            eprintln!("PSD KKT: H * e_{} = {:?}", col_idx, col);
+        }
         for row_idx in 0..=col_idx {
             let mut val = -col[row_idx];
             if row_idx == col_idx {
@@ -1038,12 +1072,12 @@ impl<B: KktBackend> KktSolverImpl<B> {
             }
         }
 
-        // Ensure all diagonal entries exist so QDLDL can add regularization.
-        // For LPs (P=None) or sparse QPs with missing diagonals, we add 0.0 placeholders.
-        // QDLDL will then add static_reg to these diagonal entries.
-        // Using add_triplet with 0.0 is safe - it sums with existing values if present.
+        // Add regularization to all diagonal entries in the top-left block.
+        // For LPs (P=None) or sparse QPs with missing diagonals, this ensures
+        // the KKT matrix is well-conditioned. QDLDL may add additional dynamic
+        // regularization during factorization if needed.
         for i in 0..self.n {
-            add_triplet(i, i, 0.0, &mut tri);
+            add_triplet(i, i, self.static_reg, &mut tri);
         }
 
         // ===================================================================
@@ -2114,5 +2148,100 @@ mod tests {
 
         // Solutions should be different
         assert!((sol_x1[0] - sol_x2[0]).abs() > 1e-6 || (sol_x1[1] - sol_x2[1]).abs() > 1e-6);
+    }
+
+    #[test]
+    fn test_kkt_psd_cone() {
+        // Test PSD cone KKT assembly
+        // Simple 2x2 PSD cone:
+        //   n = 3 (svec dimension for 2x2 symmetric matrix)
+        //   m = 3 (single PSD cone block)
+        //   A = -I (identity embedding: s = x)
+        //   H = W ⊗ W where W = I (identity scaling)
+        //
+        // For W = I, H = I (identity on svec space).
+        // KKT matrix:
+        //   [ε*I    -I     ]
+        //   [-I   -(I + 2ε)]
+        //
+        // This should be well-conditioned.
+
+        let n = 3;  // svec dimension for 2x2
+        let m = 3;
+
+        // A = -I
+        let a_triplets = vec![
+            (0, 0, -1.0),
+            (1, 1, -1.0),
+            (2, 2, -1.0),
+        ];
+        let a = sparse::from_triplets(m, n, a_triplets);
+
+        // H = PSD scaling with W = I (2x2 identity)
+        // w_factor stores W row-major: [1, 0, 0, 1]
+        let w_factor = vec![1.0, 0.0, 0.0, 1.0];
+        let h_blocks = vec![
+            ScalingBlock::PsdStructured { w_factor, n: 2 },
+        ];
+
+        // For this test, H diagonal is ~1, so regularization should be comparable.
+        // Using very small regularization (1e-8) causes huge Schur complement pivots
+        // during LDLT, leading to numerical errors. Use sqrt(eps) * scale instead.
+        let static_reg = 1e-4;  // sqrt(1e-8) matched to H scale
+        let dynamic_reg = 1e-7;
+
+        let mut kkt_solver = KktSolver::new(n, m, static_reg, dynamic_reg);
+
+        // Initialize (symbolic factorization)
+        kkt_solver.initialize(None, &a, &h_blocks).unwrap();
+
+        // Factor
+        let factor = kkt_solver.factor(None, &a, &h_blocks).unwrap();
+
+        // Debug: print the KKT matrix
+        let kkt_mat = kkt_solver.build_kkt_matrix_with_perm(None, None, &a, &h_blocks);
+        eprintln!("KKT matrix ({}x{}):", kkt_mat.rows(), kkt_mat.cols());
+        for col in 0..kkt_mat.cols() {
+            if let Some(col_view) = kkt_mat.outer_view(col) {
+                for (row, &val) in col_view.iter() {
+                    if val.abs() > 1e-14 {
+                        eprintln!("  K[{},{}] = {:.6e}", row, col, val);
+                    }
+                }
+            }
+        }
+
+        // Note: condition number estimate can be misleading for indefinite matrices
+        // with small regularization. The key test is whether the solve is accurate.
+        if let Some(cond) = kkt_solver.estimate_condition_number() {
+            eprintln!("PSD KKT condition number: {:.3e}", cond);
+        }
+
+        // Solve a simple system
+        let rhs_x = vec![1.0, 0.0, 0.0];
+        let rhs_z = vec![0.0, 0.0, 0.0];
+        let mut sol_x = vec![0.0; n];
+        let mut sol_z = vec![0.0; m];
+
+        kkt_solver.solve(&factor, &rhs_x, &rhs_z, &mut sol_x, &mut sol_z);
+
+        eprintln!("PSD KKT solve: sol_x = {:?}", sol_x);
+        eprintln!("PSD KKT solve: sol_z = {:?}", sol_z);
+
+        // Verify solution accuracy
+        // For the regularized system, the exact solution is:
+        //   (ε + 1)*x ≈ rhs_x => x ≈ rhs_x / (ε + 1) ≈ rhs_x
+        //   z = -x
+        // The solution should be close to x = [1, 0, 0], z = [-1, 0, 0]
+        eprintln!("Expected: x ≈ [1, 0, 0], z ≈ [-1, 0, 0]");
+
+        // Check solution is roughly correct (allow O(ε) error due to regularization)
+        let tol = 2.0 * static_reg;  // O(ε) tolerance
+        assert!((sol_x[0] - 1.0).abs() < tol, "sol_x[0] should be ≈1, got {}", sol_x[0]);
+        assert!(sol_x[1].abs() < tol, "sol_x[1] should be ≈0, got {}", sol_x[1]);
+        assert!(sol_x[2].abs() < tol, "sol_x[2] should be ≈0, got {}", sol_x[2]);
+        assert!((sol_z[0] + 1.0).abs() < tol, "sol_z[0] should be ≈-1, got {}", sol_z[0]);
+        assert!(sol_z[1].abs() < tol, "sol_z[1] should be ≈0, got {}", sol_z[1]);
+        assert!(sol_z[2].abs() < tol, "sol_z[2] should be ≈0, got {}", sol_z[2]);
     }
 }

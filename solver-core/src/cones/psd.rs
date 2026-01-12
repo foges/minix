@@ -5,6 +5,21 @@
 use super::traits::ConeKernel;
 use nalgebra::DMatrix;
 use nalgebra::linalg::SymmetricEigen;
+use std::sync::OnceLock;
+
+fn psd_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 4 means trace)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            if let Ok(n) = v.parse::<u8>() {
+                return n >= 4;
+            }
+        }
+        // Legacy: check MINIX_DEBUG_PSD
+        std::env::var("MINIX_DEBUG_PSD").ok().as_deref() == Some("1")
+    })
+}
 
 /// PSD cone (placeholder)
 #[derive(Debug, Clone)]
@@ -57,9 +72,21 @@ impl ConeKernel for PsdCone {
 
         let x = svec_to_mat(s, self.n);
         let dx = svec_to_mat(ds, self.n);
-        let eig_x = SymmetricEigen::new(x);
+        let eig_x = SymmetricEigen::new(x.clone());
         let min_eig_x = eig_x.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+
+        // Debug output for PSD step computation at trace level (MINIX_VERBOSE=4)
+        let debug_psd = psd_trace_enabled();
+        if debug_psd {
+            eprintln!("PSD step_to_boundary: n={}, min_eig_x={:.3e}, s={:?}", self.n, min_eig_x, s);
+            eprintln!("  ds={:?}", ds);
+            eprintln!("  X eigenvalues: {:?}", eig_x.eigenvalues.as_slice());
+        }
+
         if !min_eig_x.is_finite() || min_eig_x <= 0.0 {
+            if debug_psd {
+                eprintln!("  -> returning 0.0 (s not interior)");
+            }
             return 0.0;
         }
 

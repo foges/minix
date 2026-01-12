@@ -10,6 +10,7 @@
 use std::any::Any;
 
 use crate::cones::{ConeKernel, NonNegCone, SocCone, ExpCone, PowCone, PsdCone, exp_dual_map_block, exp_central_ok, exp_third_order_correction};
+use crate::cones::psd::{mat_to_svec, svec_to_mat};
 use crate::ipm::hsde::{compute_mu, HsdeResiduals, HsdeState};
 use crate::ipm2::{IpmWorkspace, PerfSection, PerfTimers};
 use crate::ipm2::workspace::SocScratch;
@@ -17,13 +18,34 @@ use crate::linalg::kkt_trait::KktSolverTrait;
 use crate::linalg::unified_kkt::UnifiedKktSolver;
 use crate::problem::{ProblemData, SolverSettings};
 use crate::scaling::{ScalingBlock, nt, bfgs};
+use nalgebra::DMatrix;
+use nalgebra::linalg::SymmetricEigen;
 
 fn diagnostics_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 2 means verbose)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            return v.parse::<u8>().map(|n| n >= 2).unwrap_or(false);
+        }
+        // Legacy: check MINIX_DIAGNOSTICS
         std::env::var("MINIX_DIAGNOSTICS")
-            .map(|v| v != "0")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false)
+    })
+}
+
+fn trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        // Check new unified MINIX_VERBOSE first (level >= 4 means trace)
+        if let Ok(v) = std::env::var("MINIX_VERBOSE") {
+            return v.parse::<u8>().map(|n| n >= 4).unwrap_or(false);
+        }
+        // Legacy: check cone-specific debug vars
+        std::env::var("MINIX_EXP_DEBUG").is_ok()
+            || std::env::var("MINIX_EXP_CENTRAL_CHECK").is_ok()
+            || std::env::var("MINIX_QFORPLAN_DIAG").is_ok()
     })
 }
 
@@ -1023,26 +1045,85 @@ pub fn predictor_corrector_step_in_place(
                 // Expected benefit: 3-10x iteration reduction (from 50-200 to 10-30 iters)
 
                 if is_psd {
-                    // PSD cone: use pure centering (no Mehrotra correction)
-                    // d_s_comb = s - σμ * svec(I)
-                    // This avoids the numerical issues from the diagonal fallback
-                    if let ScalingBlock::PsdStructured { n, .. } = &ws.scaling[cone_idx] {
+                    // PSD cone: proper Jordan-algebra Mehrotra corrector with Sylvester solve
+                    // This is the PSD analogue of the SOC corrector below
+                    if let ScalingBlock::PsdStructured { w_factor, n } = &ws.scaling[cone_idx] {
                         let n_psd = *n;
-                        // Copy s
-                        for i in 0..dim {
-                            ws.d_s_comb[offset + i] = state.s[offset + i];
+                        debug_assert_eq!(dim, n_psd * (n_psd + 1) / 2);
+
+                        let z_slice = &state.z[offset..offset + dim];
+                        let ds_aff_slice = &ws.ds_aff[offset..offset + dim];
+                        let dz_aff_slice = &ws.dz_aff[offset..offset + dim];
+
+                        // svec -> symmetric matrices
+                        let z_mat = svec_to_mat(z_slice, n_psd);
+                        let ds_aff_mat = svec_to_mat(ds_aff_slice, n_psd);
+                        let dz_aff_mat = svec_to_mat(dz_aff_slice, n_psd);
+
+                        // W from scaling block (NT scaling matrix)
+                        let w_mat = DMatrix::from_row_slice(n_psd, n_psd, w_factor);
+
+                        // W^{1/2}, W^{-1/2} via eigendecomposition
+                        let eig_w = SymmetricEigen::new(w_mat);
+                        let q_w = &eig_w.eigenvectors;
+                        let d_w = &eig_w.eigenvalues;
+
+                        let d_sqrt = d_w.map(|x| x.max(1e-30).sqrt());
+                        let d_inv_sqrt = d_w.map(|x| 1.0 / x.max(1e-30).sqrt());
+                        let q_w_t = q_w.transpose();
+
+                        let w_half = q_w * DMatrix::from_diagonal(&d_sqrt) * &q_w_t;
+                        let w_half_inv = q_w * DMatrix::from_diagonal(&d_inv_sqrt) * &q_w_t;
+
+                        // λ = W^{1/2} Z W^{1/2}
+                        let lambda = &w_half * &z_mat * &w_half;
+                        // A = W^{-1/2} dS_aff W^{-1/2}
+                        let a = &w_half_inv * &ds_aff_mat * &w_half_inv;
+                        // B = W^{1/2} dZ_aff W^{1/2}
+                        let b = &w_half * &dz_aff_mat * &w_half;
+
+                        // η = (AB + BA) / 2 (Jordan product)
+                        let eta = (&a * &b + &b * &a) * 0.5;
+
+                        // v = λ² + η - σμ I
+                        let mut v = &lambda * &lambda + eta;
+                        for i in 0..n_psd {
+                            v[(i, i)] -= target_mu;
                         }
-                        // Subtract σμ from diagonal elements
-                        // Diagonal (k,k) is at svec index k*(k+3)/2 for k=0..n-1
-                        for k in 0..n_psd {
-                            let diag_idx = k * (k + 3) / 2;
-                            ws.d_s_comb[offset + diag_idx] -= target_mu;
+
+                        // Solve λ U + U λ = 2v using eigendecomposition of λ (Sylvester equation)
+                        let eig_l = SymmetricEigen::new(lambda);
+                        let q_l = &eig_l.eigenvectors;
+                        let d_l = &eig_l.eigenvalues;
+                        let q_l_t = q_l.transpose();
+
+                        let v_hat = &q_l_t * &v * q_l;
+                        let mut u_hat = DMatrix::zeros(n_psd, n_psd);
+                        for i in 0..n_psd {
+                            for j in 0..n_psd {
+                                let denom = d_l[i] + d_l[j];
+                                // denom should be > 0 if λ is PD; guard anyway
+                                u_hat[(i, j)] = if denom > 1e-30 {
+                                    2.0 * v_hat[(i, j)] / denom
+                                } else {
+                                    0.0
+                                };
+                            }
                         }
+                        let u = q_l * u_hat * &q_l_t;
+
+                        // d_s_comb = W^{1/2} U W^{1/2}
+                        let ds_comb_mat = &w_half * u * &w_half;
+
+                        // Back to svec
+                        mat_to_svec(&ds_comb_mat, &mut ws.d_s_comb[offset..offset + dim]);
                     } else {
-                        // Fallback: just use s for d_s_comb
+                        // Fallback: pure centering (no Mehrotra correction)
                         for i in 0..dim {
                             ws.d_s_comb[offset + i] = state.s[offset + i];
                         }
+                        // Subtract σμ from diagonal elements if we can detect n
+                        // This is a simple fallback; the structured path above is preferred
                     }
                 } else if is_soc {
                     if let ScalingBlock::SocStructured { w } = &ws.scaling[cone_idx] {
@@ -1167,8 +1248,8 @@ pub fn predictor_corrector_step_in_place(
                                 ws.d_s_comb[i] = s_block[j] + sigma * target_mu * grad_fstar[j] + eta[j];
                             }
 
-                            // Diagnostic logging
-                            if std::env::var("MINIX_EXP_DEBUG").is_ok() {
+                            // Diagnostic logging at trace level (MINIX_VERBOSE=4)
+                            if trace_enabled() {
                                 eprintln!("Exp cone block {} corrector:", block);
                                 eprintln!("  s = {:?}", s_block);
                                 eprintln!("  z = {:?}", z_block);
@@ -1389,7 +1470,8 @@ pub fn predictor_corrector_step_in_place(
 
         // Exp cone central neighborhood check (P0.5)
         // Backtrack if the step would violate the central neighborhood condition
-        if std::env::var("MINIX_EXP_CENTRAL_CHECK").is_ok() {
+        // Enabled at trace level (MINIX_VERBOSE=4)
+        if trace_enabled() {
             let theta = 0.3; // centrality parameter (0.1 to 0.5 typical)
             let mut offset = 0usize;
             let max_backtrack = 10;

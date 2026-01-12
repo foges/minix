@@ -19,7 +19,7 @@ pub mod solve;
 pub mod solve_normal;
 pub mod workspace;
 
-pub use diagnostics::DiagnosticsConfig;
+pub use diagnostics::{DiagnosticsConfig, VerbosityLevel};
 pub use metrics::{UnscaledMetrics, AtzResult, compute_unscaled_metrics, compute_atz_with_kahan, diagnose_dual_residual};
 pub use modes::{SolveMode, StallDetector};
 pub use polish::{polish_nonneg_active_set, polish_primal_projection, polish_primal_and_dual, polish_dual_only, polish_lp_dual};
