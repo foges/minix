@@ -172,6 +172,35 @@ impl HsdeState {
         }
     }
 
+    /// Force s and z to interior points, unconditionally.
+    ///
+    /// Unlike push_to_interior, this always resets to unit initialization.
+    /// Use this for recovery when the solver is stuck (e.g., alpha_sz = 0).
+    pub fn force_to_interior(&mut self, cones: &[Box<dyn ConeKernel>], min_value: f64) {
+        let mut offset = 0;
+        for cone in cones {
+            let dim = cone.dim();
+
+            // Skip zero cones
+            if cone.barrier_degree() == 0 {
+                offset += dim;
+                continue;
+            }
+
+            // Unconditionally reset s and z to unit initialization
+            let mut s_unit = vec![0.0; dim];
+            let mut z_unit = vec![0.0; dim];
+            cone.unit_initialization(&mut s_unit, &mut z_unit);
+
+            for i in 0..dim {
+                self.s[offset + i] = s_unit[i] * min_value;
+                self.z[offset + i] = z_unit[i] * min_value;
+            }
+
+            offset += dim;
+        }
+    }
+
     /// Legacy initialization (kept for backwards compat if needed).
     pub fn initialize(&mut self, cones: &[Box<dyn ConeKernel>]) {
         // x = 0

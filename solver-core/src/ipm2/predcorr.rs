@@ -717,6 +717,12 @@ pub fn predictor_corrector_step_in_place(
                         };
                     }
                     ws.scaling[cone_idx] = ScalingBlock::Diagonal { d };
+                } else if matches!(ws.scaling[cone_idx], ScalingBlock::Dense3x3 { .. }) {
+                    // Fallback to identity for nonsymmetric cones (exp/pow) when BFGS fails
+                    // This gives a well-conditioned but less accurate scaling
+                    ws.scaling[cone_idx] = ScalingBlock::Dense3x3 {
+                        h: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    };
                 } else if let ScalingBlock::Diagonal { d } = &mut ws.scaling[cone_idx] {
                     for i in 0..dim {
                         let ratio = s[i] / z[i];
@@ -1009,13 +1015,36 @@ pub fn predictor_corrector_step_in_place(
 
                 let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
                 let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+                let is_psd = (cone.as_ref() as &dyn Any).is::<PsdCone>();
 
                 // TODO: Implement analytical third-order correction for exponential cones
                 // Research shows this requires a complex analytical formula (not finite differences).
                 // See: _planning/v16/third_order_correction_analysis.md
                 // Expected benefit: 3-10x iteration reduction (from 50-200 to 10-30 iters)
 
-                if is_soc {
+                if is_psd {
+                    // PSD cone: use pure centering (no Mehrotra correction)
+                    // d_s_comb = s - σμ * svec(I)
+                    // This avoids the numerical issues from the diagonal fallback
+                    if let ScalingBlock::PsdStructured { n, .. } = &ws.scaling[cone_idx] {
+                        let n_psd = *n;
+                        // Copy s
+                        for i in 0..dim {
+                            ws.d_s_comb[offset + i] = state.s[offset + i];
+                        }
+                        // Subtract σμ from diagonal elements
+                        // Diagonal (k,k) is at svec index k*(k+3)/2 for k=0..n-1
+                        for k in 0..n_psd {
+                            let diag_idx = k * (k + 3) / 2;
+                            ws.d_s_comb[offset + diag_idx] -= target_mu;
+                        }
+                    } else {
+                        // Fallback: just use s for d_s_comb
+                        for i in 0..dim {
+                            ws.d_s_comb[offset + i] = state.s[offset + i];
+                        }
+                    }
+                } else if is_soc {
                     if let ScalingBlock::SocStructured { w } = &ws.scaling[cone_idx] {
                         let z_slice = &state.z[offset..offset + dim];
                         let ds_aff_slice = &ws.ds_aff[offset..offset + dim];

@@ -145,7 +145,28 @@ pub fn solve_ipm2(
     stall.polish_mu_thresh = (settings.tol_gap * 100.0).max(1e-12);
     let mut solve_mode = SolveMode::Normal;
     let mut reg_policy = RegularizationPolicy::default();
-    reg_policy.static_reg = settings.static_reg.max(1e-8);
+    // For PSD cones, the H diagonal is ~1 at initialization. Using tiny regularization
+    // (1e-8) causes huge Schur complement pivots in LDLT, leading to numerical errors.
+    // Detect PSD cones and use larger regularization (sqrt(eps) * H_scale).
+    // For exp cones, the BFGS scaling can also produce ill-conditioned matrices.
+    let has_psd = cones.iter().any(|c| {
+        use std::any::Any;
+        (c.as_ref() as &dyn Any).is::<crate::cones::PsdCone>()
+    });
+    let has_exp = cones.iter().any(|c| {
+        use std::any::Any;
+        (c.as_ref() as &dyn Any).is::<crate::cones::ExpCone>()
+    });
+    let base_reg = if has_exp {
+        // For Exp cones, BFGS scaling is prone to ill-conditioning; use strong regularization
+        settings.static_reg.max(1e-3)
+    } else if has_psd {
+        // For PSD cones, use 1e-4 (sqrt of typical 1e-8) to match H diagonal scale
+        settings.static_reg.max(1e-4)
+    } else {
+        settings.static_reg.max(1e-8)
+    };
+    reg_policy.static_reg = base_reg;
     reg_policy.dynamic_min_pivot = settings.dynamic_reg_min_pivot;
     reg_policy.polish_static_reg =
         (reg_policy.static_reg * 0.01).max(reg_policy.static_reg_min);
@@ -187,6 +208,7 @@ pub fn solve_ipm2(
     let mut iter = 0;
     let mut consecutive_failures = 0;
     let mut numeric_recovery_level: usize = 0;
+    let mut cone_interior_stalls: usize = 0; // Track consecutive alpha_sz stalls for cone recovery
     const MAX_CONSECUTIVE_FAILURES: usize = 3;
     const MAX_NUMERIC_RECOVERY_LEVEL: usize = 6;
 
@@ -427,6 +449,44 @@ pub fn solve_ipm2(
                 state.push_to_interior(&cones, 1e-2);
                 mu = compute_mu(&state, barrier_degree);
             }
+        }
+
+        // Cone interior recovery: when alpha_sz is extremely small, the solver is stuck
+        // at cone boundaries. Force state back into the interior to allow progress.
+        // This is especially important for nonsymmetric cones (exp, pow) where step_to_boundary
+        // returns 0 if the current point is not interior or the step direction exits immediately.
+        // BUT: don't trigger recovery if we're already close to optimal (would destroy good solution!)
+        if step_result.alpha_sz < 1e-8 {
+            cone_interior_stalls += 1;
+            if cone_interior_stalls >= 3 {
+                // Check if we're already close to optimal - don't reset in that case
+                compute_residuals(&scaled_prob, &state, &mut residuals);
+                let r_x_norm: f64 = residuals.r_x.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+                let r_z_norm: f64 = residuals.r_z.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+                let res_norm = r_x_norm.max(r_z_norm);
+
+                // Only do recovery if residuals are still significant
+                if res_norm > 1e-5 {
+                    if diag.enabled {
+                        eprintln!(
+                            "cone interior recovery at iter {}: alpha_sz={:.3e}, stalls={}, res_norm={:.3e}, forcing to interior",
+                            iter, step_result.alpha_sz, cone_interior_stalls, res_norm
+                        );
+                    }
+                    // Use force_to_interior to unconditionally reset s,z even if technically interior
+                    // This helps when the step direction points out of the cone
+                    state.force_to_interior(&cones, 1e-1); // Use larger margin for recovery
+                    mu = compute_mu(&state, barrier_degree);
+                } else if diag.enabled {
+                    eprintln!(
+                        "cone interior recovery skipped at iter {}: res_norm={:.3e} is small, already near optimal",
+                        iter, res_norm
+                    );
+                }
+                cone_interior_stalls = 0;
+            }
+        } else {
+            cone_interior_stalls = 0; // Reset when step size is healthy
         }
 
         if !mu.is_finite() || mu > 1e15 {

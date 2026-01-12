@@ -8,13 +8,19 @@ use solver_core::linalg::sparse;
 use solver_core::{ConeSpec, ProblemData, SolverSettings, SolveStatus, solve};
 use std::time::Instant;
 
-/// Entropy maximization: maximize ∑ x_i log(x_i) subject to ∑ x_i = 1, x ≥ 0
+/// Entropy maximization: maximize -∑ x_i log(x_i) subject to ∑ x_i = 1, x ≥ 0
 ///
 /// Reformulated as exponential cone problem:
-/// minimize -∑ t_i subject to (t_i, x_i, x_i) ∈ K_exp, ∑ x_i = 1
+/// minimize -∑ t_i subject to (t_i, x_i, u_i) ∈ K_exp, u_i = 1, ∑ x_i = 1
+///
+/// The exp cone K_exp = {(s0, s1, s2) : s1 * exp(s0/s1) <= s2, s1,s2 > 0}
+/// is equivalent to s0 <= s1 * log(s2/s1).
+///
+/// With (t_i, x_i, u_i) and u_i = 1, this gives: t_i <= x_i * log(1/x_i) = -x_i * log(x_i)
+/// So maximizing ∑ t_i maximizes the entropy -∑ x_i log(x_i).
 pub fn entropy_maximization(n: usize) -> ProblemData {
-    // Variables: [x_1, ..., x_n, t_1, ..., t_n]
-    let num_vars = 2 * n;
+    // Variables: [x_1, ..., x_n, t_1, ..., t_n, u_1, ..., u_n]
+    let num_vars = 3 * n;
 
     // Objective: minimize -∑ t_i  (equivalent to maximizing ∑ t_i)
     let mut q = vec![0.0; num_vars];
@@ -23,41 +29,52 @@ pub fn entropy_maximization(n: usize) -> ProblemData {
     }
 
     // Constraints:
-    // Rows 0..3n: n exp cones (t_i, x_i, x_i) ∈ K_exp
-    // Row 3n: ∑ x_i = 1 (equality constraint)
+    // Rows 0..3n: n exp cones (t_i, x_i, u_i) ∈ K_exp
+    // Rows 3n..4n: u_i = 1 (equality constraints)
+    // Row 4n: ∑ x_i = 1 (equality constraint)
     let mut triplets = Vec::new();
 
-    // Exp cone constraints: (t_i, x_i, x_i) ∈ K_exp
+    // Exp cone constraints: (t_i, x_i, u_i) ∈ K_exp
     for i in 0..n {
         let row_offset = 3 * i;
         // Row 0: -t_i + s_0 = 0  =>  s_0 = t_i
         triplets.push((row_offset, n + i, -1.0));
         // Row 1: -x_i + s_1 = 0  =>  s_1 = x_i
         triplets.push((row_offset + 1, i, -1.0));
-        // Row 2: -x_i + s_2 = 0  =>  s_2 = x_i
-        triplets.push((row_offset + 2, i, -1.0));
+        // Row 2: -u_i + s_2 = 0  =>  s_2 = u_i
+        triplets.push((row_offset + 2, 2 * n + i, -1.0));
     }
 
-    // Equality constraint: ∑ x_i + s = 1
-    let eq_row = 3 * n;
+    // Equality constraints: u_i = 1
     for i in 0..n {
-        triplets.push((eq_row, i, 1.0));
+        triplets.push((3 * n + i, 2 * n + i, 1.0));
     }
 
-    let A = sparse::from_triplets(3 * n + 1, num_vars, triplets);
-    let mut b = vec![0.0; 3 * n + 1];
-    b[3 * n] = 1.0; // ∑ x_i = 1
+    // Equality constraint: ∑ x_i = 1
+    let sum_row = 4 * n;
+    for i in 0..n {
+        triplets.push((sum_row, i, 1.0));
+    }
+
+    let a = sparse::from_triplets(4 * n + 1, num_vars, triplets);
+
+    // RHS: [0]*3n for exp cones, [1]*n for u_i=1, [1] for sum
+    let mut b = vec![0.0; 4 * n + 1];
+    for i in 0..n {
+        b[3 * n + i] = 1.0; // u_i = 1
+    }
+    b[4 * n] = 1.0; // ∑ x_i = 1
 
     let mut cones = Vec::new();
     for _ in 0..n {
         cones.push(ConeSpec::Exp { count: 1 });
     }
-    cones.push(ConeSpec::Zero { dim: 1 });
+    cones.push(ConeSpec::Zero { dim: n + 1 }); // u_i = 1 and ∑ x_i = 1
 
     ProblemData {
         P: None,
         q,
-        A,
+        A: a,
         b,
         cones,
         var_bounds: None,
@@ -69,43 +86,67 @@ pub fn entropy_maximization(n: usize) -> ProblemData {
 /// subject to ∑ x_i = 1, x ≥ 0
 ///
 /// Reformulated: min ∑ t_i - ∑ x_i log(p_i)
-/// subject to (t_i, x_i, x_i) ∈ K_exp, ∑ x_i = 1
+/// where t_i >= x_i log(x_i) via exp cone constraint (-t_i, x_i, u_i) ∈ K_exp, u_i = 1
+///
+/// The exp cone (-t, y, z) constraint gives: y * exp(-t/y) <= z
+/// With y=x_i, z=1: x_i * exp(-t_i/x_i) <= 1 → -t_i/x_i <= log(1/x_i) → t_i >= x_i log(x_i)
 pub fn kl_divergence(n: usize, p: &[f64]) -> ProblemData {
     assert_eq!(p.len(), n, "p must have length n");
     assert!(p.iter().all(|&pi| pi > 0.0), "p must be positive");
 
-    // Variables: [x_1, ..., x_n, t_1, ..., t_n]
-    let num_vars = 2 * n;
+    // Variables: [x_1, ..., x_n, t_1, ..., t_n, u_1, ..., u_n]
+    let num_vars = 3 * n;
 
     // Objective: minimize ∑ t_i - ∑ x_i log(p_i)
     let mut q = vec![0.0; num_vars];
     for i in 0..n {
         q[i] = -p[i].ln(); // Coefficient for x_i
         q[n + i] = 1.0;     // Coefficient for t_i
+        // u_i has zero coefficient
     }
 
-    // Same structure as entropy_maximization
+    // Constraints:
+    // Rows 0..3n: n exp cones (-t_i, x_i, u_i) ∈ K_exp
+    // Rows 3n..4n: u_i = 1 (equality constraints)
+    // Row 4n: ∑ x_i = 1 (equality constraint)
     let mut triplets = Vec::new();
+
+    // Exp cone constraints: (-t_i, x_i, u_i) ∈ K_exp
     for i in 0..n {
         let row_offset = 3 * i;
-        triplets.push((row_offset, n + i, -1.0));
+        // Row 0: t_i + s_0 = 0 => s_0 = -t_i (note: positive sign for t_i!)
+        triplets.push((row_offset, n + i, 1.0));
+        // Row 1: -x_i + s_1 = 0 => s_1 = x_i
         triplets.push((row_offset + 1, i, -1.0));
-        triplets.push((row_offset + 2, i, -1.0));
-    }
-    let eq_row = 3 * n;
-    for i in 0..n {
-        triplets.push((eq_row, i, 1.0));
+        // Row 2: -u_i + s_2 = 0 => s_2 = u_i
+        triplets.push((row_offset + 2, 2 * n + i, -1.0));
     }
 
-    let A = sparse::from_triplets(3 * n + 1, num_vars, triplets);
-    let mut b = vec![0.0; 3 * n + 1];
-    b[3 * n] = 1.0;
+    // Equality constraints: u_i = 1
+    for i in 0..n {
+        triplets.push((3 * n + i, 2 * n + i, 1.0));
+    }
+
+    // Equality constraint: ∑ x_i = 1
+    let sum_row = 4 * n;
+    for i in 0..n {
+        triplets.push((sum_row, i, 1.0));
+    }
+
+    let A = sparse::from_triplets(4 * n + 1, num_vars, triplets);
+
+    // RHS: [0]*3n for exp cones, [1]*n for u_i=1, [1] for sum
+    let mut b = vec![0.0; 4 * n + 1];
+    for i in 0..n {
+        b[3 * n + i] = 1.0; // u_i = 1
+    }
+    b[4 * n] = 1.0; // ∑ x_i = 1
 
     let mut cones = Vec::new();
     for _ in 0..n {
         cones.push(ConeSpec::Exp { count: 1 });
     }
-    cones.push(ConeSpec::Zero { dim: 1 });
+    cones.push(ConeSpec::Zero { dim: n + 1 }); // u_i = 1 and ∑ x_i = 1
 
     ProblemData {
         P: None,
@@ -177,45 +218,67 @@ pub fn log_sum_exp(n: usize, a: &[f64], b: f64) -> ProblemData {
 
 /// Portfolio optimization with exponential utility
 ///
-/// maximize E[R] - λ/2 Var[R] where R = r'x is portfolio return
+/// maximize ∑ r_i x_i - λ ∑ x_i log(x_i)
 /// subject to ∑ x_i = 1, x ≥ 0 (fully invested, long-only)
 ///
-/// For exponential utility: max ∑ r_i x_i - λ ∑ x_i log(x_i)
+/// Reformulated as: minimize -∑ r_i x_i + λ ∑ t_i
+/// where t_i >= x_i log(x_i) via exp cone constraint (-t_i, x_i, u_i) ∈ K_exp, u_i = 1
 pub fn portfolio_exp_utility(n: usize, returns: &[f64], lambda: f64) -> ProblemData {
     assert_eq!(returns.len(), n);
 
-    // Variables: [x_1, ..., x_n, t_1, ..., t_n]
-    let num_vars = 2 * n;
+    // Variables: [x_1, ..., x_n, t_1, ..., t_n, u_1, ..., u_n]
+    let num_vars = 3 * n;
 
     // Objective: minimize -∑ r_i x_i + λ ∑ t_i
     let mut q = vec![0.0; num_vars];
     for i in 0..n {
         q[i] = -returns[i];  // -r_i for x_i
         q[n + i] = lambda;   // λ for t_i
+        // u_i has zero coefficient
     }
 
-    // Constraints: (t_i, x_i, x_i) ∈ K_exp, ∑ x_i = 1
+    // Constraints:
+    // Rows 0..3n: n exp cones (-t_i, x_i, u_i) ∈ K_exp
+    // Rows 3n..4n: u_i = 1 (equality constraints)
+    // Row 4n: ∑ x_i = 1 (equality constraint)
     let mut triplets = Vec::new();
+
+    // Exp cone constraints: (-t_i, x_i, u_i) ∈ K_exp
     for i in 0..n {
         let row_offset = 3 * i;
-        triplets.push((row_offset, n + i, -1.0));
+        // Row 0: t_i + s_0 = 0 => s_0 = -t_i (note: positive sign for t_i!)
+        triplets.push((row_offset, n + i, 1.0));
+        // Row 1: -x_i + s_1 = 0 => s_1 = x_i
         triplets.push((row_offset + 1, i, -1.0));
-        triplets.push((row_offset + 2, i, -1.0));
-    }
-    let eq_row = 3 * n;
-    for i in 0..n {
-        triplets.push((eq_row, i, 1.0));
+        // Row 2: -u_i + s_2 = 0 => s_2 = u_i
+        triplets.push((row_offset + 2, 2 * n + i, -1.0));
     }
 
-    let A = sparse::from_triplets(3 * n + 1, num_vars, triplets);
-    let mut b = vec![0.0; 3 * n + 1];
-    b[3 * n] = 1.0;
+    // Equality constraints: u_i = 1
+    for i in 0..n {
+        triplets.push((3 * n + i, 2 * n + i, 1.0));
+    }
+
+    // Equality constraint: ∑ x_i = 1
+    let sum_row = 4 * n;
+    for i in 0..n {
+        triplets.push((sum_row, i, 1.0));
+    }
+
+    let A = sparse::from_triplets(4 * n + 1, num_vars, triplets);
+
+    // RHS: [0]*3n for exp cones, [1]*n for u_i=1, [1] for sum
+    let mut b = vec![0.0; 4 * n + 1];
+    for i in 0..n {
+        b[3 * n + i] = 1.0; // u_i = 1
+    }
+    b[4 * n] = 1.0; // ∑ x_i = 1
 
     let mut cones = Vec::new();
     for _ in 0..n {
         cones.push(ConeSpec::Exp { count: 1 });
     }
-    cones.push(ConeSpec::Zero { dim: 1 });
+    cones.push(ConeSpec::Zero { dim: n + 1 }); // u_i = 1 and ∑ x_i = 1
 
     ProblemData {
         P: None,
