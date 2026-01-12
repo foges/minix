@@ -1350,4 +1350,214 @@ mod tests {
         assert!((sol1[0] - 1.0).abs() < 1e-4, "sol1[0] = {}", sol1[0]);
         assert!((sol2[0] - 1.0).abs() < 1e-4, "sol2[0] = {}", sol2[0]);
     }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_multiple_rhs() {
+        // Test solving with multiple different RHS vectors
+        let backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        // 3x3 SPD matrix
+        let n = 3;
+        let col_ptr = vec![0, 3, 5, 6];
+        let row_ind = vec![0, 1, 2, 1, 2, 2];
+        let values: Vec<f64> = vec![4.0, 1.0, 1.0, 3.0, 1.0, 5.0];
+
+        let mut backend = backend;
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+        let _factor = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+
+        // Test multiple RHS vectors
+        let test_cases: Vec<(Vec<f64>, &str)> = vec![
+            (vec![6.0, 5.0, 7.0], "ones"),
+            (vec![1.0, 0.0, 0.0], "e1"),
+            (vec![0.0, 1.0, 0.0], "e2"),
+            (vec![0.0, 0.0, 1.0], "e3"),
+        ];
+
+        for (rhs, name) in test_cases {
+            let mut solution = vec![0.0; n];
+            backend.solve(&rhs, &mut solution).unwrap();
+
+            // Verify by computing residual Ax - b
+            let mut residual = rhs.clone();
+            for col in 0..n {
+                for p in col_ptr[col]..col_ptr[col + 1] {
+                    let row = row_ind[p];
+                    let val = values[p];
+                    residual[row] -= val * solution[col];
+                    if row != col {
+                        residual[col] -= val * solution[row];
+                    }
+                }
+            }
+
+            let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+            assert!(res_norm < 1e-3, "RHS '{}': residual {} too large", name, res_norm);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_10x10_random_spd() {
+        // Test with a 10x10 SPD matrix (generated from A^T A + I)
+        let backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        let n = 10;
+        // Build a simple 10x10 SPD tridiagonal: 3 on diagonal, -1 on off-diagonals
+        let mut col_ptr = vec![0usize];
+        let mut row_ind = Vec::new();
+        let mut values = Vec::new();
+
+        for col in 0..n {
+            // Diagonal
+            row_ind.push(col);
+            values.push(3.0);
+
+            // Lower off-diagonal
+            if col < n - 1 {
+                row_ind.push(col + 1);
+                values.push(-1.0);
+            }
+
+            col_ptr.push(row_ind.len());
+        }
+
+        let mut backend = backend;
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+        let _factor = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+
+        // RHS: all ones
+        let rhs: Vec<f64> = vec![1.0; n];
+        let mut solution = vec![0.0; n];
+        backend.solve(&rhs, &mut solution).unwrap();
+
+        // Verify residual
+        let mut residual = rhs.clone();
+        for col in 0..n {
+            for p in col_ptr[col]..col_ptr[col + 1] {
+                let row = row_ind[p];
+                let val = values[p];
+                residual[row] -= val * solution[col];
+                if row != col {
+                    residual[col] -= val * solution[row];
+                }
+            }
+        }
+
+        let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(res_norm < 1e-3, "10x10 SPD: residual {} too large", res_norm);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_kkt_structure() {
+        // Test with actual KKT structure from optimization:
+        // [P + delta*I    A^T  ]
+        // [A              -D   ]
+        // where P is 2x2 PSD, A is 2x2, D is 2x2 diagonal
+        let backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        // 4x4 KKT matrix:
+        // [ 2   0.5  1   0 ]
+        // [0.5  2    0   1 ]
+        // [ 1   0   -1   0 ]
+        // [ 0   1    0  -1 ]
+        // Lower triangle in CSC:
+        let n = 4;
+        let col_ptr = vec![0, 3, 6, 8, 9];
+        let row_ind = vec![
+            0, 1, 2,     // col 0: (0,0), (1,0), (2,0)
+            1, 2, 3,     // col 1: (1,1), (2,1)=0 skip, (3,1)
+            2, 3,        // col 2: (2,2), (3,2)=0 skip - wait, let me recalculate
+            3,           // col 3: (3,3)
+        ];
+        // Actually let me rebuild this more carefully
+        // Lower triangle entries:
+        // (0,0)=2, (1,0)=0.5, (2,0)=1
+        // (1,1)=2, (3,1)=1
+        // (2,2)=-1
+        // (3,3)=-1
+        let row_ind = vec![0, 1, 2, 1, 3, 2, 3];
+        let col_ptr = vec![0, 3, 5, 6, 7];
+        let values: Vec<f64> = vec![2.0, 0.5, 1.0, 2.0, 1.0, -1.0, -1.0];
+
+        let mut backend = backend;
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+        let _factor = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+
+        // Test RHS corresponding to feasibility conditions
+        let rhs = vec![1.0, 1.0, 0.5, 0.5];
+        let mut solution = vec![0.0; n];
+        backend.solve(&rhs, &mut solution).unwrap();
+
+        // Verify residual
+        let mut residual = rhs.clone();
+        for col in 0..n {
+            for p in col_ptr[col]..col_ptr[col + 1] {
+                let row = row_ind[p];
+                let val = values[p];
+                residual[row] -= val * solution[col];
+                if row != col {
+                    residual[col] -= val * solution[row];
+                }
+            }
+        }
+
+        let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(res_norm < 1e-3, "KKT structure: residual {} too large", res_norm);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_stats_tracking() {
+        // Test that statistics are properly tracked
+        let backend = match MetalKktBackend::with_defaults() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        let n = 2;
+        let col_ptr = vec![0, 2, 4];
+        let row_ind = vec![0, 1, 0, 1];
+        let values: Vec<f64> = vec![4.0, 1.0, 1.0, 3.0];
+
+        let mut backend = backend;
+
+        // Before any operations
+        assert_eq!(backend.stats().num_symbolic, 0);
+        assert_eq!(backend.stats().num_numeric, 0);
+        assert_eq!(backend.stats().num_solves, 0);
+
+        backend.symbolic_analysis(n, &col_ptr, &row_ind).unwrap();
+        assert_eq!(backend.stats().num_symbolic, 1);
+
+        let _factor = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+        assert_eq!(backend.stats().num_numeric, 1);
+
+        let rhs = vec![5.0, 4.0];
+        let mut sol = vec![0.0; 2];
+        backend.solve(&rhs, &mut sol).unwrap();
+        assert_eq!(backend.stats().num_solves, 1);
+
+        // Multiple solves
+        backend.solve(&rhs, &mut sol).unwrap();
+        backend.solve(&rhs, &mut sol).unwrap();
+        assert_eq!(backend.stats().num_solves, 3);
+
+        // Refactorization
+        let _factor = backend.numeric_factorization(&col_ptr, &row_ind, &values).unwrap();
+        assert_eq!(backend.stats().num_numeric, 2);
+        // Symbolic should stay at 1
+        assert_eq!(backend.stats().num_symbolic, 1);
+    }
 }
