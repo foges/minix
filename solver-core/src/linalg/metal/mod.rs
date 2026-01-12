@@ -51,7 +51,7 @@ mod backend;
 pub use error::{MetalError, MetalResult};
 pub use handle::{DssHandle, DssConfig};
 pub use symbolic::{SymbolicAnalysis, EliminationTree, Supernode, LevelSchedule};
-pub use backend::MetalKktBackend;
+pub use backend::{MetalKktBackend, MetalBackendAdapter, MetalFactorization, SolverStats};
 
 /// Embedded Metal shader source.
 /// Compiled at runtime using `new_library_with_source`.

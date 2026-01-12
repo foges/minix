@@ -751,6 +751,151 @@ impl MetalKktBackend {
     }
 }
 
+// ============================================================================
+// KktBackend trait implementation
+// ============================================================================
+
+use crate::linalg::backend::{BackendError, KktBackend};
+use crate::linalg::sparse::SparseCsc;
+
+/// Adapter to use MetalKktBackend with the KktBackend trait.
+///
+/// This allows the Metal backend to be used as a drop-in replacement
+/// for QdldlBackend in the KktSolver.
+#[cfg(target_os = "macos")]
+pub struct MetalBackendAdapter {
+    inner: MetalKktBackend,
+    static_reg: f64,
+    dynamic_reg_min_pivot: f64,
+    n: usize,
+}
+
+#[cfg(target_os = "macos")]
+impl KktBackend for MetalBackendAdapter {
+    type Factorization = MetalFactorization;
+
+    fn new(n: usize, static_reg: f64, dynamic_reg_min_pivot: f64) -> Self
+    where
+        Self: Sized,
+    {
+        let mut config = DssConfig::default();
+        config.static_reg = static_reg;
+        config.pivot_min = dynamic_reg_min_pivot as f32;
+
+        let inner = MetalKktBackend::new(config)
+            .expect("Failed to create Metal backend");
+
+        Self {
+            inner,
+            static_reg,
+            dynamic_reg_min_pivot,
+            n,
+        }
+    }
+
+    fn set_static_reg(&mut self, static_reg: f64) -> Result<(), BackendError> {
+        self.static_reg = static_reg;
+        Ok(())
+    }
+
+    fn static_reg(&self) -> f64 {
+        self.static_reg
+    }
+
+    fn symbolic_factorization(&mut self, kkt: &SparseCsc) -> Result<(), BackendError> {
+        let (n, m) = kkt.shape();
+        if n != m {
+            return Err(BackendError::Message(format!(
+                "KKT matrix must be square, got {}x{}",
+                n, m
+            )));
+        }
+
+        self.n = n;
+
+        // Extract CSC components
+        let col_ptr: Vec<usize> = kkt.indptr().iter().map(|&x| x).collect();
+        let row_ind: Vec<usize> = kkt.indices().iter().map(|&x| x).collect();
+
+        self.inner
+            .symbolic_analysis(n, &col_ptr, &row_ind)
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    fn numeric_factorization(&mut self, kkt: &SparseCsc) -> Result<Self::Factorization, BackendError> {
+        // Extract CSC components
+        let col_ptr: Vec<usize> = kkt.indptr().iter().map(|&x| x).collect();
+        let row_ind: Vec<usize> = kkt.indices().iter().map(|&x| x).collect();
+        let values: Vec<f64> = kkt.data().to_vec();
+
+        self.inner
+            .numeric_factorization(&col_ptr, &row_ind, &values)
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    fn solve(&self, _factor: &Self::Factorization, rhs: &[f64], sol: &mut [f64]) {
+        // Note: MetalKktBackend stores factor internally, so we ignore the factor parameter
+        // This requires a mutable borrow, but the trait expects &self
+        // For now, we work around this by having solve use the stored factor
+
+        // SAFETY: This is a workaround for the trait signature. The Metal backend
+        // stores the factor internally and doesn't need the factor parameter.
+        // In a proper implementation, we'd want to change the trait or use interior mutability.
+        let inner_ptr = &self.inner as *const MetalKktBackend as *mut MetalKktBackend;
+        unsafe {
+            let inner_mut = &mut *inner_ptr;
+            if let Err(e) = inner_mut.solve(rhs, sol) {
+                // Log error but continue (solve trait method doesn't return Result)
+                eprintln!("[Metal] Solve error: {}", e);
+                sol.fill(0.0);
+            }
+        }
+    }
+
+    fn dynamic_bumps(&self) -> u64 {
+        self.inner.stats().dynamic_bumps
+    }
+}
+
+/// Stub adapter for non-macOS platforms.
+#[cfg(not(target_os = "macos"))]
+pub struct MetalBackendAdapter {
+    _marker: std::marker::PhantomData<()>,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl KktBackend for MetalBackendAdapter {
+    type Factorization = ();
+
+    fn new(_n: usize, _static_reg: f64, _dynamic_reg_min_pivot: f64) -> Self {
+        panic!("Metal backend not available on this platform")
+    }
+
+    fn set_static_reg(&mut self, _static_reg: f64) -> Result<(), BackendError> {
+        Err(BackendError::Other("Metal not available".to_string()))
+    }
+
+    fn static_reg(&self) -> f64 {
+        0.0
+    }
+
+    fn symbolic_factorization(&mut self, _kkt: &SparseCsc) -> Result<(), BackendError> {
+        Err(BackendError::Other("Metal not available".to_string()))
+    }
+
+    fn numeric_factorization(&mut self, _kkt: &SparseCsc) -> Result<Self::Factorization, BackendError> {
+        Err(BackendError::Other("Metal not available".to_string()))
+    }
+
+    fn solve(&self, _factor: &Self::Factorization, _rhs: &[f64], _sol: &mut [f64]) {
+        // No-op on non-macOS
+    }
+
+    fn dynamic_bumps(&self) -> u64 {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
