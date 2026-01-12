@@ -36,6 +36,10 @@ pub struct DssConfig {
     /// Use SIMD-group matrix ops when available (requires Apple GPU family 7+).
     pub use_simd_group_matrix: bool,
 
+    /// Use GPU for triangular solves (vs CPU fallback).
+    /// Enable this for large matrices where GPU parallelism helps.
+    pub use_gpu_solve: bool,
+
     /// Enable verbose logging for debugging.
     pub verbose: bool,
 }
@@ -50,6 +54,7 @@ impl Default for DssConfig {
             threadgroup_size_1d: 256,
             tile_size: 16,
             use_simd_group_matrix: true,
+            use_gpu_solve: true, // Enable GPU solve by default
             verbose: false,
         }
     }

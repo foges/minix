@@ -299,14 +299,16 @@ impl MetalKktBackend {
             });
         }
 
-        // For now, implement CPU solve (placeholder for GPU solve)
-        // TODO: Implement GPU level-scheduled triangular solve
-
         // Convert to f32
         let rhs_f32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
         let mut sol_f32 = vec![0.0f32; n];
 
-        self.cpu_solve(&rhs_f32, &mut sol_f32, symbolic)?;
+        // Use GPU solve if enabled, otherwise CPU fallback
+        if self.handle.config().use_gpu_solve {
+            self.gpu_solve(&rhs_f32, &mut sol_f32, symbolic)?;
+        } else {
+            self.cpu_solve(&rhs_f32, &mut sol_f32, symbolic)?;
+        }
 
         // Convert back to f64
         for (i, &v) in sol_f32.iter().enumerate() {
@@ -430,7 +432,6 @@ impl MetalKktBackend {
     /// 3. Diagonal solve (D^{-1})
     /// 4. Backward solve (L^T)
     /// 5. Inverse permute
-    #[allow(dead_code)]
     fn gpu_solve(
         &self,
         rhs: &[f32],
