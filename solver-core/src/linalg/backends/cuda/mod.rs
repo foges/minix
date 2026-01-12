@@ -40,9 +40,11 @@
 //! ```
 
 mod error;
+mod ffi;
 mod handle;
 mod backend;
 
 pub use error::{CudaError, CudaResult};
 pub use handle::{CudaHandle, CudaConfig};
 pub use backend::{CudaKktBackend, CudaBackendAdapter, CudaFactorization};
+pub use ffi::is_cuda_available;

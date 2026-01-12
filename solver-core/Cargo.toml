@@ -30,6 +30,9 @@ rayon = { workspace = true, optional = true }
 rand.workspace = true
 rand_chacha.workspace = true
 
+# Dynamic library loading (for CUDA backend)
+libloading = { workspace = true, optional = true }
+
 [dev-dependencies]
 approx.workspace = true
 proptest.workspace = true
@@ -42,7 +45,7 @@ parallel = ["rayon"]
 gpu = []  # Placeholder for future GPU support
 suitesparse-ldl = ["sprs_suitesparse_ldl"]
 metal = ["dep:metal"]  # Metal GPU backend for Apple Silicon
-cuda = []  # CUDA GPU backend for NVIDIA GPUs (requires cuDSS)
+cuda = ["dep:libloading"]  # CUDA GPU backend for NVIDIA GPUs (uses cuDSS via dynamic loading)
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = { version = "0.29", optional = true }
