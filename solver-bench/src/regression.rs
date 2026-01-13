@@ -142,8 +142,14 @@ pub fn run_regression_suite(
     solver: SolverChoice,
     require_cache: bool,
     max_iter_fail: usize,
+    socp_only: bool,
 ) -> Vec<RegressionResult> {
     let mut results = Vec::new();
+
+    // Skip QP/SDP tests if socp_only is set
+    if socp_only {
+        return run_socp_tests(settings, solver, require_cache);
+    }
 
     // 108 Maros-Meszaros problems that truly meet quality standards (79.4% of 136)
     // Excluded: 28 problems with dual divergence or gap issues
@@ -584,6 +590,127 @@ fn run_case(
             cone_time_ms: None,
         },
     }
+}
+
+/// Run SOCP-only tests with limited iterations and streaming output.
+/// Uses 30 iterations as limit (SOCP reformulations typically need ~2x QP iterations).
+fn run_socp_tests(
+    base_settings: &SolverSettings,
+    solver: SolverChoice,
+    require_cache: bool,
+) -> Vec<RegressionResult> {
+    use std::io::Write;
+
+    let mut results = Vec::new();
+
+    // Use limited iterations for SOCP tests - they should converge quickly if working
+    let mut settings = base_settings.clone();
+    settings.max_iter = 30; // SOCP should converge in ~20 iters for well-behaved problems
+
+    let tol_feas = 1e-6;
+    let tol_gap = 1e-3;
+
+    for name in mm_problem_names() {
+        let socp_name = format!("{}_SOCP", name);
+
+        let result = match load_local_problem(name) {
+            Ok(qps) => {
+                match qps.to_socp_form() {
+                    Ok(prob) => run_case(&prob, &settings, solver, &socp_name),
+                    Err(e) => RegressionResult {
+                        name: socp_name.clone(),
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: Some(format!("SOCP conversion error: {}", e)),
+                        skipped: false,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    },
+                }
+            }
+            Err(_) => {
+                if require_cache {
+                    RegressionResult {
+                        name: socp_name.clone(),
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: Some("missing QPS file".to_string()),
+                        skipped: false,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    }
+                } else {
+                    RegressionResult {
+                        name: socp_name.clone(),
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: None,
+                        skipped: true,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    }
+                }
+            }
+        };
+
+        // Print result immediately for streaming output
+        if result.skipped {
+            println!("{}: SKIP", result.name);
+        } else if result.status != SolveStatus::Optimal
+            || !result.rel_p.is_finite()
+            || !result.rel_d.is_finite()
+            || !result.gap_rel.is_finite()
+        {
+            println!(
+                "{}: FAIL status={:?} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e} {}",
+                result.name,
+                result.status,
+                result.rel_p,
+                result.rel_d,
+                result.gap_rel,
+                result.error.as_deref().unwrap_or(""),
+            );
+        } else if result.rel_p > tol_feas || result.rel_d > tol_feas || result.gap_rel > tol_gap {
+            println!(
+                "{}: FAIL rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
+                result.name, result.rel_p, result.rel_d, result.gap_rel,
+            );
+        } else {
+            println!(
+                "{}: OK iters={} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
+                result.name, result.iterations, result.rel_p, result.rel_d, result.gap_rel,
+            );
+        }
+        let _ = std::io::stdout().flush();
+
+        results.push(result);
+    }
+
+    results
 }
 
 fn synthetic_cases() -> Vec<(&'static str, ProblemData)> {

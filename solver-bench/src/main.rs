@@ -100,6 +100,9 @@ enum Commands {
         /// Allowed regression ratio (0.2 = 20% slower)
         #[arg(long, default_value = "0.2")]
         max_regression: f64,
+        /// Only run SOCP-reformulated problems (skip native QP/SDP tests)
+        #[arg(long)]
+        socp_only: bool,
     },
 }
 
@@ -386,11 +389,12 @@ fn run_regression_suite(
     baseline_in: Option<String>,
     baseline_out: Option<String>,
     max_regression: f64,
+    socp_only: bool,
 ) {
     let mut settings = SolverSettings::default();
     settings.max_iter = max_iter;
 
-    let results = regression::run_regression_suite(&settings, solver, require_cache, max_iter_fail);
+    let results = regression::run_regression_suite(&settings, solver, require_cache, max_iter_fail, socp_only);
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
@@ -748,6 +752,7 @@ fn main() {
             baseline_in,
             baseline_out,
             max_regression,
+            socp_only,
         }) => {
             run_regression_suite(
                 max_iter,
@@ -757,6 +762,7 @@ fn main() {
                 baseline_in,
                 baseline_out,
                 max_regression,
+                socp_only,
             );
         }
         None => {
