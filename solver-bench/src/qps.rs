@@ -218,12 +218,15 @@ impl QpsProblem {
         })
     }
 
-    /// Convert to SOCP form (no P matrix, quadratic term as SOC constraint).
+    /// Convert to SOCP form (no P matrix, quadratic term as rotated SOC constraint).
     ///
     /// Transforms QP: min (1/2) x'Px + q'x s.t. Ax + s = b, s ∈ K
-    /// Into SOCP:     min t + q'x s.t. Ax + s = b, s ∈ K, ||Lx|| <= t
+    /// Into SOCP:     min t + q'x s.t. Ax + s = b, s ∈ K, (t, 1/2, Lx) ∈ RSOC
     ///
-    /// where P = L'L (Cholesky factorization).
+    /// where P = L'L (Cholesky factorization) and RSOC means 2*t*(1/2) >= ||Lx||²
+    ///
+    /// The rotated SOC (RSOC) is converted to standard SOC via:
+    /// (u, v, w) ∈ RSOC iff ((u+v)/√2, (u-v)/√2, w) ∈ SOC
     ///
     /// This is the form CVXPY sends to conic solvers.
     pub fn to_socp_form(&self) -> Result<ProblemData> {
@@ -263,8 +266,10 @@ impl QpsProblem {
         }
 
         // Compute Cholesky L such that P = L'L using simple implementation
-        // (For production, should use LAPACK or similar)
+        // For P that's only positive semidefinite (some zero eigenvalues), we handle
+        // small/negative pivots by skipping those rows (they don't contribute to ||Lx||)
         let mut l = vec![0.0; n * n];
+        let mut valid_rows = Vec::new();
         for i in 0..n {
             for j in 0..=i {
                 let mut sum = p_dense[i * n + j];
@@ -272,13 +277,17 @@ impl QpsProblem {
                     sum -= l[i * n + k] * l[j * n + k];
                 }
                 if i == j {
-                    if sum <= 0.0 {
-                        // P is not positive definite, add regularization
-                        sum = 1e-10;
+                    if sum > 1e-12 {
+                        l[i * n + j] = sum.sqrt();
+                        valid_rows.push(i);
+                    } else {
+                        // Zero or negative pivot - this row of L will be zero
+                        l[i * n + j] = 0.0;
                     }
-                    l[i * n + j] = sum.sqrt();
-                } else {
+                } else if l[j * n + j].abs() > 1e-14 {
                     l[i * n + j] = sum / l[j * n + j];
+                } else {
+                    l[i * n + j] = 0.0;
                 }
             }
         }
@@ -291,17 +300,40 @@ impl QpsProblem {
                 nonzero_rows.push(i);
             }
         }
-        let soc_dim = nonzero_rows.len() + 1; // +1 for the t variable
 
-        // New problem has n+1 variables: [x, t]
-        // New constraints:
-        //   1. Original constraints (applied to x only)
-        //   2. SOC constraint: (t, Lx) in SOC
-        //      -t + s_soc[0] = 0
-        //      -L[i,:]*x + s_soc[i+1] = 0 for each nonzero row i
+        if nonzero_rows.is_empty() {
+            // P is zero matrix - just an LP
+            return Ok(ProblemData {
+                P: None,
+                q: qp.q,
+                A: qp.A,
+                b: qp.b,
+                cones: qp.cones,
+                var_bounds: None,
+                integrality: None,
+            });
+        }
 
-        let new_n = n + 1; // x + t
-        let new_m = m_orig + soc_dim;
+        // For QP objective (1/2) x'Px + q'x, we use rotated SOC:
+        // min t + q'x s.t. (t, v, Lx) ∈ RSOC, meaning 2*t*v >= ||Lx||²
+        //
+        // We want t >= ||Lx||²/2, so we need 2tv >= ||Lx||² with t >= ||Lx||²/(2v).
+        // Setting v = 1 gives t >= ||Lx||²/2 as required.
+        //
+        // Convert RSOC to SOC: (u, v, w) ∈ RSOC iff ((u+v)/√2, (u-v)/√2, w) ∈ SOC
+        // With u = t, v = 1, we get: ((t + 1)/√2, (t - 1)/√2, Lx) ∈ SOC
+        //
+        // We embed the constant 1 directly in the b vector (no auxiliary variable):
+        // Row for soc[0]: -t/√2 + slack[0] = 1/√2  =>  slack[0] = (t+1)/√2
+        // Row for soc[1]: -t/√2 + slack[1] = -1/√2 =>  slack[1] = (t-1)/√2
+        // Rows for soc[2+k]: -L[k,:]*x + slack[2+k] = 0
+
+        let sqrt2 = std::f64::consts::SQRT_2;
+        let soc_dim = 2 + nonzero_rows.len(); // (t+1)/√2, (t-1)/√2, Lx...
+
+        // New problem has n+1 variables: [x (n), t (1)]
+        let new_n = n + 1;
+        let new_m = m_orig + soc_dim; // original + SOC
 
         // Build new A matrix
         let mut new_triplets = Vec::new();
@@ -311,18 +343,21 @@ impl QpsProblem {
             new_triplets.push((row, col, val));
         }
 
-        // SOC constraint rows
+        // SOC constraint: ((t+1)/√2, (t-1)/√2, Lx) in SOC
         let soc_start = m_orig;
 
-        // First row: -t + s_soc[0] = 0  =>  s_soc[0] = t
-        new_triplets.push((soc_start, n, -1.0)); // -t
+        // slack[0] = (t+1)/√2:  -t/√2 + slack[0] = 1/√2
+        new_triplets.push((soc_start, n, -1.0 / sqrt2)); // -t/√2
 
-        // Remaining rows: -L[i,:]*x + s_soc[i+1] = 0  =>  s_soc[i+1] = L[i,:]*x
+        // slack[1] = (t-1)/√2:  -t/√2 + slack[1] = -1/√2
+        new_triplets.push((soc_start + 1, n, -1.0 / sqrt2)); // -t/√2
+
+        // Remaining rows: -L[i,:]*x + slack[2+k] = 0
         for (idx, &row_i) in nonzero_rows.iter().enumerate() {
             for j in 0..=row_i {
                 let val = l[row_i * n + j];
                 if val.abs() > 1e-14 {
-                    new_triplets.push((soc_start + 1 + idx, j, -val));
+                    new_triplets.push((soc_start + 2 + idx, j, -val));
                 }
             }
         }
@@ -331,7 +366,10 @@ impl QpsProblem {
 
         // Build new b vector
         let mut new_b = qp.b.clone();
-        new_b.resize(new_m, 0.0); // SOC constraints have b = 0
+        // SOC rows: b = [1/√2, -1/√2, 0, 0, ...]
+        new_b.push(1.0 / sqrt2);  // for (t+1)/√2
+        new_b.push(-1.0 / sqrt2); // for (t-1)/√2
+        new_b.extend(vec![0.0; nonzero_rows.len()]); // for Lx
 
         // Build new q vector: [original q, 1.0 for t]
         let mut new_q = qp.q.clone();
@@ -342,7 +380,7 @@ impl QpsProblem {
         new_cones.push(ConeSpec::Soc { dim: soc_dim });
 
         Ok(ProblemData {
-            P: None, // No quadratic term - absorbed into SOC
+            P: None, // No quadratic term - absorbed into rotated SOC
             q: new_q,
             A: new_a,
             b: new_b,

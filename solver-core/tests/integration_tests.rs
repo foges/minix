@@ -296,7 +296,7 @@ fn test_small_soc() {
 
     // Expected: t ≈ 0.828, x1 ≈ x2 ≈ 0.586
     let expected_t = 2.0 / (2.0_f64.sqrt() + 2.0) * 2.0_f64.sqrt();
-    let expected_x = 2.0 / (2.0_f64.sqrt() + 2.0);
+    let _expected_x = 2.0 / (2.0_f64.sqrt() + 2.0);
 
     // Accept a wide tolerance since SOC support is in development
     if matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal) {
@@ -305,6 +305,81 @@ fn test_small_soc() {
         assert!((result.obj_val - expected_t).abs() < 0.2,
             "Expected obj ≈ {:.3}, got {:.3}", expected_t, result.obj_val);
     }
+}
+
+#[test]
+fn test_rsoc_qp_formulation() {
+    // Test RSOC-based QP formulation for a simple QP:
+    // min (1/2) x² subject to x >= 1
+    // Optimal: x = 1, obj = 0.5
+    //
+    // SOCP reformulation:
+    // min t subject to t >= x²/2, x >= 1
+    //
+    // Using RSOC: (t, 1, x) ∈ RSOC means 2*t*1 >= x², so t >= x²/2
+    // Convert to SOC: ((t+1)/√2, (t-1)/√2, x) ∈ SOC
+    //
+    // Variables: [x, t]
+    // Constraints:
+    //   1. x >= 1 (NonNeg cone for x - 1)
+    //   2. ((t+1)/√2, (t-1)/√2, x) ∈ SOC (use constant 1 directly in b)
+    //
+    // Objective: min t
+
+    let sqrt2 = std::f64::consts::SQRT_2;
+
+    // Variables: [x, t]
+    // Constraint rows:
+    //   Row 0: -x + slack0 = -1, slack0 >= 0 (x >= 1)
+    //   Row 1: -t/√2 + soc0 = 1/√2 => soc0 = (t+1)/√2
+    //   Row 2: -t/√2 + soc1 = -1/√2 => soc1 = (t-1)/√2
+    //   Row 3: -x + soc2 = 0 => soc2 = x
+
+    let a_triplets = vec![
+        (0, 0, -1.0),                 // Row 0: -x
+        (1, 1, -1.0 / sqrt2),         // Row 1: -t/√2
+        (2, 1, -1.0 / sqrt2),         // Row 2: -t/√2
+        (3, 0, -1.0),                 // Row 3: -x
+    ];
+
+    let prob = ProblemData {
+        P: None,
+        q: vec![0.0, 1.0],  // min t (variable at index 1)
+        A: sparse::from_triplets(4, 2, a_triplets),
+        b: vec![-1.0, 1.0 / sqrt2, -1.0 / sqrt2, 0.0],
+        cones: vec![
+            ConeSpec::NonNeg { dim: 1 },  // x >= 1
+            ConeSpec::Soc { dim: 3 },     // RSOC->SOC
+        ],
+        var_bounds: None,
+        integrality: None,
+    };
+
+    let settings = SolverSettings {
+        verbose: true,
+        max_iter: 100,
+        ..Default::default()
+    };
+
+    let result = solve(&prob, &settings).expect("Solve failed");
+
+    println!("\n=== RSOC QP Formulation Result ===");
+    println!("Status: {:?}", result.status);
+    println!("x = {:?}", result.x);
+    println!("obj = {} (expected 0.5)", result.obj_val);
+
+    assert!(
+        matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal),
+        "Expected Optimal, got {:?}",
+        result.status
+    );
+
+    // At optimum: x = 1, t = 0.5
+    let x = result.x[0];
+    let t = result.x[1];
+    assert!((x - 1.0).abs() < 0.1, "Expected x ≈ 1, got {}", x);
+    assert!((t - 0.5).abs() < 0.1, "Expected t ≈ 0.5, got {}", t);
+    assert!((result.obj_val - 0.5).abs() < 0.1, "Expected obj ≈ 0.5, got {}", result.obj_val);
 }
 
 #[test]
@@ -409,7 +484,7 @@ fn test_simple_sdp_with_psd_cone() {
     // S PSD requires 1-y >= 0, so y <= 1
     // Optimal: y = 1, S = 0
 
-    let sqrt2 = std::f64::consts::SQRT_2;
+    let _sqrt2 = std::f64::consts::SQRT_2;
 
     // svec of 2x2 identity: [1, 0, 1]
     // A: [1, 0, 1]' (column for y)
