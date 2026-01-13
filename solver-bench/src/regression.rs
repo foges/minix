@@ -2,7 +2,7 @@ use solver_core::ipm2::metrics::compute_unscaled_metrics;
 use solver_core::{ConeSpec, ProblemData, SolveStatus, SolverSettings};
 use serde::{Deserialize, Serialize};
 
-use crate::maros_meszaros::load_local_problem;
+use crate::maros_meszaros::{load_local_problem, mm_problem_names};
 use crate::sdplib;
 use crate::solver_choice::{solve_with_choice, SolverChoice};
 use crate::test_problems;
@@ -446,16 +446,8 @@ pub fn run_regression_suite(
 
     // SOCP-reformulated QP problems (CVXPY-style without P matrix)
     // Tests SOC cone support with QP problems reformulated as SOCPs
-    let socp_cases = [
-        // Small HS problems - good for quick SOCP verification
-        "HS21", "HS35", "HS51", "HS52", "HS76",
-        // CVXQP family (small only for now)
-        "CVXQP1_S", "CVXQP2_S", "CVXQP3_S",
-        // DUAL family (small)
-        "DUAL1", "DUAL2", "DUAL3", "DUAL4",
-    ];
-
-    for name in socp_cases {
+    // Run the full MM suite as SOCPs to match CVXPY's conic form
+    for name in mm_problem_names() {
         let socp_name = format!("{}_SOCP", name);
         match load_local_problem(name) {
             Ok(qps) => {

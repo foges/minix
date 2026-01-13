@@ -36,6 +36,11 @@ const MM_PROBLEMS: &[&str] = &[
     "STCQP2", "TAME", "UBH1", "VALUES", "YAO", "ZECEVIC2",
 ];
 
+/// Get the list of all Maros-Meszaros problem names
+pub fn mm_problem_names() -> &'static [&'static str] {
+    MM_PROBLEMS
+}
+
 #[inline]
 fn inf_norm(v: &[f64]) -> f64 {
     v.iter()
