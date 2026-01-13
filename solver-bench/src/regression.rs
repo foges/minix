@@ -444,6 +444,89 @@ pub fn run_regression_suite(
         }
     }
 
+    // SOCP-reformulated QP problems (CVXPY-style without P matrix)
+    // Tests SOC cone support with QP problems reformulated as SOCPs
+    let socp_cases = [
+        // Small HS problems - good for quick SOCP verification
+        "HS21", "HS35", "HS51", "HS52", "HS76",
+        // CVXQP family (small only for now)
+        "CVXQP1_S", "CVXQP2_S", "CVXQP3_S",
+        // DUAL family (small)
+        "DUAL1", "DUAL2", "DUAL3", "DUAL4",
+    ];
+
+    for name in socp_cases {
+        let socp_name = format!("{}_SOCP", name);
+        match load_local_problem(name) {
+            Ok(qps) => {
+                let prob = match qps.to_socp_form() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        results.push(RegressionResult {
+                            name: socp_name,
+                            status: SolveStatus::NumericalError,
+                            rel_p: f64::NAN,
+                            rel_d: f64::NAN,
+                            gap_rel: f64::NAN,
+                            iterations: 0,
+                            expected_iters: None,
+                            expected_status: None,
+                            error: Some(format!("SOCP conversion error: {}", e)),
+                            skipped: false,
+                            expected_to_fail: false,
+                            solve_time_ms: None,
+                            kkt_factor_time_ms: None,
+                            kkt_solve_time_ms: None,
+                            cone_time_ms: None,
+                        });
+                        continue;
+                    }
+                };
+                let result = run_case(&prob, settings, solver, &socp_name);
+                results.push(result);
+            }
+            Err(_) => {
+                if require_cache {
+                    results.push(RegressionResult {
+                        name: socp_name,
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: Some("missing QPS file".to_string()),
+                        skipped: false,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    });
+                } else {
+                    results.push(RegressionResult {
+                        name: socp_name,
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: None,
+                        skipped: true,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    });
+                }
+            }
+        }
+    }
+
     results
 }
 

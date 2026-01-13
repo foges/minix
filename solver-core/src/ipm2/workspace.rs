@@ -120,7 +120,10 @@ impl IpmWorkspace {
 
             let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
             if is_soc {
-                self.scaling.push(ScalingBlock::SocStructured { w: vec![1.0; dim] });
+                // SOC identity element is e = (1, 0, ..., 0), so initial w = e
+                let mut w = vec![0.0; dim];
+                w[0] = 1.0;
+                self.scaling.push(ScalingBlock::SocStructured { w });
                 max_soc_dim = max_soc_dim.max(dim);
             } else if (cone.as_ref() as &dyn Any).is::<ExpCone>()
                 || (cone.as_ref() as &dyn Any).is::<PowCone>()

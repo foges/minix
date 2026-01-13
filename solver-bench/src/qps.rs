@@ -217,6 +217,140 @@ impl QpsProblem {
             integrality: None,
         })
     }
+
+    /// Convert to SOCP form (no P matrix, quadratic term as SOC constraint).
+    ///
+    /// Transforms QP: min (1/2) x'Px + q'x s.t. Ax + s = b, s ∈ K
+    /// Into SOCP:     min t + q'x s.t. Ax + s = b, s ∈ K, ||Lx|| <= t
+    ///
+    /// where P = L'L (Cholesky factorization).
+    ///
+    /// This is the form CVXPY sends to conic solvers.
+    pub fn to_socp_form(&self) -> Result<ProblemData> {
+        // First build the standard QP form to get constraints
+        let qp = self.to_problem_data()?;
+
+        // If no quadratic term, this is already an LP - just return it without P
+        if self.p_triplets.is_empty() {
+            return Ok(ProblemData {
+                P: None,
+                q: qp.q,
+                A: qp.A,
+                b: qp.b,
+                cones: qp.cones,
+                var_bounds: None,
+                integrality: None,
+            });
+        }
+
+        let n = self.n;
+        let m_orig = qp.A.rows();
+
+        // Build P matrix and compute Cholesky factorization P = L'L
+        // Use dense Cholesky for simplicity
+        let p_triplets: Vec<(usize, usize, f64)> = self
+            .p_triplets
+            .iter()
+            .map(|&(i, j, v)| (i, j, v * self.obj_sense))
+            .collect();
+
+        let mut p_dense = vec![0.0; n * n];
+        for &(i, j, v) in &p_triplets {
+            p_dense[i * n + j] += v;
+            if i != j {
+                p_dense[j * n + i] += v;
+            }
+        }
+
+        // Compute Cholesky L such that P = L'L using simple implementation
+        // (For production, should use LAPACK or similar)
+        let mut l = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = p_dense[i * n + j];
+                for k in 0..j {
+                    sum -= l[i * n + k] * l[j * n + k];
+                }
+                if i == j {
+                    if sum <= 0.0 {
+                        // P is not positive definite, add regularization
+                        sum = 1e-10;
+                    }
+                    l[i * n + j] = sum.sqrt();
+                } else {
+                    l[i * n + j] = sum / l[j * n + j];
+                }
+            }
+        }
+
+        // Count non-zero rows in L (for SOC dimension)
+        let mut nonzero_rows = Vec::new();
+        for i in 0..n {
+            let row_norm_sq: f64 = (0..=i).map(|j| l[i * n + j] * l[i * n + j]).sum();
+            if row_norm_sq > 1e-12 {
+                nonzero_rows.push(i);
+            }
+        }
+        let soc_dim = nonzero_rows.len() + 1; // +1 for the t variable
+
+        // New problem has n+1 variables: [x, t]
+        // New constraints:
+        //   1. Original constraints (applied to x only)
+        //   2. SOC constraint: (t, Lx) in SOC
+        //      -t + s_soc[0] = 0
+        //      -L[i,:]*x + s_soc[i+1] = 0 for each nonzero row i
+
+        let new_n = n + 1; // x + t
+        let new_m = m_orig + soc_dim;
+
+        // Build new A matrix
+        let mut new_triplets = Vec::new();
+
+        // Copy original constraints (only affecting x, columns 0..n)
+        for (&val, (row, col)) in qp.A.iter() {
+            new_triplets.push((row, col, val));
+        }
+
+        // SOC constraint rows
+        let soc_start = m_orig;
+
+        // First row: -t + s_soc[0] = 0  =>  s_soc[0] = t
+        new_triplets.push((soc_start, n, -1.0)); // -t
+
+        // Remaining rows: -L[i,:]*x + s_soc[i+1] = 0  =>  s_soc[i+1] = L[i,:]*x
+        for (idx, &row_i) in nonzero_rows.iter().enumerate() {
+            for j in 0..=row_i {
+                let val = l[row_i * n + j];
+                if val.abs() > 1e-14 {
+                    new_triplets.push((soc_start + 1 + idx, j, -val));
+                }
+            }
+        }
+
+        let new_a = sparse::from_triplets(new_m, new_n, new_triplets);
+
+        // Build new b vector
+        let mut new_b = qp.b.clone();
+        new_b.resize(new_m, 0.0); // SOC constraints have b = 0
+
+        // Build new q vector: [original q, 1.0 for t]
+        let mut new_q = qp.q.clone();
+        new_q.push(1.0); // coefficient for t in objective
+
+        // Build cone specification
+        let mut new_cones = qp.cones.clone();
+        new_cones.push(ConeSpec::Soc { dim: soc_dim });
+
+        Ok(ProblemData {
+            P: None, // No quadratic term - absorbed into SOC
+            q: new_q,
+            A: new_a,
+            b: new_b,
+            cones: new_cones,
+            var_bounds: None,
+            integrality: None,
+        })
+    }
 }
 
 /// Parse a QPS file.

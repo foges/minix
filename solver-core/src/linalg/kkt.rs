@@ -772,6 +772,22 @@ impl SingletonElim {
         let m = a.rows();
         let n = a.cols();
 
+        // Singleton elimination only works with diagonal/zero blocks.
+        // For SOC/PSD/Dense3x3, the scaling block type can change during iteration
+        // (e.g., SOC falls back to Diagonal when NT fails), which would cause a
+        // mismatch with the ReducedScaling structure created here.
+        let has_non_diagonal = h_blocks.iter().any(|b| {
+            matches!(
+                b,
+                ScalingBlock::SocStructured { .. }
+                    | ScalingBlock::PsdStructured { .. }
+                    | ScalingBlock::Dense3x3 { .. }
+            )
+        });
+        if has_non_diagonal {
+            return None;
+        }
+
         let partition = crate::presolve::singleton::detect_singleton_rows(a);
         if partition.singleton_rows.is_empty() {
             return None;
