@@ -3,6 +3,7 @@ use solver_core::{ConeSpec, ProblemData, SolveStatus, SolverSettings};
 use serde::{Deserialize, Serialize};
 
 use crate::maros_meszaros::load_local_problem;
+use crate::sdplib;
 use crate::solver_choice::{solve_with_choice, SolverChoice};
 use crate::test_problems;
 
@@ -281,6 +282,168 @@ pub fn run_regression_suite(
         results.push(result);
     }
 
+    // SDPLIB PSD problems that currently pass with good objective accuracy.
+    // These require local SDPLIB files under _data/sdplib.
+    // Note: control3, control4 excluded due to ~8-9% objective error vs reference
+    let sdplib_cases = [
+        // Control problems (system control SDPs)
+        "control1",  // rel_error ~1.6%
+        "control2",  // rel_error ~0.9%
+        // H-infinity norm problems
+        "hinf1",
+        "hinf4",     // Optimal in ~15 iters
+        "hinf10",    // Optimal in ~34 iters
+        "hinf11",
+        "hinf14",    // Optimal in ~20 iters, rel_error 7.46e-4
+        // Lovász theta (graph coloring)
+        "theta1",
+        // Truss topology optimization
+        "truss1",    // excellent accuracy (1.34e-7 rel_error)
+        "truss3",
+        "truss4",
+        "truss5",    // Optimal in ~27 iters, rel_error 1.66e-3
+        "truss6",    // Optimal in ~24 iters, 150 3x3 blocks, rel_error 1.32e-3
+        "truss7",    // Optimal in ~21 iters, 150 2x2 blocks, rel_error 1.24e-5
+    ];
+    let sdplib_dir = std::path::Path::new("_data/sdplib");
+    if sdplib_dir.exists() {
+        for name in sdplib_cases {
+            let file_path = sdplib_dir.join(format!("{}.dat-s", name));
+            if !file_path.exists() {
+                if require_cache {
+                    results.push(RegressionResult {
+                        name: name.to_string(),
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: Some(format!("missing SDPLIB file: {}", file_path.display())),
+                        skipped: false,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    });
+                } else {
+                    results.push(RegressionResult {
+                        name: name.to_string(),
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: None,
+                        skipped: true,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    });
+                }
+                continue;
+            }
+
+            let sdpa = match sdplib::load_sdpa_file(&file_path) {
+                Ok(sdpa) => sdpa,
+                Err(e) => {
+                    results.push(RegressionResult {
+                        name: name.to_string(),
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: Some(format!("sdpa parse error: {}", e)),
+                        skipped: false,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    });
+                    continue;
+                }
+            };
+
+            let prob = match sdplib::sdpa_to_conic_selected(&sdpa) {
+                Ok((prob, _form)) => prob,
+                Err(e) => {
+                    results.push(RegressionResult {
+                        name: name.to_string(),
+                        status: SolveStatus::NumericalError,
+                        rel_p: f64::NAN,
+                        rel_d: f64::NAN,
+                        gap_rel: f64::NAN,
+                        iterations: 0,
+                        expected_iters: None,
+                        expected_status: None,
+                        error: Some(format!("sdpa conversion error: {}", e)),
+                        skipped: false,
+                        expected_to_fail: false,
+                        solve_time_ms: None,
+                        kkt_factor_time_ms: None,
+                        kkt_solve_time_ms: None,
+                        cone_time_ms: None,
+                    });
+                    continue;
+                }
+            };
+
+            let mut result = run_case(&prob, settings, solver, name);
+            result.expected_iters = expected_iterations(name);
+            results.push(result);
+        }
+    } else if require_cache {
+        for name in sdplib_cases {
+            results.push(RegressionResult {
+                name: name.to_string(),
+                status: SolveStatus::NumericalError,
+                rel_p: f64::NAN,
+                rel_d: f64::NAN,
+                gap_rel: f64::NAN,
+                iterations: 0,
+                expected_iters: None,
+                expected_status: None,
+                error: Some("missing SDPLIB directory: _data/sdplib".to_string()),
+                skipped: false,
+                expected_to_fail: false,
+                solve_time_ms: None,
+                kkt_factor_time_ms: None,
+                kkt_solve_time_ms: None,
+                cone_time_ms: None,
+            });
+        }
+    } else {
+        for name in sdplib_cases {
+            results.push(RegressionResult {
+                name: name.to_string(),
+                status: SolveStatus::NumericalError,
+                rel_p: f64::NAN,
+                rel_d: f64::NAN,
+                gap_rel: f64::NAN,
+                iterations: 0,
+                expected_iters: None,
+                expected_status: None,
+                error: None,
+                skipped: true,
+                expected_to_fail: false,
+                solve_time_ms: None,
+                kkt_factor_time_ms: None,
+                kkt_solve_time_ms: None,
+                cone_time_ms: None,
+            });
+        }
+    }
+
     results
 }
 
@@ -433,6 +596,12 @@ fn expected_iterations(name: &str) -> Option<usize> {
         // BOYD (large) - these hit MaxIters, no expected value
         // Synthetic (measured exact with 1e-8 tolerances)
         "SYN_LP_NONNEG" => Some(4), "SYN_SOC_FEAS" => Some(5),
+        // SDPLIB SDP problems (PSD cone)
+        "control1" => Some(21), "control2" => Some(26),
+        "hinf1" => Some(26), "hinf4" => Some(15), "hinf10" => Some(34), "hinf11" => Some(20), "hinf14" => Some(20),
+        "theta1" => Some(9),
+        "truss1" => Some(8), "truss3" => Some(10), "truss4" => Some(7), "truss5" => Some(27),
+        "truss6" => Some(24), "truss7" => Some(21),
         _ => None,
     }
 }
@@ -467,9 +636,17 @@ mod tests {
         let results = run_regression_suite(&settings, SolverChoice::Ipm2, require_cache, max_iter_fail);
         // Use practical tolerances for unscaled metrics
         // The solver uses scaled metrics internally (1e-8), but unscaled
-        // metrics can differ due to problem conditioning
-        let tol_feas = 1e-6;  // Feasibility tolerance for unscaled metrics
-        let tol_gap = 1e-3;   // Relative gap tolerance (problems with poor conditioning may not reach 1e-6)
+        // metrics can differ due to problem conditioning.
+        // Clarabel uses: tol_feas=1e-8, reduced_tol_feas=1e-4, reduced_tol_gap_rel=5e-5
+        let tol_feas = 1e-6;      // Feasibility tolerance for unscaled metrics (QP/LP)
+        let tol_feas_sdp = 1e-4;  // Looser tolerance for SDP (matches Clarabel's reduced_tol_feas)
+        let tol_gap = 1e-4;       // Relative gap tolerance (close to Clarabel's reduced 5e-5)
+
+        // SDPLIB problem names (for looser tolerances)
+        let sdp_problems: std::collections::HashSet<&str> = [
+            "control1", "control2", "hinf1", "hinf4", "hinf10", "hinf11", "hinf14",
+            "theta1", "truss1", "truss3", "truss4", "truss5",
+        ].iter().copied().collect();
 
         let mut failures = Vec::new();
         let mut unexpected_passes = Vec::new();
@@ -482,12 +659,19 @@ mod tests {
                 continue;
             }
 
+            // Use looser tolerances for SDP problems
+            let effective_tol_feas = if sdp_problems.contains(res.name.as_str()) {
+                tol_feas_sdp
+            } else {
+                tol_feas
+            };
+
             let is_pass = matches!(res.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal)
                 && res.rel_p.is_finite()
                 && res.rel_d.is_finite()
                 && res.gap_rel.is_finite()
-                && res.rel_p <= tol_feas
-                && res.rel_d <= tol_feas
+                && res.rel_p <= effective_tol_feas
+                && res.rel_d <= effective_tol_feas
                 && res.gap_rel <= tol_gap;
 
             if res.expected_to_fail {
@@ -567,7 +751,7 @@ mod tests {
                 continue;
             }
             // Skip tolerance check for problems with expected non-optimal status
-            if !is_expected_non_optimal && (res.rel_p > tol_feas || res.rel_d > tol_feas || res.gap_rel > tol_gap) {
+            if !is_expected_non_optimal && (res.rel_p > effective_tol_feas || res.rel_d > effective_tol_feas || res.gap_rel > tol_gap) {
                 let msg = format!(
                     "{}: rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
                     res.name, res.rel_p, res.rel_d, res.gap_rel

@@ -374,8 +374,11 @@ pub fn load_sdpa_file(path: &Path) -> Result<SdpaData, String> {
 /// Solve an SDPA problem and return results
 pub fn solve_sdpa(sdpa: &SdpaData, settings: &SolverSettings) -> Result<SdpaResult, String> {
     let (prob, form) = sdpa_to_conic_selected(sdpa)?;
+
+
     let result = solve(&prob, settings)
         .map_err(|e| format!("Solve failed: {}", e))?;
+
 
     let sdpa_obj = match form {
         SdpaForm::Primal => {
@@ -427,15 +430,15 @@ pub fn sdplib_reference_values() -> HashMap<&'static str, f64> {
     map.insert("control10", 3.812901e+01);
     map.insert("control11", 3.197364e+01);
 
-    // Truss topology design
+    // Truss topology design (from SDPLIB GitHub: https://github.com/vsdp/SDPLIB)
     map.insert("truss1", -8.999996e+00);
     map.insert("truss2", -1.233804e+02);
     map.insert("truss3", -9.109996e+00);
     map.insert("truss4", -9.009996e+00);
-    map.insert("truss5", -1.323968e+02);
-    map.insert("truss6", -9.009996e+00);
-    map.insert("truss7", -9.009996e+00);
-    map.insert("truss8", -1.331145e+02);
+    map.insert("truss5", -1.326357e+02);  // Fixed: was -1.323968e+02
+    map.insert("truss6", -9.01001e+02);   // Fixed: was -9.009996e+00, actual is ~-901
+    map.insert("truss7", -9.00001e+02);   // Fixed: was -9.009996e+00, actual is ~-900
+    map.insert("truss8", -1.331146e+02);  // Fixed: was -1.331145e+02
 
     // Graph theta problems
     map.insert("theta1", 2.300000e+01);
