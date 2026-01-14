@@ -261,11 +261,12 @@ mod tests {
 
     #[test]
     fn test_row_scaling() {
-        // Row with coefficients [1e-5, 1e5]
+        // Row with coefficients [1e-6, 1e4] - geom_mean = sqrt(1e-2) = 0.1
+        // This produces non-trivial scaling since geom_mean != 1.0
         let a = sparse::from_triplets(
             1,
             2,
-            vec![(0, 0, 1e-5), (0, 1, 1e5)],
+            vec![(0, 0, 1e-6), (0, 1, 1e4)],
         );
 
         let mut prob = ProblemData {

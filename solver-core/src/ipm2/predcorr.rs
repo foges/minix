@@ -78,6 +78,31 @@ fn full_feas_weight_enabled() -> bool {
     })
 }
 
+fn psd_reg_cap_value() -> f64 {
+    static CAP: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        let floor = std::env::var("MINIX_PSD_REG_FLOOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(1e-8);
+        let mut cap = std::env::var("MINIX_PSD_REG_CAP")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(1e-6);
+        if !cap.is_finite() || cap <= 0.0 {
+            cap = 1e-6;
+        }
+        cap.max(floor)
+    })
+}
+
+fn psd_reg_cap_for_cones(cones: &[Box<dyn ConeKernel>]) -> Option<f64> {
+    let has_psd = cones.iter().any(|c| {
+        (c.as_ref() as &dyn Any).is::<PsdCone>()
+    });
+    if has_psd { Some(psd_reg_cap_value()) } else { None }
+}
+
 fn all_finite(v: &[f64]) -> bool {
     v.iter().all(|x| x.is_finite())
 }
@@ -283,7 +308,10 @@ fn centrality_nonneg_violation(
             continue;
         }
 
-        if (cone.as_ref() as &dyn Any).is::<NonNegCone>() {
+        let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+        let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+
+        if is_nonneg {
             for i in 0..dim {
                 let idx = offset + i;
                 let s_i = state.s[idx] + alpha * ds[idx];
@@ -317,6 +345,83 @@ fn centrality_nonneg_violation(
                         kappa_trial,
                     });
                 }
+            }
+        } else if is_soc {
+            // SOC: check NT-scaled complementarity eigenvalues (geometric means)
+            // Use relaxed bounds matching centrality_ok_nonneg_trial
+            let beta_soc = beta * 0.1;
+            let gamma_soc = (gamma * 10.0).min(1000.0);
+            let lower_soc = beta_soc * mu_trial;
+            let upper_soc = gamma_soc * mu_trial;
+
+            let s0 = state.s[offset] + alpha * ds[offset];
+            let z0 = state.z[offset] + alpha * dz[offset];
+
+            let mut s_norm_sq = 0.0;
+            let mut z_norm_sq = 0.0;
+            for i in 1..dim {
+                let si = state.s[offset + i] + alpha * ds[offset + i];
+                let zi = state.z[offset + i] + alpha * dz[offset + i];
+                s_norm_sq += si * si;
+                z_norm_sq += zi * zi;
+            }
+            let s_norm = s_norm_sq.sqrt();
+            let z_norm = z_norm_sq.sqrt();
+
+            let s_hi = s0 + s_norm;
+            let s_lo = if s0 <= s_norm { s0 - s_norm } else {
+                let d = s0 + s_norm; if d == 0.0 { 0.0 } else { s0.mul_add(s0, -s_norm_sq) / d }
+            };
+            let z_hi = z0 + z_norm;
+            let z_lo = if z0 <= z_norm { z0 - z_norm } else {
+                let d = z0 + z_norm; if d == 0.0 { 0.0 } else { z0.mul_add(z0, -z_norm_sq) / d }
+            };
+
+            if s_lo <= 0.0 || z_lo <= 0.0 {
+                return Some(CentralityViolation {
+                    idx: offset,
+                    side: "soc_not_interior",
+                    w: s_lo.min(z_lo),
+                    lower: lower_soc,
+                    upper: upper_soc,
+                    s_i: s0,
+                    z_i: z0,
+                    mu_trial,
+                    tau_trial,
+                    kappa_trial,
+                });
+            }
+
+            let comp_hi = (s_hi * z_hi).sqrt();
+            let comp_lo = (s_lo * z_lo).sqrt();
+
+            if comp_lo < lower_soc {
+                return Some(CentralityViolation {
+                    idx: offset,
+                    side: "soc_low",
+                    w: comp_lo,
+                    lower: lower_soc,
+                    upper: upper_soc,
+                    s_i: s0,
+                    z_i: z0,
+                    mu_trial,
+                    tau_trial,
+                    kappa_trial,
+                });
+            }
+            if comp_hi > upper_soc {
+                return Some(CentralityViolation {
+                    idx: offset,
+                    side: "soc_high",
+                    w: comp_hi,
+                    lower: lower_soc,
+                    upper: upper_soc,
+                    s_i: s0,
+                    z_i: z0,
+                    mu_trial,
+                    tau_trial,
+                    kappa_trial,
+                });
             }
         }
 
@@ -466,7 +571,6 @@ fn centrality_ok_nonneg_trial(
         return false;
     }
 
-    let mut has_nonneg = false;
     let mut offset = 0;
     for cone in cones {
         let dim = cone.dim();
@@ -475,27 +579,82 @@ fn centrality_ok_nonneg_trial(
         }
 
         let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
-        if !is_nonneg {
-            offset += dim;
-            continue;
-        }
+        let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
 
-        has_nonneg = true;
-        for i in 0..dim {
-            let idx = offset + i;
-            let s_i = state.s[idx] + alpha * ds[idx];
-            let z_i = state.z[idx] + alpha * dz[idx];
-            let w = s_i * z_i;
-            if w < beta * mu_trial || w > gamma * mu_trial {
+        if is_nonneg {
+            // NonNeg: check w = s_i * z_i ∈ [β·μ, γ·μ] for each component
+            for i in 0..dim {
+                let idx = offset + i;
+                let s_i = state.s[idx] + alpha * ds[idx];
+                let z_i = state.z[idx] + alpha * dz[idx];
+                let w = s_i * z_i;
+                if w < beta * mu_trial || w > gamma * mu_trial {
+                    return false;
+                }
+            }
+        } else if is_soc {
+            // For SOC cones, enforce the central neighborhood using NT-scaled complementarity.
+            // Instead of checking raw s∘z eigenvalues (which can be outside SOC even when
+            // s,z are interior), we check the geometric means: sqrt(λ_i(s) * λ_i(z)).
+            // This is the correct symmetric-cone neighborhood check (Clarabel-style).
+            //
+            // SOC cones use relaxed centrality bounds compared to NonNeg:
+            // - beta_soc = beta * 0.1 (10x looser lower bound)
+            // - gamma_soc = gamma * 10 (10x looser upper bound, clamped to 1000)
+            // This accounts for the more complex geometry of SOC cones and avoids
+            // overly restricting steps on ill-conditioned problems.
+            let beta_soc = beta * 0.1;
+            let gamma_soc = (gamma * 10.0).min(1000.0);
+
+            let s0 = state.s[offset] + alpha * ds[offset];
+            let z0 = state.z[offset] + alpha * dz[offset];
+
+            // Compute ||s̄|| and ||z̄||
+            let mut s_norm_sq = 0.0;
+            let mut z_norm_sq = 0.0;
+            for i in 1..dim {
+                let si = state.s[offset + i] + alpha * ds[offset + i];
+                let zi = state.z[offset + i] + alpha * dz[offset + i];
+                s_norm_sq += si * si;
+                z_norm_sq += zi * zi;
+            }
+            let s_norm = s_norm_sq.sqrt();
+            let z_norm = z_norm_sq.sqrt();
+
+            // Eigenvalues of s: λ_max(s) = s0 + ||s̄||, λ_min(s) = s0 - ||s̄||
+            let s_hi = s0 + s_norm;
+            let s_lo = if s0 <= s_norm {
+                s0 - s_norm
+            } else {
+                let denom = s0 + s_norm;
+                if denom == 0.0 { 0.0 } else { s0.mul_add(s0, -s_norm_sq) / denom }
+            };
+
+            // Eigenvalues of z: λ_max(z) = z0 + ||z̄||, λ_min(z) = z0 - ||z̄||
+            let z_hi = z0 + z_norm;
+            let z_lo = if z0 <= z_norm {
+                z0 - z_norm
+            } else {
+                let denom = z0 + z_norm;
+                if denom == 0.0 { 0.0 } else { z0.mul_add(z0, -z_norm_sq) / denom }
+            };
+
+            // Check interior: both s and z must be strictly interior
+            if s_lo <= 0.0 || z_lo <= 0.0 {
+                return false;
+            }
+
+            // NT-scaled complementarity eigenvalues (geometric means)
+            let comp_hi = (s_hi * z_hi).sqrt();
+            let comp_lo = (s_lo * z_lo).sqrt();
+
+            // Check neighborhood with relaxed SOC bounds: β_soc·μ ≤ comp_lo and comp_hi ≤ γ_soc·μ
+            if comp_lo < beta_soc * mu_trial || comp_hi > gamma_soc * mu_trial {
                 return false;
             }
         }
 
         offset += dim;
-    }
-
-    if !has_nonneg {
-        return true;
     }
 
     true
@@ -512,7 +671,24 @@ fn spectral_decomposition_in_place(v: &[f64], lambda: &mut [f64; 2], e1: &mut [f
     let x_norm = if v.len() == 1 { 0.0 } else { soc_x_norm(v) };
 
     lambda[0] = t + x_norm;
-    lambda[1] = t - x_norm;
+
+    // Compute lambda[1] stably to avoid catastrophic cancellation when t ≈ ||x||:
+    // λ₂ = t - ||x|| = (t² - ||x||²) / (t + ||x||).
+    let lambda0 = lambda[0];
+    if lambda0 != 0.0 {
+        let scale = t.abs().max(x_norm);
+        let det = if scale == 0.0 {
+            0.0
+        } else {
+            let ts = t / scale;
+            let xs = x_norm / scale;
+            ts.mul_add(ts, -(xs * xs)) * (scale * scale)
+        };
+        lambda[1] = (det / lambda0).max(0.0);
+    } else {
+        // Fallback (should be unreachable for interior points).
+        lambda[1] = t - x_norm;
+    }
 
     if x_norm > 1e-14 {
         let inv_norm = 1.0 / x_norm;
@@ -801,6 +977,7 @@ pub fn predictor_corrector_step_in_place(
     let factor = {
         const MAX_REG_RETRIES: usize = 3;
         const MAX_STATIC_REG: f64 = 1e-2;
+        let max_static_reg = psd_reg_cap_for_cones(cones).unwrap_or(MAX_STATIC_REG);
         let mut retries = 0usize;
         loop {
             {
@@ -827,7 +1004,7 @@ pub fn predictor_corrector_step_in_place(
                         let next_reg = if current_reg < 1e-10 {
                             1e-10  // Start with small shift if reg is tiny
                         } else {
-                            (current_reg * 100.0).min(MAX_STATIC_REG)
+                            (current_reg * 100.0).min(max_static_reg)
                         };
 
                         if diagnostics_enabled() {
@@ -853,7 +1030,7 @@ pub fn predictor_corrector_step_in_place(
                 break factor;
             }
 
-            let next_reg = (kkt.static_reg() * 10.0).min(MAX_STATIC_REG);
+            let next_reg = (kkt.static_reg() * 10.0).min(max_static_reg);
             if next_reg <= kkt.static_reg() {
                 break factor;
             }
@@ -1103,7 +1280,8 @@ pub fn predictor_corrector_step_in_place(
                         let dz_aff_mat = svec_to_mat(dz_aff_slice, n_psd);
 
                         // W from scaling block (NT scaling matrix)
-                        let w_mat = DMatrix::from_row_slice(n_psd, n_psd, w_factor);
+                        let w_raw = DMatrix::from_row_slice(n_psd, n_psd, w_factor);
+                        let w_mat = 0.5 * (&w_raw + w_raw.transpose());
 
                         // W^{1/2}, W^{-1/2} via eigendecomposition
                         let eig_w = SymmetricEigen::new(w_mat);
@@ -1118,7 +1296,8 @@ pub fn predictor_corrector_step_in_place(
                         let w_half_inv = q_w * DMatrix::from_diagonal(&d_inv_sqrt) * &q_w_t;
 
                         // λ = W^{1/2} Z W^{1/2}
-                        let lambda = &w_half * &z_mat * &w_half;
+                        let lambda_raw = &w_half * &z_mat * &w_half;
+                        let lambda = 0.5 * (&lambda_raw + lambda_raw.transpose());
                         // A = W^{-1/2} dS_aff W^{-1/2}
                         let a = &w_half_inv * &ds_aff_mat * &w_half_inv;
                         // B = W^{1/2} dZ_aff W^{1/2}
@@ -1428,7 +1607,7 @@ pub fn predictor_corrector_step_in_place(
         }
 
         alpha = (0.99 * alpha).min(1.0);
-        alpha_pre_ls = alpha;
+        let alpha_pre_prox = alpha;
 
         // Proximity-based step size reduction (experimental)
         // This helps keep iterates close to the central path, reducing iteration count
@@ -1445,6 +1624,8 @@ pub fn predictor_corrector_step_in_place(
                 0.95,  // proximity threshold
             );
         }
+        let alpha_post_prox = alpha;
+        alpha_pre_ls = alpha;
 
         if settings.line_search_max_iters > 0
             && settings.centrality_gamma > settings.centrality_beta
@@ -1507,6 +1688,12 @@ pub fn predictor_corrector_step_in_place(
                     ls_reported = true;
                 }
                 alpha *= 0.5;
+                // Minimum alpha floor to prevent complete stalling
+                // If we hit this floor, accept the step and let sigma adjustment handle centering
+                if alpha < 1e-4 {
+                    alpha = 1e-4;
+                    break;
+                }
             }
         }
 
@@ -1573,8 +1760,18 @@ pub fn predictor_corrector_step_in_place(
             }
         }
 
+        let alpha_post_ls = alpha;
+
         let alpha_limiter_sz = alpha_sz <= alpha_tau.min(alpha_kappa);
-        let alpha_stall = alpha < 1e-3 && mu < 1e-6 && alpha_limiter_sz;
+        let alpha_limiter_proximity = alpha_post_prox < 0.99 * alpha_pre_prox;
+        let alpha_limiter_ls = alpha_post_ls < 0.99 * alpha_pre_ls;
+        let alpha_limiter_centrality = alpha_limiter_proximity || alpha_limiter_ls;
+        let centrality_emergency = alpha_limiter_centrality && alpha <= 1e-4;
+
+        let alpha_stall = alpha < 1e-3
+            && (alpha_limiter_sz || alpha_limiter_centrality)
+            && (mu < 1e-6 || centrality_emergency);
+
         if !alpha_stall || attempt == max_retries {
             break;
         }
@@ -1594,7 +1791,10 @@ pub fn predictor_corrector_step_in_place(
 
         if attempt == 0 {
             let base_reg = settings.static_reg.max(settings.dynamic_reg_min_pivot);
-            let bump_reg = (base_reg * 10.0).min(1e-4);
+            let mut bump_reg = (base_reg * 10.0).min(1e-4);
+            if let Some(reg_cap) = psd_reg_cap_for_cones(cones) {
+                bump_reg = bump_reg.min(reg_cap);
+            }
             if bump_reg > 0.0 {
                 let changed = kkt
                     .bump_static_reg(bump_reg)
@@ -1604,6 +1804,10 @@ pub fn predictor_corrector_step_in_place(
                 }
             }
             sigma_eff = (sigma_eff + 0.2).min(sigma_cap);
+            // If centrality checks crushed alpha, bump sigma more aggressively
+            if alpha_limiter_centrality {
+                sigma_eff = sigma_eff.max(0.3);
+            }
             refine_iters = refine_iters.saturating_add(2);
         } else {
             sigma_eff = sigma_cap;
@@ -1994,6 +2198,46 @@ fn apply_proximity_step_control(
         for cone in cones.iter() {
             let dim = cone.dim();
             if dim == 0 || cone.barrier_degree() == 0 {
+                offset += dim;
+                continue;
+            }
+
+            let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+            if is_soc {
+                // For SOC cones, measure proximity using NT-scaled complementarity eigenvalues
+                let s0 = state.s[offset] + alpha * ds[offset];
+                let z0 = state.z[offset] + alpha * dz[offset];
+
+                let mut s_norm_sq = 0.0;
+                let mut z_norm_sq = 0.0;
+                for i in 1..dim {
+                    let si = state.s[offset + i] + alpha * ds[offset + i];
+                    let zi = state.z[offset + i] + alpha * dz[offset + i];
+                    s_norm_sq += si * si;
+                    z_norm_sq += zi * zi;
+                }
+                let s_norm = s_norm_sq.sqrt();
+                let z_norm = z_norm_sq.sqrt();
+
+                let s_hi = s0 + s_norm;
+                let s_lo = if s0 <= s_norm { s0 - s_norm } else {
+                    let d = s0 + s_norm; if d == 0.0 { 0.0 } else { s0.mul_add(s0, -s_norm_sq) / d }
+                };
+                let z_hi = z0 + z_norm;
+                let z_lo = if z0 <= z_norm { z0 - z_norm } else {
+                    let d = z0 + z_norm; if d == 0.0 { 0.0 } else { z0.mul_add(z0, -z_norm_sq) / d }
+                };
+
+                if s_lo > 0.0 && z_lo > 0.0 {
+                    let comp_hi = (s_hi * z_hi).sqrt();
+                    let comp_lo = (s_lo * z_lo).sqrt();
+                    let deviation = (comp_hi - mu_trial).abs().max((comp_lo - mu_trial).abs()) / mu_trial;
+                    proximity = proximity.max(deviation);
+                } else {
+                    // Not interior - max deviation
+                    proximity = f64::MAX;
+                }
+
                 offset += dim;
                 continue;
             }

@@ -177,6 +177,23 @@ pub fn solve_ipm2(
     // Validate problem
     prob.validate()?;
 
+    // SOC centrality line search is DISABLED by default because testing shows it
+    // prevents convergence on many problems. The centrality check (even with relaxed
+    // bounds) is too strict for ill-conditioned SOCP problems.
+    // Enable with MINIX_ENABLE_SOC_AUTOLS=1 for experimental centrality enforcement.
+    let has_soc = prob.cones.iter().any(|c| matches!(c, ConeSpec::Soc { .. }));
+    let enable_soc_autols = std::env::var("MINIX_ENABLE_SOC_AUTOLS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let settings = if has_soc && settings.line_search_max_iters == 0 && enable_soc_autols {
+        let mut s = settings.clone();
+        s.line_search_max_iters = 15;
+        s
+    } else {
+        settings.clone()
+    };
+    let settings = &settings;
+
     let orig_prob = prob.clone();
     let orig_prob_bounds = orig_prob.with_bounds_as_constraints();
     let presolved = apply_presolve(prob);
@@ -514,6 +531,7 @@ pub fn solve_ipm2(
     let criteria = TerminationCriteria {
         tol_feas: settings.tol_feas,
         tol_gap: settings.tol_gap,
+        tol_gap_rel: settings.tol_gap,  // Use same tolerance for relative gap
         tol_infeas: settings.tol_infeas,
         max_iter: settings.max_iter,
         ..Default::default()
@@ -550,6 +568,34 @@ pub fn solve_ipm2(
     let mut recent_rel_p: Vec<f64> = Vec::with_capacity(PROGRESS_WINDOW);
     let mut recent_rel_d: Vec<f64> = Vec::with_capacity(PROGRESS_WINDOW);
     let mut recent_gap_rel: Vec<f64> = Vec::with_capacity(PROGRESS_WINDOW);
+
+    // Track best achieved metrics AND state for early termination when condition number explodes.
+    // This helps with chordal decomposition where solver converges but KKT becomes ill-conditioned.
+    // Following Clarabel's approach: track best iterate and return it on numerical cliff.
+    let mut best_gap_rel: f64 = f64::INFINITY;
+    let mut best_rel_p: f64 = f64::INFINITY;
+    let mut best_rel_d: f64 = f64::INFINITY;
+    let mut best_iter: usize = 0;
+    let mut best_state: Option<HsdeState> = None;
+    let mut best_mu: f64 = f64::INFINITY;
+
+    // Convergence threshold for early termination when condition number explodes.
+    // For chordal decomposition with overlapping cliques, use 1e-4 (AlmostOptimal level)
+    // since constraint redundancy may prevent achieving 1e-6.
+    // For regular problems (including SOCP), use the actual tolerance.
+    let chordal_active = !chordal_decomposed.decompositions.is_empty();
+    let convergence_threshold = if chordal_active { 1e-4 } else { criteria.tol_feas };
+
+    // Step-length termination: track consecutive small steps (like Clarabel's min_terminate_step_length)
+    // If alpha < 1e-4 for several iterations and we're "close enough", terminate.
+    let min_terminate_step_length = 1e-4;
+    let mut small_step_count: usize = 0;
+    let small_step_terminate_iters: usize = 3;
+
+    // Skip polish when chordal decomposition is active or condition is already high.
+    // Polish can turn a solved problem into a failure when KKT is ill-conditioned.
+    let mut skip_polish = chordal_active;
+    let mut last_condition_number: f64 = 1.0;
 
     while iter < effective_max_iter {
         {
@@ -727,10 +773,66 @@ pub fn solve_ipm2(
 
                 // V19: Log condition number (warn if > 1e12)
                 if let Some(cond) = kkt.estimate_condition_number() {
+                    last_condition_number = cond;
+
+                    // Skip polish if condition is already high (polish can destabilize)
+                    if cond > 1e14 {
+                        skip_polish = true;
+                    }
+
                     if cond > 1e12 && diag.should_log(iter) {
                         eprintln!("iter {} condition number: {:.3e} (ill-conditioned KKT)", iter, cond);
                     } else if cond > 1e15 && diag.enabled() {
                         eprintln!("iter {} condition number: {:.3e} (severely ill-conditioned!)", iter, cond);
+                    }
+
+                    // Early termination for ill-conditioned problems:
+                    // When condition number explodes but we already converged, accept the solution.
+                    // This handles the case where KKT becomes ill-conditioned after numerical
+                    // convergence is achieved (common with overlapping PSD cliques and SOCP).
+                    if cond > 1e16
+                        && best_gap_rel < convergence_threshold
+                        && best_rel_p < convergence_threshold
+                        && best_rel_d < convergence_threshold
+                    {
+                        if diag.enabled() {
+                            eprintln!(
+                                "early termination: cond={:.3e} but converged at iter {} (gap={:.3e} rel_p={:.3e} rel_d={:.3e})",
+                                cond, best_iter, best_gap_rel, best_rel_p, best_rel_d
+                            );
+                        }
+                        // Use best state if available
+                        if let Some(ref best) = best_state {
+                            state = best.clone();
+                            mu = best_mu;
+                        }
+                        status = SolveStatus::Optimal;
+                        break;
+                    }
+
+                    // AlmostOptimal termination: if condition number explodes and we're within 10x
+                    // of tolerance, return AlmostOptimal with best state. This handles SOCP problems
+                    // where numerical instability prevents achieving full tolerance.
+                    let almost_feas_threshold = convergence_threshold * 10.0;
+                    let almost_gap_threshold = criteria.tol_gap_rel * 10.0;  // Gap uses separate tolerance
+                    if cond > 1e18
+                        && best_gap_rel < almost_gap_threshold
+                        && best_rel_p < almost_feas_threshold
+                        && best_rel_d < almost_feas_threshold
+                    {
+                        if diag.enabled() {
+                            eprintln!(
+                                "almost-optimal termination: cond={:.3e}, best at iter {} (gap={:.3e} rel_p={:.3e} rel_d={:.3e})",
+                                cond, best_iter, best_gap_rel, best_rel_p, best_rel_d
+                            );
+                        }
+                        // Use best state if available
+                        if let Some(ref best) = best_state {
+                            state = best.clone();
+                            mu = best_mu;
+                        }
+                        status = SolveStatus::AlmostOptimal;
+                        break;
                     }
                 }
 
@@ -763,6 +865,36 @@ pub fn solve_ipm2(
             // Actually, just print a continuation line with sigma and step
             eprintln!("     sigma={:.2e} step={:.2e} alpha_sz={:.2e}",
                 step_result.sigma, step_result.alpha, step_result.alpha_sz);
+        }
+
+        // Step-length termination (like Clarabel's min_terminate_step_length):
+        // If alpha < 1e-4 for N consecutive iterations and we're "close enough", terminate.
+        // This prevents the solver from grinding away with tiny steps when already converged.
+        if step_result.alpha < min_terminate_step_length && step_result.alpha_sz < min_terminate_step_length {
+            small_step_count += 1;
+        } else {
+            small_step_count = 0;
+        }
+
+        // Check for step-length termination (similar to condition-based early termination)
+        if small_step_count >= small_step_terminate_iters
+            && best_gap_rel < convergence_threshold
+            && best_rel_p < convergence_threshold
+            && best_rel_d < convergence_threshold
+        {
+            if diag.enabled() {
+                eprintln!(
+                    "step-length termination: alpha={:.3e} for {} iters, converged at iter {} (gap={:.3e} rel_p={:.3e} rel_d={:.3e})",
+                    step_result.alpha, small_step_count, best_iter, best_gap_rel, best_rel_p, best_rel_d
+                );
+            }
+            // Use best state if available
+            if let Some(ref best) = best_state {
+                state = best.clone();
+                mu = best_mu;
+            }
+            status = SolveStatus::Optimal;
+            break;
         }
 
         // Merit function check: reject steps that cause μ explosion without residual improvement.
@@ -1170,6 +1302,25 @@ pub fn solve_ipm2(
             metrics
         };
 
+        // Track best achieved metrics AND state for early termination when condition number explodes
+        // (especially important for chordal decomposition).
+        // Use a merit function: max of normalized residuals and gap.
+        let current_merit = (metrics.rel_p / convergence_threshold)
+            .max(metrics.rel_d / convergence_threshold)
+            .max(metrics.gap_rel / convergence_threshold);
+        let best_merit = (best_rel_p / convergence_threshold)
+            .max(best_rel_d / convergence_threshold)
+            .max(best_gap_rel / convergence_threshold);
+
+        if current_merit < best_merit {
+            best_gap_rel = metrics.gap_rel;
+            best_rel_p = metrics.rel_p;
+            best_rel_d = metrics.rel_d;
+            best_iter = iter;
+            best_state = Some(state.clone());
+            best_mu = mu;
+        }
+
         // P1.1: Track progress for large problems
         if is_large_problem {
             // Add current metrics to progress tracking
@@ -1273,7 +1424,8 @@ pub fn solve_ipm2(
             }
 
             if should_boost {
-                adaptive_refine_iters = (adaptive_refine_iters + 1).min(reg_policy.max_refine_iters - settings.kkt_refine_iters);
+                let max_boost = reg_policy.max_refine_iters.saturating_sub(settings.kkt_refine_iters);
+                adaptive_refine_iters = (adaptive_refine_iters + 1).min(max_boost);
                 if diag.should_log(iter) {
                     eprintln!("adaptive refinement: boost to {}", settings.kkt_refine_iters + adaptive_refine_iters);
                 }
@@ -1281,8 +1433,20 @@ pub fn solve_ipm2(
         }
         prev_rel_d = metrics.rel_d;
 
+        // Determine next mode, but skip polish if conditions indicate it would be harmful
         let next_mode = if matches!(solve_mode, SolveMode::Polish) {
             SolveMode::Polish
+        } else if skip_polish && matches!(proposed_mode, SolveMode::Polish) {
+            // Skip polish when:
+            // - Chordal decomposition is active (can destabilize convergence)
+            // - Condition number is already high (polish makes it worse)
+            if diag.enabled() {
+                eprintln!(
+                    "skipping polish mode (chordal={}, cond={:.3e})",
+                    chordal_active, last_condition_number
+                );
+            }
+            SolveMode::Normal  // Stay in normal mode instead
         } else {
             proposed_mode
         };
@@ -1303,6 +1467,40 @@ pub fn solve_ipm2(
 
     if iter >= settings.max_iter && status == SolveStatus::NumericalError {
         status = SolveStatus::MaxIters;
+    }
+
+    // On numerical cliff events (MaxIters, NumericalError), use best iterate if it's better.
+    // This is critical for chordal decomposition where the solver converges but then
+    // the KKT becomes ill-conditioned causing subsequent iterates to degrade.
+    if matches!(status, SolveStatus::MaxIters | SolveStatus::NumericalError) {
+        if let Some(ref best) = best_state {
+            // Compare merit: use best if it has better combined metrics
+            let current_merit = (best_rel_p / convergence_threshold)
+                .max(best_rel_d / convergence_threshold)
+                .max(best_gap_rel / convergence_threshold);
+
+            // If best iterate was "close enough", use it and potentially upgrade status
+            if current_merit <= 1.0 {
+                if diag.enabled() {
+                    eprintln!(
+                        "using best iterate from iter {} (gap={:.3e} rel_p={:.3e} rel_d={:.3e})",
+                        best_iter, best_gap_rel, best_rel_p, best_rel_d
+                    );
+                }
+                state = best.clone();
+                mu = best_mu;
+
+                // Upgrade status if best iterate meets AlmostOptimal criteria
+                if best_gap_rel <= 5e-5 && best_rel_p <= 1e-4 && best_rel_d <= 1e-4 {
+                    status = SolveStatus::AlmostOptimal;
+                } else if best_gap_rel <= convergence_threshold
+                    && best_rel_p <= convergence_threshold
+                    && best_rel_d <= convergence_threshold
+                {
+                    status = SolveStatus::NumericalLimit;
+                }
+            }
+        }
     }
 
     // If early polish succeeded, use that solution directly

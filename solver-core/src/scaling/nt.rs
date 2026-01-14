@@ -174,7 +174,8 @@ pub fn nt_scaling_psd(
         * DMatrix::<f64>::from_diagonal(&inv_sqrt_vals)
         * eig_m.eigenvectors.transpose();
 
-    let w = &x_sqrt * m_inv_sqrt * &x_sqrt;
+    let w_raw = &x_sqrt * m_inv_sqrt * &x_sqrt;
+    let w = 0.5 * (&w_raw + w_raw.transpose());
     let mut w_factor = Vec::with_capacity(n * n);
     for i in 0..n {
         for j in 0..n {
@@ -232,8 +233,20 @@ fn spectral_decomposition(v: &[f64], lambda: &mut [f64; 2], e1: &mut [f64], e2: 
         v[1..].iter().map(|xi| xi * xi).sum::<f64>().sqrt()
     };
 
+    // λ₁ = t + ||x||
     lambda[0] = t + x_norm;
-    lambda[1] = t - x_norm;
+
+    // λ₂ = t - ||x||, but computed in a cancellation-resistant way when t ≈ ||x||.
+    // Using: λ₂ = det(v) / (t + ||x||) where det(v) = t² - ||x||².
+    let scale = t.abs().max(x_norm);
+    let det = if scale == 0.0 {
+        0.0
+    } else {
+        let ts = t / scale;
+        let xs = x_norm / scale;
+        ts.mul_add(ts, -(xs * xs)) * (scale * scale)
+    };
+    lambda[1] = (det / lambda[0]).max(0.0);
 
     // e1 = (1, x/||x||) / 2
     // e2 = (1, -x/||x||) / 2

@@ -160,12 +160,11 @@ pub fn check_termination(
     // Feasibility scaling.
     let b_inf = inf_norm(&prob.b);
     let q_inf = inf_norm(&prob.q);
-    let x_inf = inf_norm(&x_bar);
-    let s_inf = inf_norm(&s_bar);
-    let z_inf = inf_norm(&z_bar);
 
-    let primal_scale = (b_inf + x_inf + s_inf).max(1.0);
-    let dual_scale = (q_inf + x_inf + z_inf).max(1.0);
+    // Scale by data only; variable magnitudes can explode under HSDE and
+    // falsely mask large absolute residuals.
+    let primal_scale = b_inf.max(1.0);
+    let dual_scale = q_inf.max(1.0);
 
     let primal_ok = rp_inf <= criteria.tol_feas * primal_scale;
     let dual_ok = rd_inf <= criteria.tol_feas * dual_scale;

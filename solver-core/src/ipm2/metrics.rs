@@ -126,12 +126,11 @@ pub fn compute_unscaled_metrics(
 
     let b_inf = inf_norm(b);
     let q_inf = inf_norm(q);
-    let x_inf = inf_norm(x_bar);
-    let s_inf = inf_norm(s_bar);
-    let z_inf = inf_norm(z_bar);
 
-    let primal_scale = (b_inf + x_inf + s_inf).max(1.0);
-    let dual_scale = (q_inf + x_inf + z_inf).max(1.0);
+    // Use data-based scaling only; avoid x/s/z magnitude so HSDE scaling
+    // cannot hide large absolute residuals (especially on SDP instances).
+    let primal_scale = b_inf.max(1.0);
+    let dual_scale = q_inf.max(1.0);
 
     let rel_p = rp_inf / primal_scale;
     let rel_d = rd_inf / dual_scale;
@@ -351,4 +350,3 @@ pub fn diagnose_dual_residual(
 
     eprintln!("{}", "=".repeat(80));
 }
-

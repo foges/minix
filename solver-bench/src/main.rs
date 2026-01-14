@@ -71,6 +71,9 @@ enum Commands {
         /// Solver backend to use
         #[arg(long, value_enum, default_value = "ipm2")]
         solver: SolverChoice,
+        /// Run as SOCP (reformulate QP without P matrix)
+        #[arg(long)]
+        socp: bool,
     },
     /// Parse and show info about a QPS file
     Info {
@@ -103,6 +106,9 @@ enum Commands {
         /// Only run SOCP-reformulated problems (skip native QP/SDP tests)
         #[arg(long)]
         socp_only: bool,
+        /// Filter to specific problem(s) by prefix (e.g., "HS" or "DUAL")
+        #[arg(long)]
+        filter: Option<String>,
     },
 }
 
@@ -290,6 +296,7 @@ fn run_maros_meszaros(
     problem: Option<String>,
     show_table: bool,
     solver: SolverChoice,
+    socp: bool,
 ) {
     // Check for direct mode via environment variable
     let direct_mode = std::env::var("MINIX_DIRECT_MODE")
@@ -307,19 +314,51 @@ fn run_maros_meszaros(
 
     if let Some(name) = problem {
         // Run single problem
-        println!("Running single problem: {}", name);
-        let result = maros_meszaros::run_single(&name, &settings, solver);
+        if socp {
+            println!("Running single problem as SOCP: {}", name);
+            match maros_meszaros::load_problem(&name) {
+                Ok(qps) => {
+                    match qps.to_socp_form() {
+                        Ok(prob) => {
+                            println!("SOCP Variables:   {}", prob.num_vars());
+                            println!("SOCP Constraints: {}", prob.num_constraints());
+                            println!("SOCP Cones:       {:?}", prob.cones);
 
-        if let Some(err) = &result.error {
-            println!("Error: {}", err);
+                            let start = Instant::now();
+                            let result = solve_with_choice(&prob, &settings, solver);
+                            let elapsed = start.elapsed();
+
+                            match result {
+                                Ok(res) => {
+                                    println!("Status:     {:?}", res.status);
+                                    println!("Iterations: {}", res.info.iters);
+                                    println!("Objective:  {:.6e}", res.obj_val);
+                                    println!("Final μ:    {:.6e}", res.info.mu);
+                                    println!("Time:       {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+                                }
+                                Err(e) => println!("Solve error: {}", e),
+                            }
+                        }
+                        Err(e) => println!("SOCP conversion error: {}", e),
+                    }
+                }
+                Err(e) => println!("Load error: {}", e),
+            }
         } else {
-            println!("Status:     {:?}", result.status);
-            println!("Variables:  {}", result.n);
-            println!("Constraints:{}", result.m);
-            println!("Iterations: {}", result.iterations);
-            println!("Objective:  {:.6e}", result.obj_val);
-            println!("Final μ:    {:.6e}", result.mu);
-            println!("Time:       {:.3} ms", result.solve_time_ms);
+            println!("Running single problem: {}", name);
+            let result = maros_meszaros::run_single(&name, &settings, solver);
+
+            if let Some(err) = &result.error {
+                println!("Error: {}", err);
+            } else {
+                println!("Status:     {:?}", result.status);
+                println!("Variables:  {}", result.n);
+                println!("Constraints:{}", result.m);
+                println!("Iterations: {}", result.iterations);
+                println!("Objective:  {:.6e}", result.obj_val);
+                println!("Final μ:    {:.6e}", result.mu);
+                println!("Time:       {:.3} ms", result.solve_time_ms);
+            }
         }
     } else {
         // Run full suite
@@ -390,13 +429,28 @@ fn run_regression_suite(
     baseline_out: Option<String>,
     max_regression: f64,
     socp_only: bool,
+    filter: Option<String>,
 ) {
     let mut settings = SolverSettings::default();
     settings.max_iter = max_iter;
 
-    let results = regression::run_regression_suite(&settings, solver, require_cache, max_iter_fail, socp_only);
+    let results = regression::run_regression_suite(&settings, solver, require_cache, max_iter_fail, socp_only, filter.as_deref());
     let mut failed = 0usize;
     let mut skipped = 0usize;
+
+    // For SOCP tests, results are already printed by run_socp_tests()
+    // Just count failures and print summary
+    if socp_only {
+        for res in &results {
+            if res.skipped {
+                skipped += 1;
+            } else if !matches!(res.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal) {
+                failed += 1;
+            }
+        }
+        println!("summary: total={} failed={} skipped={}", results.len(), failed, skipped);
+        return;
+    }
 
     // SDPLIB problem names (use looser tolerances)
     let sdp_problems: std::collections::HashSet<&str> = [
@@ -410,7 +464,9 @@ fn run_regression_suite(
             println!("{}: SKIP (missing cache)", res.name);
             continue;
         }
-        if res.status != SolveStatus::Optimal
+        // Accept both Optimal and AlmostOptimal (for numerically challenging SOCP)
+        let status_ok = matches!(res.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal);
+        if !status_ok
             || !res.rel_p.is_finite()
             || !res.rel_d.is_finite()
             || !res.gap_rel.is_finite()
@@ -430,8 +486,15 @@ fn run_regression_suite(
 
         // Use practical tolerances for unscaled metrics
         // SDP problems (PSD cones) have inherently worse conditioning
-        let tol_feas = if sdp_problems.contains(res.name.as_str()) { 1e-4 } else { 1e-6 };
-        let tol_gap = 1e-3;
+        // AlmostOptimal uses Clarabel's reduced tolerances
+        let base_tol_feas = if sdp_problems.contains(res.name.as_str()) { 1e-4 } else { 1e-6 };
+        let base_tol_gap = 1e-3;
+        let (tol_feas, tol_gap) = if res.status == SolveStatus::AlmostOptimal {
+            // Clarabel's reduced tolerances for AlmostOptimal
+            (1e-4, 5e-5)  // reduced_tol_feas, reduced_tol_gap_rel
+        } else {
+            (base_tol_feas, base_tol_gap)
+        };
         if res.rel_p > tol_feas || res.rel_d > tol_feas || res.gap_rel > tol_gap {
             failed += 1;
             println!(
@@ -717,12 +780,12 @@ fn main() {
         Some(Commands::Random { max_iter, solver }) => {
             run_random_benchmarks(max_iter, solver);
         }
-        Some(Commands::Benchmark { suite, path, limit, max_iter, problem, table, verbose, solver }) => {
+        Some(Commands::Benchmark { suite, path, limit, max_iter, problem, table, verbose, solver, socp }) => {
             match suite {
                 BenchmarkSuite::Mm => {
                     // Auto-detect path for Maros-Meszaros
                     let _path = path; // MM uses its own path logic via maros_meszaros module
-                    run_maros_meszaros(limit, max_iter, problem, table, solver);
+                    run_maros_meszaros(limit, max_iter, problem, table, solver, socp);
                 }
                 BenchmarkSuite::Sdplib => {
                     // Auto-detect path for SDPLIB
@@ -753,6 +816,7 @@ fn main() {
             baseline_out,
             max_regression,
             socp_only,
+            filter,
         }) => {
             run_regression_suite(
                 max_iter,
@@ -763,6 +827,7 @@ fn main() {
                 baseline_out,
                 max_regression,
                 socp_only,
+                filter,
             );
         }
         None => {

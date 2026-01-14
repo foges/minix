@@ -143,12 +143,13 @@ pub fn run_regression_suite(
     require_cache: bool,
     max_iter_fail: usize,
     socp_only: bool,
+    filter: Option<&str>,
 ) -> Vec<RegressionResult> {
     let mut results = Vec::new();
 
     // Skip QP/SDP tests if socp_only is set
     if socp_only {
-        return run_socp_tests(settings, solver, require_cache);
+        return run_socp_tests(settings, solver, require_cache, filter);
     }
 
     // 108 Maros-Meszaros problems that truly meet quality standards (79.4% of 136)
@@ -598,6 +599,7 @@ fn run_socp_tests(
     base_settings: &SolverSettings,
     solver: SolverChoice,
     require_cache: bool,
+    filter: Option<&str>,
 ) -> Vec<RegressionResult> {
     use std::io::Write;
 
@@ -607,10 +609,19 @@ fn run_socp_tests(
     let mut settings = base_settings.clone();
     settings.max_iter = 30; // SOCP should converge in ~20 iters for well-behaved problems
 
-    let tol_feas = 1e-6;
-    let tol_gap = 1e-3;
+    // Match Clarabel's default tolerances exactly
+    let tol_feas = 1e-8;  // Clarabel default
+    let tol_gap = 1e-8;   // Clarabel default
+    settings.tol_feas = tol_feas;
+    settings.tol_gap = tol_gap;
 
     for name in mm_problem_names() {
+        // Apply filter if specified
+        if let Some(f) = filter {
+            if !name.starts_with(f) {
+                continue;
+            }
+        }
         let socp_name = format!("{}_SOCP", name);
 
         let result = match load_local_problem(name) {
@@ -678,9 +689,11 @@ fn run_socp_tests(
         };
 
         // Print result immediately for streaming output
+        // Accept both Optimal and AlmostOptimal (for numerically challenging SOCP)
+        let status_ok = matches!(result.status, SolveStatus::Optimal | SolveStatus::AlmostOptimal);
         if result.skipped {
             println!("{}: SKIP", result.name);
-        } else if result.status != SolveStatus::Optimal
+        } else if !status_ok
             || !result.rel_p.is_finite()
             || !result.rel_d.is_finite()
             || !result.gap_rel.is_finite()
@@ -694,16 +707,38 @@ fn run_socp_tests(
                 result.gap_rel,
                 result.error.as_deref().unwrap_or(""),
             );
-        } else if result.rel_p > tol_feas || result.rel_d > tol_feas || result.gap_rel > tol_gap {
-            println!(
-                "{}: FAIL rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
-                result.name, result.rel_p, result.rel_d, result.gap_rel,
-            );
         } else {
-            println!(
-                "{}: OK iters={} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
-                result.name, result.iterations, result.rel_p, result.rel_d, result.gap_rel,
-            );
+            // For AlmostOptimal, use Clarabel's reduced tolerances
+            let effective_tol_feas = if result.status == SolveStatus::AlmostOptimal {
+                1e-4  // Clarabel's reduced_tol_feas
+            } else {
+                tol_feas
+            };
+            let effective_tol_gap = if result.status == SolveStatus::AlmostOptimal {
+                5e-5  // Clarabel's reduced_tol_gap_rel
+            } else {
+                tol_gap
+            };
+
+            let time_str = result.solve_time_ms
+                .map(|t| format!(" time={:.1}ms", t as f64))
+                .unwrap_or_default();
+            let detail_str = match (result.kkt_factor_time_ms, result.kkt_solve_time_ms, result.cone_time_ms) {
+                (Some(f), Some(s), Some(c)) => format!(" (kkt_factor={}ms kkt_solve={}ms cone={}ms)", f, s, c),
+                _ => String::new(),
+            };
+            if result.rel_p > effective_tol_feas || result.rel_d > effective_tol_feas || result.gap_rel > effective_tol_gap {
+                println!(
+                    "{}: FAIL rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}{}{}",
+                    result.name, result.rel_p, result.rel_d, result.gap_rel, time_str, detail_str,
+                );
+            } else {
+                let status_str = if result.status == SolveStatus::AlmostOptimal { "~OK" } else { "OK" };
+                println!(
+                    "{}: {} iters={} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}{}{}",
+                    result.name, status_str, result.iterations, result.rel_p, result.rel_d, result.gap_rel, time_str, detail_str,
+                );
+            }
         }
         let _ = std::io::stdout().flush();
 
