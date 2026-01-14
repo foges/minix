@@ -380,6 +380,10 @@ fn update_dense_block_in_place(
     }
 }
 
+/// Update SOC block in KKT matrix.
+///
+/// Computes Q_w column by column using Jordan products.
+/// Optimized: precomputes w∘w once instead of per-column.
 fn update_soc_block_in_place(
     static_reg: f64,
     scratch: &mut SocKktScratch,
@@ -396,11 +400,31 @@ fn update_soc_block_in_place(
     let temp = &mut scratch.temp[..dim];
     let w2_circ_y = &mut scratch.w2_circ_y[..dim];
 
+    // Precompute w∘w once (was being recomputed every column)
+    jordan_product_apply(w, w, w_circ_w);
+
     let mut pos_idx = 0usize;
     for col_idx in 0..dim {
         e.fill(0.0);
         e[col_idx] = 1.0;
-        quad_rep_soc_in_place(w, e, col, w_circ_y, w_circ_w, temp, w2_circ_y);
+
+        // w ∘ e_i
+        jordan_product_apply(w, e, w_circ_y);
+
+        // 2 * (w ∘ e_i) ∘ w
+        jordan_product_apply(w_circ_y, w, temp);
+        for i in 0..dim {
+            temp[i] *= 2.0;
+        }
+
+        // (w ∘ w) ∘ e_i
+        jordan_product_apply(w_circ_w, e, w2_circ_y);
+
+        // Q_w(e_i) = 2*(w ∘ e_i) ∘ w - (w ∘ w) ∘ e_i
+        for i in 0..dim {
+            col[i] = temp[i] - w2_circ_y[i];
+        }
+
         for row_idx in 0..=col_idx {
             let mut val = -col[row_idx];
             if row_idx == col_idx {
@@ -409,6 +433,49 @@ fn update_soc_block_in_place(
             data[positions[pos_idx]] = val;
             pos_idx += 1;
         }
+    }
+}
+
+/// Update only the arrowhead entries of a SOC block in the KKT matrix.
+/// This is O(dim) instead of O(dim²) for the dense case.
+///
+/// The arrowhead part of Q_w is:
+/// - Q_arrowhead[0,0] = η = w₀² + ||w̄||²
+/// - Q_arrowhead[0,j] = 2*w₀*w̄[j-1] for j > 0
+/// - Q_arrowhead[i,i] = ρ = w₀² - ||w̄||² for i > 0
+///
+/// The full Q_w = Q_arrowhead + [0; sqrt(2)*w̄] * [0; sqrt(2)*w̄]ᵀ
+/// The rank-1 correction is handled via Sherman-Morrison during solves.
+fn update_soc_arrowhead_in_place(
+    static_reg: f64,
+    w: &[f64],
+    first_row_positions: &[usize],
+    diag_positions: &[usize],
+    data: &mut [f64],
+) {
+    let dim = w.len();
+    debug_assert_eq!(first_row_positions.len(), dim);
+    debug_assert_eq!(diag_positions.len(), dim - 1);
+
+    let w0 = w[0];
+    let w_bar = &w[1..];
+    let w_bar_sq: f64 = w_bar.iter().map(|x| x * x).sum();
+    let eta = w0 * w0 + w_bar_sq;
+    let rho = w0 * w0 - w_bar_sq;
+
+    // First row: [0,0], [0,1], ..., [0,dim-1]
+    // [0,0] entry: -(η) - 2ε
+    data[first_row_positions[0]] = -eta - 2.0 * static_reg;
+
+    // [0,j] entries for j > 0: -2*w₀*w̄[j-1]
+    for j in 1..dim {
+        data[first_row_positions[j]] = -2.0 * w0 * w_bar[j - 1];
+    }
+
+    // Diagonal [i,i] for i > 0: -(ρ) - 2ε
+    // Note: the full Q_w[i,i] = ρ + 2*w̄[i-1]² but arrowhead stores only ρ
+    for i in 0..dim - 1 {
+        data[diag_positions[i]] = -rho - 2.0 * static_reg;
     }
 }
 
@@ -523,6 +590,10 @@ fn update_h_blocks_in_place(
                 assert_eq!(*dim, block_dim);
                 update_soc_block_in_place(static_reg, soc_scratch, w, positions, data);
             }
+            (ScalingBlock::SocStructured { w }, HBlockPositions::SocArrowhead { dim, first_row_positions, diag_positions, .. }) => {
+                assert_eq!(*dim, block_dim);
+                update_soc_arrowhead_in_place(static_reg, w, first_row_positions, diag_positions, data);
+            }
             (ScalingBlock::PsdStructured { w_factor, n }, HBlockPositions::UpperTriangle { dim, positions }) => {
                 assert_eq!(*dim, block_dim);
                 update_psd_block_in_place(static_reg, *n, w_factor, positions, data);
@@ -635,6 +706,314 @@ impl SocKktScratch {
 enum HBlockPositions {
     Diagonal { positions: Vec<usize> },
     UpperTriangle { dim: usize, positions: Vec<usize> },
+    /// Arrowhead structure for SOC: first row + diagonal, with rank-1 correction via Sherman-Morrison
+    /// Q_w = Q_arrowhead + [0; sqrt(2)*w_bar] * [0; sqrt(2)*w_bar]^T
+    SocArrowhead {
+        dim: usize,
+        /// Positions of first row: [0,0], [0,1], ..., [0,dim-1]
+        first_row_positions: Vec<usize>,
+        /// Positions of diagonal excluding [0,0]: [1,1], [2,2], ..., [dim-1,dim-1]
+        diag_positions: Vec<usize>,
+        /// Global offset of this block in the slack variables
+        offset: usize,
+    },
+}
+
+/// Workspace for Sherman-Morrison/Woodbury rank-1 corrections in SOC arrowhead formulation.
+/// For k SOC cones with arrowhead representation, we need to apply:
+/// (K_arrowhead + Σᵢ uᵢuᵢᵀ)⁻¹b via Woodbury formula.
+struct ShermanMorrisonWorkspace {
+    /// Number of SOC cones with arrowhead representation
+    num_soc_blocks: usize,
+    /// Stored w_bar vectors for each SOC block (the spatial part of w, length dim-1)
+    /// These define the rank-1 correction: u = [0; sqrt(2)*w_bar]
+    w_bars: Vec<Vec<f64>>,
+    /// Offsets of each SOC block in the slack variables
+    soc_offsets: Vec<usize>,
+    /// Dimensions of each SOC cone
+    soc_dims: Vec<usize>,
+    /// Workspace: solution vectors z_i = K_arrowhead^{-1} * u_i (stored columnwise)
+    z_vecs: Vec<Vec<f64>>,
+    /// Workspace: Gram matrix G = I + U^T K_arrowhead^{-1} U (k x k)
+    gram_matrix: Vec<f64>,
+    /// Workspace: factored Gram matrix (for k x k solve)
+    gram_factor: Vec<f64>,
+    /// Workspace: temporary vectors
+    temp_rhs: Vec<f64>,
+    temp_sol: Vec<f64>,
+}
+
+impl ShermanMorrisonWorkspace {
+    fn new() -> Self {
+        Self {
+            num_soc_blocks: 0,
+            w_bars: Vec::new(),
+            soc_offsets: Vec::new(),
+            soc_dims: Vec::new(),
+            z_vecs: Vec::new(),
+            gram_matrix: Vec::new(),
+            gram_factor: Vec::new(),
+            temp_rhs: Vec::new(),
+            temp_sol: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.num_soc_blocks = 0;
+        self.w_bars.clear();
+        self.soc_offsets.clear();
+        self.soc_dims.clear();
+        self.z_vecs.clear();
+    }
+
+    fn reserve(&mut self, num_soc_blocks: usize, kkt_dim: usize) {
+        self.w_bars.reserve(num_soc_blocks);
+        self.soc_offsets.reserve(num_soc_blocks);
+        self.soc_dims.reserve(num_soc_blocks);
+        self.z_vecs.resize(num_soc_blocks, Vec::new());
+        for z in &mut self.z_vecs {
+            z.resize(kkt_dim, 0.0);
+        }
+        let k = num_soc_blocks;
+        self.gram_matrix.resize(k * k, 0.0);
+        self.gram_factor.resize(k * k, 0.0);
+        self.temp_rhs.resize(kkt_dim, 0.0);
+        self.temp_sol.resize(kkt_dim, 0.0);
+    }
+
+    /// Collect arrowhead SOC info from h_blocks and h_block_positions.
+    /// Must be called after update_numeric updates the scaling.
+    fn collect_arrowhead_info(
+        &mut self,
+        n: usize,
+        h_blocks: &[ScalingBlock],
+        h_block_positions: &[HBlockPositions],
+    ) {
+        self.clear();
+
+        for (block, block_pos) in h_blocks.iter().zip(h_block_positions.iter()) {
+            if let (
+                ScalingBlock::SocStructured { w },
+                HBlockPositions::SocArrowhead { dim, offset, .. },
+            ) = (block, block_pos)
+            {
+                let w_bar: Vec<f64> = w[1..].to_vec();
+                self.w_bars.push(w_bar);
+                self.soc_offsets.push(*offset);
+                self.soc_dims.push(*dim);
+            }
+        }
+
+        self.num_soc_blocks = self.w_bars.len();
+
+        // Resize workspace vectors
+        let kkt_dim = n + h_blocks.iter().map(|b| match b {
+            ScalingBlock::Zero { dim } => *dim,
+            ScalingBlock::Diagonal { d } => d.len(),
+            ScalingBlock::Dense3x3 { .. } => 3,
+            ScalingBlock::SocStructured { w } => w.len(),
+            ScalingBlock::PsdStructured { n, .. } => n * (n + 1) / 2,
+        }).sum::<usize>();
+
+        if self.num_soc_blocks > 0 {
+            self.z_vecs.resize(self.num_soc_blocks, Vec::new());
+            for z in &mut self.z_vecs {
+                z.resize(kkt_dim, 0.0);
+            }
+            let k = self.num_soc_blocks;
+            self.gram_matrix.resize(k * k, 0.0);
+            self.gram_factor.resize(k * k, 0.0);
+            self.temp_rhs.resize(kkt_dim, 0.0);
+            self.temp_sol.resize(kkt_dim, 0.0);
+        }
+    }
+
+    /// Check if Woodbury correction is needed.
+    fn has_arrowhead_blocks(&self) -> bool {
+        self.num_soc_blocks > 0
+    }
+
+    /// Apply Woodbury correction to the solution.
+    ///
+    /// The full KKT matrix is: K = K_arrowhead + Σᵢ uᵢuᵢᵀ
+    /// We computed y = K_arrowhead⁻¹b, now we need: x = K⁻¹b = y - Z*G⁻¹*(U'y)
+    /// where Z[i] = K_arrowhead⁻¹*uᵢ and G = I + U'Z
+    ///
+    /// For k=1 (single SOC), this simplifies to Sherman-Morrison:
+    /// x = y - (u'y)/(1 + u'z) * z
+    fn apply_woodbury_correction<B: KktBackend>(
+        &mut self,
+        backend: &B,
+        factor: &B::Factorization,
+        n: usize,
+        perm: Option<&[usize]>,
+        y: &mut [f64],  // Solution in permuted space, modified in place
+    ) {
+        let k = self.num_soc_blocks;
+        if k == 0 {
+            return;
+        }
+
+        let kkt_dim = y.len();
+        let sqrt2 = std::f64::consts::SQRT_2;
+
+        // Step 1: Solve K_arrowhead * z_i = u_i for each i
+        // Form u_i in permuted coordinates and solve
+        for i in 0..k {
+            // Build u_i directly into temp_rhs
+            self.temp_rhs.fill(0.0);
+            let offset = self.soc_offsets[i];
+            for (j, &wb) in self.w_bars[i].iter().enumerate() {
+                self.temp_rhs[n + offset + 1 + j] = sqrt2 * wb;
+            }
+
+            // Apply permutation to u_i
+            if let Some(p) = perm {
+                self.temp_sol.copy_from_slice(&self.temp_rhs);
+                for j in 0..kkt_dim {
+                    self.temp_rhs[j] = self.temp_sol[p[j]];
+                }
+            }
+
+            // Solve K_arrowhead * z_i = u_i
+            backend.solve(factor, &self.temp_rhs, &mut self.z_vecs[i]);
+        }
+
+        // Step 2: Form Gram matrix G = I + U'Z
+        // G[i,j] = δ_{ij} + u_i' * z_j
+        for i in 0..k {
+            // Build u_i in permuted coordinates directly
+            self.temp_rhs.fill(0.0);
+            let offset = self.soc_offsets[i];
+            for (jj, &wb) in self.w_bars[i].iter().enumerate() {
+                self.temp_rhs[n + offset + 1 + jj] = sqrt2 * wb;
+            }
+            if let Some(p) = perm {
+                self.temp_sol.copy_from_slice(&self.temp_rhs);
+                for j in 0..kkt_dim {
+                    self.temp_rhs[j] = self.temp_sol[p[j]];
+                }
+            }
+
+            for j in 0..k {
+                let mut dot = 0.0;
+                for idx in 0..kkt_dim {
+                    dot += self.temp_rhs[idx] * self.z_vecs[j][idx];
+                }
+                // Note: minus sign because K = K_arrowhead - uu' (the rank-1 correction
+                // has negative coefficient in the KKT matrix since we store -Q_w)
+                self.gram_matrix[i * k + j] = if i == j { 1.0 - dot } else { -dot };
+            }
+        }
+
+        // Step 3: Compute c = G⁻¹ * (U' * y)
+        // First, compute U' * y (vector of length k)
+        let mut uty = vec![0.0; k];
+        for i in 0..k {
+            // Build u_i in permuted coordinates directly
+            self.temp_rhs.fill(0.0);
+            let offset = self.soc_offsets[i];
+            for (jj, &wb) in self.w_bars[i].iter().enumerate() {
+                self.temp_rhs[n + offset + 1 + jj] = sqrt2 * wb;
+            }
+            if let Some(p) = perm {
+                self.temp_sol.copy_from_slice(&self.temp_rhs);
+                for j in 0..kkt_dim {
+                    self.temp_rhs[j] = self.temp_sol[p[j]];
+                }
+            }
+
+            let mut dot = 0.0;
+            for idx in 0..kkt_dim {
+                dot += self.temp_rhs[idx] * y[idx];
+            }
+            uty[i] = dot;
+        }
+
+        // Solve G * c = U'y where G = I - U'Z (for negative rank-1 correction)
+        let c = if k == 1 {
+            // Sherman-Morrison for (A - uu')⁻¹: c = (u'y) / (1 - u'z)
+            vec![uty[0] / self.gram_matrix[0]]
+        } else {
+            // Small k×k solve via Gaussian elimination
+            solve_small_system(&self.gram_matrix, &uty, k)
+        };
+
+        // Step 4: y = y + Z * c (plus sign for negative rank-1 correction)
+        // (A - UU')⁻¹b = A⁻¹b + Z * G⁻¹ * U'y
+        for i in 0..k {
+            for idx in 0..kkt_dim {
+                y[idx] += self.z_vecs[i][idx] * c[i];
+            }
+        }
+    }
+}
+
+/// Solve a small dense k×k system Ax = b via Gaussian elimination with partial pivoting.
+fn solve_small_system(a: &[f64], b: &[f64], k: usize) -> Vec<f64> {
+    if k == 0 {
+        return vec![];
+    }
+    if k == 1 {
+        return vec![b[0] / a[0]];
+    }
+
+    // Copy A and b for in-place elimination
+    let mut aug: Vec<f64> = vec![0.0; k * (k + 1)];
+    for i in 0..k {
+        for j in 0..k {
+            aug[i * (k + 1) + j] = a[i * k + j];
+        }
+        aug[i * (k + 1) + k] = b[i];
+    }
+
+    // Forward elimination with partial pivoting
+    for col in 0..k {
+        // Find pivot
+        let mut max_row = col;
+        let mut max_val = aug[col * (k + 1) + col].abs();
+        for row in col + 1..k {
+            let val = aug[row * (k + 1) + col].abs();
+            if val > max_val {
+                max_val = val;
+                max_row = row;
+            }
+        }
+
+        // Swap rows
+        if max_row != col {
+            for j in 0..=k {
+                let tmp = aug[col * (k + 1) + j];
+                aug[col * (k + 1) + j] = aug[max_row * (k + 1) + j];
+                aug[max_row * (k + 1) + j] = tmp;
+            }
+        }
+
+        // Eliminate
+        let pivot = aug[col * (k + 1) + col];
+        if pivot.abs() < 1e-14 {
+            // Nearly singular - return zero vector
+            return vec![0.0; k];
+        }
+        for row in col + 1..k {
+            let factor = aug[row * (k + 1) + col] / pivot;
+            for j in col..=k {
+                aug[row * (k + 1) + j] -= factor * aug[col * (k + 1) + j];
+            }
+        }
+    }
+
+    // Back substitution
+    let mut x = vec![0.0; k];
+    for col in (0..k).rev() {
+        let mut sum = aug[col * (k + 1) + k];
+        for j in col + 1..k {
+            sum -= aug[col * (k + 1) + j] * x[j];
+        }
+        x[col] = sum / aug[col * (k + 1) + col];
+    }
+
+    x
 }
 
 struct SingletonRowInfo {
@@ -955,6 +1334,12 @@ pub struct KktSolverImpl<B: KktBackend> {
     p_diag_base: Vec<f64>,
     p_diag_positions: Option<Vec<usize>>,
     p_diag_schur: Vec<f64>,
+
+    /// Sherman-Morrison workspace for SOC arrowhead rank-1 corrections.
+    sm_workspace: ShermanMorrisonWorkspace,
+
+    /// Whether to use arrowhead sparsity for SOC blocks (default: true for dim >= threshold)
+    use_soc_arrowhead: bool,
 }
 
 impl<B: KktBackend> KktSolverImpl<B> {
@@ -1042,6 +1427,8 @@ impl<B: KktBackend> KktSolverImpl<B> {
             p_diag_base: vec![0.0; n],
             p_diag_positions: None,
             p_diag_schur: vec![0.0; n],
+            sm_workspace: ShermanMorrisonWorkspace::new(),
+            use_soc_arrowhead: true, // Enable by default
         }
     }
 
@@ -1208,28 +1595,65 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 }
                 ScalingBlock::SocStructured { w } => {
                     // For SOC, the scaling matrix is H(w) = quadratic representation P(w)
-                    // We need to compute the full dim x dim matrix and add -(H + 2ε*I) to KKT
+                    // For large SOC, use arrowhead sparsity: Q_w = Q_arrowhead + 2*w̄*w̄ᵀ
+                    // where Q_arrowhead is sparse (first row + diagonal) and rank-1 correction
+                    // is handled via Sherman-Morrison during solves.
                     let dim = w.len();
-                    let mut e_i = vec![0.0; dim];
-                    let mut col_i = vec![0.0; dim];
-                    for i in 0..dim {
-                        // Compute P(w) e_i to get column i of the matrix
-                        e_i.fill(0.0);
-                        e_i[i] = 1.0;
 
-                        col_i.fill(0.0);
-                        crate::scaling::nt::quad_rep_apply(w, &e_i, &mut col_i);
+                    // Use arrowhead for large SOC (dim >= 8), dense for small SOC
+                    // Small cones don't benefit from arrowhead overhead
+                    let use_arrowhead = self.use_soc_arrowhead && dim >= 8;
 
-                        // Add upper triangle (j <= i) to avoid duplicates
-                        for j in 0..=i {
-                            let kkt_row = self.n + offset + j;
-                            let kkt_col = self.n + offset + i;
-                            let mut val = -col_i[j];
-                            // Add regularization to diagonal
-                            if i == j {
-                                val -= 2.0 * self.static_reg;
+                    if use_arrowhead {
+                        // Arrowhead pattern: first row + diagonal only
+                        // Q_w[0,0] = η = w₀² + ||w̄||²
+                        // Q_w[0,j] = 2*w₀*w̄[j-1] for j > 0
+                        // Q_w[i,i] = ρ = w₀² - ||w̄||² for i > 0 (arrowhead part)
+                        // Off-diagonal (i,j), i,j > 0 handled by Sherman-Morrison
+                        let w0 = w[0];
+                        let w_bar = &w[1..];
+                        let w_bar_sq: f64 = w_bar.iter().map(|x| x * x).sum();
+                        let eta = w0 * w0 + w_bar_sq;
+                        let rho = w0 * w0 - w_bar_sq;
+
+                        // First row: [0,0], [0,1], ..., [0,dim-1]
+                        let kkt_row0 = self.n + offset;
+                        // [0,0] entry
+                        add_triplet(kkt_row0, kkt_row0, -eta - 2.0 * self.static_reg, &mut tri);
+                        // [0,j] entries for j > 0
+                        for j in 1..dim {
+                            let kkt_col = self.n + offset + j;
+                            let val = -2.0 * w0 * w_bar[j - 1];
+                            add_triplet(kkt_row0, kkt_col, val, &mut tri);
+                        }
+
+                        // Diagonal [i,i] for i > 0
+                        for i in 1..dim {
+                            let kkt_idx = self.n + offset + i;
+                            // Arrowhead diagonal: -ρ - 2ε
+                            // Note: the full Q_w[i,i] = ρ + 2*w̄[i-1]² but we put only ρ here
+                            // The 2*w̄[i-1]² part is handled by Sherman-Morrison
+                            add_triplet(kkt_idx, kkt_idx, -rho - 2.0 * self.static_reg, &mut tri);
+                        }
+                    } else {
+                        // Dense pattern for small SOC
+                        let mut e_i = vec![0.0; dim];
+                        let mut col_i = vec![0.0; dim];
+                        for i in 0..dim {
+                            e_i.fill(0.0);
+                            e_i[i] = 1.0;
+                            col_i.fill(0.0);
+                            crate::scaling::nt::quad_rep_apply(w, &e_i, &mut col_i);
+
+                            for j in 0..=i {
+                                let kkt_row = self.n + offset + j;
+                                let kkt_col = self.n + offset + i;
+                                let mut val = -col_i[j];
+                                if i == j {
+                                    val -= 2.0 * self.static_reg;
+                                }
+                                add_triplet(kkt_row, kkt_col, val, &mut tri);
                             }
-                            add_triplet(kkt_row, kkt_col, val, &mut tri);
                         }
                     }
                 }
@@ -1408,7 +1832,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                         positions: diag_positions[offset..offset + block_dim].to_vec(),
                     });
                 }
-                ScalingBlock::Dense3x3 { .. } | ScalingBlock::SocStructured { .. } => {
+                ScalingBlock::Dense3x3 { .. } => {
                     let mut block_positions = Vec::with_capacity(block_dim * (block_dim + 1) / 2);
                     for col in 0..block_dim {
                         let orig_col = self.n + offset + col;
@@ -1421,6 +1845,46 @@ impl<B: KktBackend> KktSolverImpl<B> {
                         dim: block_dim,
                         positions: block_positions,
                     });
+                }
+                ScalingBlock::SocStructured { w } => {
+                    let dim = w.len();
+                    let use_arrowhead = self.use_soc_arrowhead && dim >= 8;
+
+                    if use_arrowhead {
+                        // Arrowhead pattern: first row + diagonal (excluding [0,0] which is in first row)
+                        // First row positions: [0,0], [0,1], ..., [0,dim-1]
+                        let mut first_row_positions = Vec::with_capacity(dim);
+                        let orig_row0 = self.n + offset;
+                        for col in 0..dim {
+                            let orig_col = self.n + offset + col;
+                            first_row_positions.push(self.find_kkt_position(kkt, orig_row0, orig_col));
+                        }
+
+                        // Diagonal positions: [1,1], [2,2], ..., [dim-1,dim-1]
+                        // Note: [0,0] is already in first_row_positions[0]
+                        let diag_pos = diag_positions[offset + 1..offset + dim].to_vec();
+
+                        positions.push(HBlockPositions::SocArrowhead {
+                            dim,
+                            first_row_positions,
+                            diag_positions: diag_pos,
+                            offset,
+                        });
+                    } else {
+                        // Dense pattern for small SOC
+                        let mut block_positions = Vec::with_capacity(block_dim * (block_dim + 1) / 2);
+                        for col in 0..block_dim {
+                            let orig_col = self.n + offset + col;
+                            for row in 0..=col {
+                                let orig_row = self.n + offset + row;
+                                block_positions.push(self.find_kkt_position(kkt, orig_row, orig_col));
+                            }
+                        }
+                        positions.push(HBlockPositions::UpperTriangle {
+                            dim: block_dim,
+                            positions: block_positions,
+                        });
+                    }
                 }
                 ScalingBlock::PsdStructured { .. } => {
                     let mut block_positions = Vec::with_capacity(block_dim * (block_dim + 1) / 2);
@@ -1608,14 +2072,20 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 kkt_mat,
                 &mut self.soc_scratch,
             );
-                update_schur_diagonal(
-                    self.singleton.as_ref(),
-                    self.p_diag_positions.as_deref(),
-                    &self.p_diag_base,
-                    &mut self.p_diag_schur,
-                    kkt_mat,
-                );
-            }
+            update_schur_diagonal(
+                self.singleton.as_ref(),
+                self.p_diag_positions.as_deref(),
+                &self.p_diag_base,
+                &mut self.p_diag_schur,
+                kkt_mat,
+            );
+        }
+
+        // Collect arrowhead SOC info for Sherman-Morrison correction during solves
+        if let Some(h_block_positions) = self.h_block_positions.as_ref() {
+            self.sm_workspace.collect_arrowhead_info(self.n, h_use, h_block_positions);
+        }
+
         Ok(())
     }
 
@@ -1712,43 +2182,69 @@ impl<B: KktBackend> KktSolverImpl<B> {
         let perm = self.perm.as_deref();
         let perm_inv = self.perm_inv.as_deref();
         let kkt = self.kkt_mat.as_ref();
-        let backend = &self.backend;
-        let ws = &mut self.solve_ws;
+        let n = self.n;
+
+        // Check if we need Woodbury correction for arrowhead SOC blocks
+        let need_woodbury = self.sm_workspace.has_arrowhead_blocks();
 
         if let Some(singleton) = self.singleton.as_ref() {
             assert_eq!(rhs_z.len(), self.m_full);
             assert_eq!(sol_z.len(), self.m_full);
-            prepare_rhs_singleton(singleton, rhs_x, rhs_z, ws);
-            fill_rhs_perm_with_perm(perm, self.n, &ws.rhs_x, &ws.rhs_z, &mut ws.rhs_perm);
+            prepare_rhs_singleton(singleton, rhs_x, rhs_z, &mut self.solve_ws);
+            fill_rhs_perm_with_perm(perm, self.n, &self.solve_ws.rhs_x, &self.solve_ws.rhs_z, &mut self.solve_ws.rhs_perm);
             solve_permuted_with_refinement(
-                backend,
+                &self.backend,
                 static_reg,
                 kkt,
-                ws,
+                &mut self.solve_ws,
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
                 reg_diag_sign,
                 tag,
             );
-            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x, &mut ws.sol_z);
-            expand_solution_z_singleton(singleton, rhs_z, sol_x, sol_z, &ws.sol_z);
+
+            // Apply Woodbury correction for arrowhead SOC blocks
+            if need_woodbury {
+                self.sm_workspace.apply_woodbury_correction(
+                    &self.backend,
+                    factor,
+                    n,
+                    perm,
+                    &mut self.solve_ws.sol_perm,
+                );
+            }
+
+            unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x, &mut self.solve_ws.sol_z);
+            expand_solution_z_singleton(singleton, rhs_z, sol_x, sol_z, &self.solve_ws.sol_z);
         } else {
             assert_eq!(rhs_z.len(), self.m);
             assert_eq!(sol_z.len(), self.m);
-            fill_rhs_perm_with_perm(perm, self.n, rhs_x, rhs_z, &mut ws.rhs_perm);
+            fill_rhs_perm_with_perm(perm, self.n, rhs_x, rhs_z, &mut self.solve_ws.rhs_perm);
             solve_permuted_with_refinement(
-                backend,
+                &self.backend,
                 static_reg,
                 kkt,
-                ws,
+                &mut self.solve_ws,
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
                 reg_diag_sign,
                 tag,
             );
-            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x, sol_z);
+
+            // Apply Woodbury correction for arrowhead SOC blocks
+            if need_woodbury {
+                self.sm_workspace.apply_woodbury_correction(
+                    &self.backend,
+                    factor,
+                    n,
+                    perm,
+                    &mut self.solve_ws.sol_perm,
+                );
+            }
+
+            unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x, sol_z);
         }
     }
 
@@ -1884,8 +2380,10 @@ impl<B: KktBackend> KktSolverImpl<B> {
         let perm = self.perm.as_deref();
         let perm_inv = self.perm_inv.as_deref();
         let kkt = self.kkt_mat.as_ref();
-        let backend = &self.backend;
-        let ws = &mut self.solve_ws;
+        let n = self.n;
+
+        // Check if we need Woodbury correction for arrowhead SOC blocks
+        let need_woodbury = self.sm_workspace.has_arrowhead_blocks();
 
         if let Some(singleton) = self.singleton.as_ref() {
             assert_eq!(rhs_z1.len(), self.m_full);
@@ -1893,37 +2391,55 @@ impl<B: KktBackend> KktSolverImpl<B> {
             assert_eq!(sol_z1.len(), self.m_full);
             assert_eq!(sol_z2.len(), self.m_full);
 
-            prepare_rhs_singleton(singleton, rhs_x1, rhs_z1, ws);
-            fill_rhs_perm_with_perm(perm, self.n, &ws.rhs_x, &ws.rhs_z, &mut ws.rhs_perm);
+            prepare_rhs_singleton(singleton, rhs_x1, rhs_z1, &mut self.solve_ws);
+            fill_rhs_perm_with_perm(perm, self.n, &self.solve_ws.rhs_x, &self.solve_ws.rhs_z, &mut self.solve_ws.rhs_perm);
             solve_permuted_with_refinement(
-                backend,
+                &self.backend,
                 static_reg,
                 kkt,
-                ws,
+                &mut self.solve_ws,
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
                 reg_diag_sign,
                 tag1,
             );
-            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x1, &mut ws.sol_z);
-            expand_solution_z_singleton(singleton, rhs_z1, sol_x1, sol_z1, &ws.sol_z);
+            if need_woodbury {
+                self.sm_workspace.apply_woodbury_correction(
+                    &self.backend,
+                    factor,
+                    n,
+                    perm,
+                    &mut self.solve_ws.sol_perm,
+                );
+            }
+            unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x1, &mut self.solve_ws.sol_z);
+            expand_solution_z_singleton(singleton, rhs_z1, sol_x1, sol_z1, &self.solve_ws.sol_z);
 
-            prepare_rhs_singleton(singleton, rhs_x2, rhs_z2, ws);
-            fill_rhs_perm_with_perm(perm, self.n, &ws.rhs_x, &ws.rhs_z, &mut ws.rhs_perm2);
+            prepare_rhs_singleton(singleton, rhs_x2, rhs_z2, &mut self.solve_ws);
+            fill_rhs_perm_with_perm(perm, self.n, &self.solve_ws.rhs_x, &self.solve_ws.rhs_z, &mut self.solve_ws.rhs_perm2);
             solve_permuted_with_refinement(
-                backend,
+                &self.backend,
                 static_reg,
                 kkt,
-                ws,
+                &mut self.solve_ws,
                 factor,
                 RhsPermKind::Secondary,
                 refine_iters,
                 reg_diag_sign,
                 tag2,
             );
-            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x2, &mut ws.sol_z);
-            expand_solution_z_singleton(singleton, rhs_z2, sol_x2, sol_z2, &ws.sol_z);
+            if need_woodbury {
+                self.sm_workspace.apply_woodbury_correction(
+                    &self.backend,
+                    factor,
+                    n,
+                    perm,
+                    &mut self.solve_ws.sol_perm,
+                );
+            }
+            unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x2, &mut self.solve_ws.sol_z);
+            expand_solution_z_singleton(singleton, rhs_z2, sol_x2, sol_z2, &self.solve_ws.sol_z);
         } else {
             assert_eq!(rhs_z1.len(), self.m);
             assert_eq!(rhs_z2.len(), self.m);
@@ -1937,35 +2453,53 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 rhs_z1,
                 rhs_x2,
                 rhs_z2,
-                &mut ws.rhs_perm,
-                &mut ws.rhs_perm2,
+                &mut self.solve_ws.rhs_perm,
+                &mut self.solve_ws.rhs_perm2,
             );
 
             solve_permuted_with_refinement(
-                backend,
+                &self.backend,
                 static_reg,
                 kkt,
-                ws,
+                &mut self.solve_ws,
                 factor,
                 RhsPermKind::Primary,
                 refine_iters,
                 reg_diag_sign,
                 tag1,
             );
-            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x1, sol_z1);
+            if need_woodbury {
+                self.sm_workspace.apply_woodbury_correction(
+                    &self.backend,
+                    factor,
+                    n,
+                    perm,
+                    &mut self.solve_ws.sol_perm,
+                );
+            }
+            unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x1, sol_z1);
 
             solve_permuted_with_refinement(
-                backend,
+                &self.backend,
                 static_reg,
                 kkt,
-                ws,
+                &mut self.solve_ws,
                 factor,
                 RhsPermKind::Secondary,
                 refine_iters,
                 reg_diag_sign,
                 tag2,
             );
-            unpermute_solution_with_perm(perm_inv, self.n, &ws.sol_perm, sol_x2, sol_z2);
+            if need_woodbury {
+                self.sm_workspace.apply_woodbury_correction(
+                    &self.backend,
+                    factor,
+                    n,
+                    perm,
+                    &mut self.solve_ws.sol_perm,
+                );
+            }
+            unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x2, sol_z2);
         }
     }
 
