@@ -316,12 +316,14 @@ impl From<SolveResult> for MinixResult {
     fn from(result: SolveResult) -> Self {
         let status_str = match result.status {
             SolveStatus::Optimal => "optimal",
+            SolveStatus::AlmostOptimal => "almost_optimal",
             SolveStatus::PrimalInfeasible => "primal_infeasible",
             SolveStatus::DualInfeasible => "dual_infeasible",
             SolveStatus::Unbounded => "unbounded",
             SolveStatus::MaxIters => "max_iterations",
             SolveStatus::TimeLimit => "time_limit",
             SolveStatus::NumericalError => "numerical_error",
+            SolveStatus::NumericalLimit => "numerical_limit",
         };
 
         MinixResult {
@@ -616,14 +618,11 @@ fn default_settings(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     dict.set_item("ruiz_iters", settings.ruiz_iters)?;
     dict.set_item("static_reg", settings.static_reg)?;
     dict.set_item("dynamic_reg_min_pivot", settings.dynamic_reg_min_pivot)?;
-    dict.set_item("threads", settings.threads)?;
     dict.set_item("kkt_refine_iters", settings.kkt_refine_iters)?;
     dict.set_item("mcc_iters", settings.mcc_iters)?;
     dict.set_item("centrality_beta", settings.centrality_beta)?;
     dict.set_item("centrality_gamma", settings.centrality_gamma)?;
     dict.set_item("line_search_max_iters", settings.line_search_max_iters)?;
-    dict.set_item("seed", settings.seed)?;
-    dict.set_item("enable_gpu", settings.enable_gpu)?;
     Ok(dict)
 }
 

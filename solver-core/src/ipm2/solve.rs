@@ -598,6 +598,18 @@ pub fn solve_ipm2(
     let mut last_condition_number: f64 = 1.0;
 
     while iter < effective_max_iter {
+        // Check time limit
+        if let Some(limit_ms) = settings.time_limit_ms {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            if elapsed_ms > limit_ms {
+                if diag.enabled() {
+                    eprintln!("time limit reached: {}ms > {}ms at iter {}", elapsed_ms, limit_ms, iter);
+                }
+                status = SolveStatus::TimeLimit;
+                break;
+            }
+        }
+
         {
             let _g = timers.scoped(PerfSection::Residuals);
             compute_residuals(&scaled_prob, &state, &mut residuals);

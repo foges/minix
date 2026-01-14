@@ -741,6 +741,9 @@ struct ShermanMorrisonWorkspace {
     /// Workspace: temporary vectors
     temp_rhs: Vec<f64>,
     temp_sol: Vec<f64>,
+    /// Flag indicating whether z_vecs and gram_matrix have been precomputed
+    /// for the current factorization. Reset to false when scaling changes.
+    precomputed: bool,
 }
 
 impl ShermanMorrisonWorkspace {
@@ -755,6 +758,7 @@ impl ShermanMorrisonWorkspace {
             gram_factor: Vec::new(),
             temp_rhs: Vec::new(),
             temp_sol: Vec::new(),
+            precomputed: false,
         }
     }
 
@@ -764,6 +768,7 @@ impl ShermanMorrisonWorkspace {
         self.soc_offsets.clear();
         self.soc_dims.clear();
         self.z_vecs.clear();
+        self.precomputed = false;
     }
 
     fn reserve(&mut self, num_soc_blocks: usize, kkt_dim: usize) {
@@ -833,41 +838,31 @@ impl ShermanMorrisonWorkspace {
         self.num_soc_blocks > 0
     }
 
-    /// Apply Woodbury correction to the solution.
-    ///
-    /// The full KKT matrix is: K = K_arrowhead + Σᵢ uᵢuᵢᵀ
-    /// We computed y = K_arrowhead⁻¹b, now we need: x = K⁻¹b = y - Z*G⁻¹*(U'y)
-    /// where Z[i] = K_arrowhead⁻¹*uᵢ and G = I + U'Z
-    ///
-    /// For k=1 (single SOC), this simplifies to Sherman-Morrison:
-    /// x = y - (u'y)/(1 + u'z) * z
-    fn apply_woodbury_correction<B: KktBackend>(
+    /// Precompute z_i = K_arrowhead^{-1} u_i and Gram matrix G = I - U'Z.
+    /// This should be called once after factorization, not on every solve.
+    fn precompute_woodbury_data<B: KktBackend>(
         &mut self,
         backend: &B,
         factor: &B::Factorization,
         n: usize,
+        kkt_dim: usize,
         perm: Option<&[usize]>,
-        y: &mut [f64],  // Solution in permuted space, modified in place
     ) {
         let k = self.num_soc_blocks;
-        if k == 0 {
+        if k == 0 || self.precomputed {
             return;
         }
 
-        let kkt_dim = y.len();
         let sqrt2 = std::f64::consts::SQRT_2;
 
         // Step 1: Solve K_arrowhead * z_i = u_i for each i
-        // Form u_i in permuted coordinates and solve
         for i in 0..k {
-            // Build u_i directly into temp_rhs
             self.temp_rhs.fill(0.0);
             let offset = self.soc_offsets[i];
             for (j, &wb) in self.w_bars[i].iter().enumerate() {
                 self.temp_rhs[n + offset + 1 + j] = sqrt2 * wb;
             }
 
-            // Apply permutation to u_i
             if let Some(p) = perm {
                 self.temp_sol.copy_from_slice(&self.temp_rhs);
                 for j in 0..kkt_dim {
@@ -875,14 +870,11 @@ impl ShermanMorrisonWorkspace {
                 }
             }
 
-            // Solve K_arrowhead * z_i = u_i
             backend.solve(factor, &self.temp_rhs, &mut self.z_vecs[i]);
         }
 
-        // Step 2: Form Gram matrix G = I + U'Z
-        // G[i,j] = δ_{ij} + u_i' * z_j
+        // Step 2: Form Gram matrix G = I - U'Z
         for i in 0..k {
-            // Build u_i in permuted coordinates directly
             self.temp_rhs.fill(0.0);
             let offset = self.soc_offsets[i];
             for (jj, &wb) in self.w_bars[i].iter().enumerate() {
@@ -900,17 +892,43 @@ impl ShermanMorrisonWorkspace {
                 for idx in 0..kkt_dim {
                     dot += self.temp_rhs[idx] * self.z_vecs[j][idx];
                 }
-                // Note: minus sign because K = K_arrowhead - uu' (the rank-1 correction
-                // has negative coefficient in the KKT matrix since we store -Q_w)
                 self.gram_matrix[i * k + j] = if i == j { 1.0 - dot } else { -dot };
             }
         }
 
-        // Step 3: Compute c = G⁻¹ * (U' * y)
-        // First, compute U' * y (vector of length k)
+        self.precomputed = true;
+    }
+
+    /// Apply Woodbury correction to the solution.
+    ///
+    /// The full KKT matrix is: K = K_arrowhead - Σᵢ uᵢuᵢᵀ
+    /// We computed y = K_arrowhead⁻¹b, now we need: x = K⁻¹b = y + Z*G⁻¹*(U'y)
+    /// where Z[i] = K_arrowhead⁻¹*uᵢ and G = I - U'Z
+    ///
+    /// For k=1 (single SOC), this simplifies to Sherman-Morrison:
+    /// x = y + (u'y)/(1 - u'z) * z
+    ///
+    /// IMPORTANT: precompute_woodbury_data must be called after factorization
+    /// before calling this function.
+    fn apply_woodbury_correction(
+        &mut self,
+        n: usize,
+        perm: Option<&[usize]>,
+        y: &mut [f64],
+    ) {
+        let k = self.num_soc_blocks;
+        if k == 0 {
+            return;
+        }
+
+        debug_assert!(self.precomputed, "precompute_woodbury_data must be called first");
+
+        let kkt_dim = y.len();
+        let sqrt2 = std::f64::consts::SQRT_2;
+
+        // Compute U' * y (vector of length k)
         let mut uty = vec![0.0; k];
         for i in 0..k {
-            // Build u_i in permuted coordinates directly
             self.temp_rhs.fill(0.0);
             let offset = self.soc_offsets[i];
             for (jj, &wb) in self.w_bars[i].iter().enumerate() {
@@ -930,17 +948,14 @@ impl ShermanMorrisonWorkspace {
             uty[i] = dot;
         }
 
-        // Solve G * c = U'y where G = I - U'Z (for negative rank-1 correction)
+        // Solve G * c = U'y
         let c = if k == 1 {
-            // Sherman-Morrison for (A - uu')⁻¹: c = (u'y) / (1 - u'z)
             vec![uty[0] / self.gram_matrix[0]]
         } else {
-            // Small k×k solve via Gaussian elimination
             solve_small_system(&self.gram_matrix, &uty, k)
         };
 
-        // Step 4: y = y + Z * c (plus sign for negative rank-1 correction)
-        // (A - UU')⁻¹b = A⁻¹b + Z * G⁻¹ * U'y
+        // y = y + Z * c
         for i in 0..k {
             for idx in 0..kkt_dim {
                 y[idx] += self.z_vecs[i][idx] * c[i];
@@ -2187,6 +2202,12 @@ impl<B: KktBackend> KktSolverImpl<B> {
         // Check if we need Woodbury correction for arrowhead SOC blocks
         let need_woodbury = self.sm_workspace.has_arrowhead_blocks();
 
+        // Precompute Woodbury data once per factorization (uses precomputed flag)
+        if need_woodbury {
+            let kkt_dim = self.n + self.m;
+            self.sm_workspace.precompute_woodbury_data(&self.backend, factor, n, kkt_dim, perm);
+        }
+
         if let Some(singleton) = self.singleton.as_ref() {
             assert_eq!(rhs_z.len(), self.m_full);
             assert_eq!(sol_z.len(), self.m_full);
@@ -2206,13 +2227,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
 
             // Apply Woodbury correction for arrowhead SOC blocks
             if need_woodbury {
-                self.sm_workspace.apply_woodbury_correction(
-                    &self.backend,
-                    factor,
-                    n,
-                    perm,
-                    &mut self.solve_ws.sol_perm,
-                );
+                self.sm_workspace.apply_woodbury_correction(n, perm, &mut self.solve_ws.sol_perm);
             }
 
             unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x, &mut self.solve_ws.sol_z);
@@ -2235,13 +2250,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
 
             // Apply Woodbury correction for arrowhead SOC blocks
             if need_woodbury {
-                self.sm_workspace.apply_woodbury_correction(
-                    &self.backend,
-                    factor,
-                    n,
-                    perm,
-                    &mut self.solve_ws.sol_perm,
-                );
+                self.sm_workspace.apply_woodbury_correction(n, perm, &mut self.solve_ws.sol_perm);
             }
 
             unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x, sol_z);
@@ -2385,6 +2394,12 @@ impl<B: KktBackend> KktSolverImpl<B> {
         // Check if we need Woodbury correction for arrowhead SOC blocks
         let need_woodbury = self.sm_workspace.has_arrowhead_blocks();
 
+        // Precompute Woodbury data once per factorization (uses precomputed flag)
+        if need_woodbury {
+            let kkt_dim = self.n + self.m;
+            self.sm_workspace.precompute_woodbury_data(&self.backend, factor, n, kkt_dim, perm);
+        }
+
         if let Some(singleton) = self.singleton.as_ref() {
             assert_eq!(rhs_z1.len(), self.m_full);
             assert_eq!(rhs_z2.len(), self.m_full);
@@ -2405,13 +2420,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 tag1,
             );
             if need_woodbury {
-                self.sm_workspace.apply_woodbury_correction(
-                    &self.backend,
-                    factor,
-                    n,
-                    perm,
-                    &mut self.solve_ws.sol_perm,
-                );
+                self.sm_workspace.apply_woodbury_correction(n, perm, &mut self.solve_ws.sol_perm);
             }
             unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x1, &mut self.solve_ws.sol_z);
             expand_solution_z_singleton(singleton, rhs_z1, sol_x1, sol_z1, &self.solve_ws.sol_z);
@@ -2430,13 +2439,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 tag2,
             );
             if need_woodbury {
-                self.sm_workspace.apply_woodbury_correction(
-                    &self.backend,
-                    factor,
-                    n,
-                    perm,
-                    &mut self.solve_ws.sol_perm,
-                );
+                self.sm_workspace.apply_woodbury_correction(n, perm, &mut self.solve_ws.sol_perm);
             }
             unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x2, &mut self.solve_ws.sol_z);
             expand_solution_z_singleton(singleton, rhs_z2, sol_x2, sol_z2, &self.solve_ws.sol_z);
@@ -2469,13 +2472,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 tag1,
             );
             if need_woodbury {
-                self.sm_workspace.apply_woodbury_correction(
-                    &self.backend,
-                    factor,
-                    n,
-                    perm,
-                    &mut self.solve_ws.sol_perm,
-                );
+                self.sm_workspace.apply_woodbury_correction(n, perm, &mut self.solve_ws.sol_perm);
             }
             unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x1, sol_z1);
 
@@ -2491,13 +2488,7 @@ impl<B: KktBackend> KktSolverImpl<B> {
                 tag2,
             );
             if need_woodbury {
-                self.sm_workspace.apply_woodbury_correction(
-                    &self.backend,
-                    factor,
-                    n,
-                    perm,
-                    &mut self.solve_ws.sol_perm,
-                );
+                self.sm_workspace.apply_woodbury_correction(n, perm, &mut self.solve_ws.sol_perm);
             }
             unpermute_solution_with_perm(perm_inv, self.n, &self.solve_ws.sol_perm, sol_x2, sol_z2);
         }
