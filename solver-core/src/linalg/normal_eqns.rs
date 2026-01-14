@@ -219,10 +219,15 @@ impl NormalEqnsSolver {
 
     /// Solve the system given RHS vectors.
     ///
-    /// Solves:
+    /// Solves the KKT system:
     /// ```text
-    /// S * dx = rhs_x + A^T * H^{-1} * rhs_z
-    /// dz = H^{-1} * (rhs_z + A * dx)
+    /// [P    A^T] [dx]   [rhs_x]
+    /// [A   -H  ] [dz] = [rhs_z]
+    /// ```
+    /// Using normal equations:
+    /// ```text
+    /// S * dx = rhs_x + A^T * H^{-1} * rhs_z   where S = P + A^T * H^{-1} * A
+    /// dz = H^{-1} * (A * dx - rhs_z)
     /// ```
     pub fn solve(
         &mut self,
@@ -259,14 +264,15 @@ impl NormalEqnsSolver {
             sol_x[i] = dx[i];
         }
 
-        // Compute dz = H^{-1} * (rhs_z + A * dx)
+        // Compute dz = H^{-1} * (A * dx - rhs_z)
+        // From KKT: A*dx - H*dz = rhs_z  =>  dz = H^{-1}*(A*dx - rhs_z)
         // a_v = A * dx
         self.a_v = &self.a_dense * &dx;
 
         for i in 0..self.m {
             let h_val = self.h_diag[i] + self.static_reg;
             sol_z[i] = if h_val.abs() > 1e-14 {
-                (rhs_z[i] + self.a_v[i]) / h_val
+                (self.a_v[i] - rhs_z[i]) / h_val
             } else {
                 0.0
             };
@@ -435,5 +441,187 @@ mod tests {
 
         let resid_norm: f64 = resid.iter().map(|x| x*x).sum::<f64>().sqrt();
         assert!(resid_norm < 1e-6, "Residual too large: {}", resid_norm);
+    }
+
+    /// Test the normal equations solve with non-zero rhs_z.
+    ///
+    /// This test specifically verifies the sign in the dz computation:
+    ///   dz = H^{-1} * (A * dx - rhs_z)
+    ///
+    /// A sign error here would cause wrong dual residuals in the IPM,
+    /// leading to poor convergence on tall problems like KSIP.
+    #[test]
+    fn test_normal_eqns_nonzero_rhs_z() {
+        // Create a small tall problem (m > n)
+        // This is similar to the KSIP structure that exposed the sign bug
+        let n = 3;
+        let m = 10;
+
+        // A is a random tall matrix
+        let mut a_triplets = vec![];
+        for i in 0..m {
+            for j in 0..n {
+                // Deterministic "random" pattern based on indices
+                let val = ((i * n + j) % 7) as f64 - 3.0;
+                if val != 0.0 {
+                    a_triplets.push((i, j, val));
+                }
+            }
+        }
+        let a = sparse::from_triplets(m, n, a_triplets.clone());
+
+        // Small P matrix for regularization
+        let p_triplets = vec![(0, 0, 0.1), (1, 1, 0.1), (2, 2, 0.1)];
+        let p = sparse::from_triplets_symmetric(n, p_triplets);
+
+        let static_reg = 1e-8;
+        let mut solver = NormalEqnsSolver::new(n, m, Some(&p), &a, static_reg);
+
+        // H = diag of positive values
+        let h_diag: Vec<f64> = (0..m).map(|i| 1.0 + (i as f64) * 0.1).collect();
+        solver.update_and_factor(&h_diag).unwrap();
+
+        // Non-trivial RHS
+        let rhs_x = vec![1.0, -0.5, 0.3];
+        let rhs_z: Vec<f64> = (0..m).map(|i| (i as f64) * 0.2 - 1.0).collect();
+        let mut sol_x = vec![0.0; n];
+        let mut sol_z = vec![0.0; m];
+
+        solver.solve(&rhs_x, &rhs_z, &mut sol_x, &mut sol_z);
+
+        // Verify full KKT residual:
+        // [P+εI    A^T  ] [dx]   [rhs_x]
+        // [A    -(H+εI)] [dz] = [rhs_z]
+
+        // Residual 1: (P+εI)*dx + A^T*dz - rhs_x
+        let mut resid_x = vec![0.0; n];
+        // P*dx (only diagonal since our P is diagonal)
+        for i in 0..n {
+            resid_x[i] += (0.1 + static_reg) * sol_x[i];
+        }
+        // A^T*dz
+        for &(row, col, val) in &a_triplets {
+            resid_x[col] += val * sol_z[row];
+        }
+        // -rhs_x
+        for i in 0..n {
+            resid_x[i] -= rhs_x[i];
+        }
+
+        let resid_x_norm: f64 = resid_x.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        // Residual 2: A*dx - (H+εI)*dz - rhs_z
+        let mut resid_z = vec![0.0; m];
+        // A*dx
+        for &(row, col, val) in &a_triplets {
+            resid_z[row] += val * sol_x[col];
+        }
+        // -(H+εI)*dz
+        for i in 0..m {
+            resid_z[i] -= (h_diag[i] + static_reg) * sol_z[i];
+        }
+        // -rhs_z
+        for i in 0..m {
+            resid_z[i] -= rhs_z[i];
+        }
+
+        let resid_z_norm: f64 = resid_z.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        // Both residuals should be small
+        assert!(
+            resid_x_norm < 1e-6,
+            "dx residual too large: {} (should be < 1e-6)",
+            resid_x_norm
+        );
+        assert!(
+            resid_z_norm < 1e-6,
+            "dz residual too large: {} - sign error in dz = H^{{-1}}*(A*dx - rhs_z)?",
+            resid_z_norm
+        );
+    }
+
+    /// Test that normal equations produce the same solution as direct KKT for a small problem.
+    /// This helps catch sign or formula errors in the Schur complement reduction.
+    #[test]
+    fn test_normal_eqns_matches_direct_kkt() {
+        let n = 2;
+        let m = 5;
+
+        // Simple A matrix
+        let a_triplets = vec![
+            (0, 0, 2.0), (0, 1, 1.0),
+            (1, 0, 1.0), (1, 1, 3.0),
+            (2, 0, 1.0),
+            (3, 1, 1.0),
+            (4, 0, 1.0), (4, 1, 1.0),
+        ];
+        let a = sparse::from_triplets(m, n, a_triplets.clone());
+
+        let static_reg = 1e-6;
+        let mut solver = NormalEqnsSolver::new(n, m, None, &a, static_reg);
+
+        // Simple diagonal H
+        let h_diag = vec![2.0, 3.0, 1.0, 4.0, 2.0];
+        solver.update_and_factor(&h_diag).unwrap();
+
+        let rhs_x = vec![1.0, 2.0];
+        let rhs_z = vec![0.5, -0.5, 1.0, 0.0, -1.0];
+        let mut sol_x = vec![0.0; n];
+        let mut sol_z = vec![0.0; m];
+
+        solver.solve(&rhs_x, &rhs_z, &mut sol_x, &mut sol_z);
+
+        // Build and solve the direct KKT system for comparison
+        // [εI    A^T  ] [dx]   [rhs_x]
+        // [A  -(H+εI)] [dz] = [rhs_z]
+        use nalgebra::{DMatrix, DVector};
+        let kkt_dim = n + m;
+        let mut kkt = DMatrix::zeros(kkt_dim, kkt_dim);
+
+        // Top-left: εI
+        for i in 0..n {
+            kkt[(i, i)] = static_reg;
+        }
+        // Top-right: A^T
+        for &(row, col, val) in &a_triplets {
+            kkt[(col, n + row)] = val;
+        }
+        // Bottom-left: A
+        for &(row, col, val) in &a_triplets {
+            kkt[(n + row, col)] = val;
+        }
+        // Bottom-right: -(H+εI)
+        for i in 0..m {
+            kkt[(n + i, n + i)] = -(h_diag[i] + static_reg);
+        }
+
+        let mut rhs = DVector::zeros(kkt_dim);
+        for i in 0..n {
+            rhs[i] = rhs_x[i];
+        }
+        for i in 0..m {
+            rhs[n + i] = rhs_z[i];
+        }
+
+        // Solve directly using LU decomposition
+        let sol_direct = kkt.lu().solve(&rhs).expect("Direct KKT solve failed");
+
+        // Compare solutions
+        for i in 0..n {
+            let diff = (sol_x[i] - sol_direct[i]).abs();
+            assert!(
+                diff < 1e-6,
+                "sol_x[{}] mismatch: normal_eqns={:.6}, direct={:.6}",
+                i, sol_x[i], sol_direct[i]
+            );
+        }
+        for i in 0..m {
+            let diff = (sol_z[i] - sol_direct[n + i]).abs();
+            assert!(
+                diff < 1e-6,
+                "sol_z[{}] mismatch: normal_eqns={:.6}, direct={:.6}",
+                i, sol_z[i], sol_direct[n + i]
+            );
+        }
     }
 }

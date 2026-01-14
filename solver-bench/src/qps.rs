@@ -969,4 +969,173 @@ ENDATA
         assert_eq!(result2.n, 1, "Position 2: expected 1 variable");
         assert_eq!(result2.m, 1, "Position 2: expected 1 constraint");
     }
+
+    /// Test that LE constraints (a'x <= b) are converted correctly to conic form.
+    ///
+    /// In conic form: A*x + s = b, s >= 0
+    /// For a'x <= b: we want s = b - a'x >= 0, so A_row = a (positive), b_row = b
+    #[test]
+    fn test_le_constraint_conversion() {
+        // Create QP with LE constraint: x1 + x2 <= 5
+        let qps = QpsProblem {
+            name: "test_le".to_string(),
+            n: 2,
+            m: 1,
+            obj_sense: 1.0,
+            q: vec![1.0, 1.0],
+            p_triplets: vec![],
+            a_triplets: vec![(0, 0, 1.0), (0, 1, 1.0)], // x1 + x2
+            con_lower: vec![f64::NEG_INFINITY],         // No lower bound
+            con_upper: vec![5.0],                        // Upper bound = 5
+            var_lower: vec![0.0, 0.0],
+            var_upper: vec![f64::INFINITY, f64::INFINITY],
+            var_names: vec!["x1".to_string(), "x2".to_string()],
+            con_names: vec!["c1".to_string()],
+        };
+
+        let prob = qps.to_problem_data().unwrap();
+
+        // Should have: 1 LE constraint + 2 nonneg bounds = 3 constraints total
+        assert_eq!(prob.A.rows(), 3, "Expected 3 constraints (1 LE + 2 nonneg bounds)");
+
+        // Check the LE constraint row (row 0): should be [1, 1] with b = 5
+        // This means x1 + x2 + s = 5, s >= 0, so x1 + x2 <= 5
+        let row0_col0 = prob.A.iter().find(|(_, (r, c))| *r == 0 && *c == 0).map(|(v, _)| *v);
+        let row0_col1 = prob.A.iter().find(|(_, (r, c))| *r == 0 && *c == 1).map(|(v, _)| *v);
+
+        assert_eq!(row0_col0, Some(1.0), "LE constraint: A[0,0] should be 1.0 (not negated)");
+        assert_eq!(row0_col1, Some(1.0), "LE constraint: A[0,1] should be 1.0 (not negated)");
+        assert_eq!(prob.b[0], 5.0, "LE constraint: b[0] should be 5.0 (not negated)");
+    }
+
+    /// Test that GE constraints (a'x >= b) are converted correctly to conic form.
+    ///
+    /// In conic form: A*x + s = b, s >= 0
+    /// For a'x >= b: rewrite as -a'x <= -b, so A_row = -a, b_row = -b
+    /// This gives -a'x + s = -b, s >= 0, so a'x = b + s >= b
+    #[test]
+    fn test_ge_constraint_conversion() {
+        // Create QP with GE constraint: x1 + x2 >= 3
+        let qps = QpsProblem {
+            name: "test_ge".to_string(),
+            n: 2,
+            m: 1,
+            obj_sense: 1.0,
+            q: vec![1.0, 1.0],
+            p_triplets: vec![],
+            a_triplets: vec![(0, 0, 1.0), (0, 1, 1.0)], // x1 + x2
+            con_lower: vec![3.0],                        // Lower bound = 3
+            con_upper: vec![f64::INFINITY],              // No upper bound
+            var_lower: vec![0.0, 0.0],
+            var_upper: vec![f64::INFINITY, f64::INFINITY],
+            var_names: vec!["x1".to_string(), "x2".to_string()],
+            con_names: vec!["c1".to_string()],
+        };
+
+        let prob = qps.to_problem_data().unwrap();
+
+        // Should have: 1 GE constraint + 2 nonneg bounds = 3 constraints total
+        assert_eq!(prob.A.rows(), 3, "Expected 3 constraints (1 GE + 2 nonneg bounds)");
+
+        // Check the GE constraint row (row 0): should be [-1, -1] with b = -3
+        // This means -x1 - x2 + s = -3, s >= 0, so x1 + x2 = 3 + s >= 3
+        let row0_col0 = prob.A.iter().find(|(_, (r, c))| *r == 0 && *c == 0).map(|(v, _)| *v);
+        let row0_col1 = prob.A.iter().find(|(_, (r, c))| *r == 0 && *c == 1).map(|(v, _)| *v);
+
+        assert_eq!(row0_col0, Some(-1.0), "GE constraint: A[0,0] should be -1.0 (negated)");
+        assert_eq!(row0_col1, Some(-1.0), "GE constraint: A[0,1] should be -1.0 (negated)");
+        assert_eq!(prob.b[0], -3.0, "GE constraint: b[0] should be -3.0 (negated)");
+    }
+
+    /// Test that variable bounds are converted correctly:
+    /// - x >= lo: -x + s = -lo, s >= 0 (x = lo + s >= lo)
+    /// - x <= hi: x + s = hi, s >= 0 (x = hi - s <= hi)
+    #[test]
+    fn test_variable_bounds_conversion() {
+        // Create QP with bounded variable: 2 <= x <= 8
+        let qps = QpsProblem {
+            name: "test_bounds".to_string(),
+            n: 1,
+            m: 0,
+            obj_sense: 1.0,
+            q: vec![1.0],
+            p_triplets: vec![],
+            a_triplets: vec![],
+            con_lower: vec![],
+            con_upper: vec![],
+            var_lower: vec![2.0],  // x >= 2
+            var_upper: vec![8.0],  // x <= 8
+            var_names: vec!["x".to_string()],
+            con_names: vec![],
+        };
+
+        let prob = qps.to_problem_data().unwrap();
+
+        // Should have 2 bound constraints
+        assert_eq!(prob.A.rows(), 2, "Expected 2 constraints (lower + upper bound)");
+
+        // Row 0: lower bound x >= 2 encoded as -x + s = -2, s >= 0
+        let row0 = prob.A.iter().find(|(_, (r, _))| *r == 0).map(|(v, _)| *v);
+        assert_eq!(row0, Some(-1.0), "Lower bound: A[0,0] should be -1.0");
+        assert_eq!(prob.b[0], -2.0, "Lower bound: b[0] should be -2.0");
+
+        // Row 1: upper bound x <= 8 encoded as x + s = 8, s >= 0
+        let row1 = prob.A.iter().find(|(_, (r, _))| *r == 1).map(|(v, _)| *v);
+        assert_eq!(row1, Some(1.0), "Upper bound: A[1,0] should be 1.0");
+        assert_eq!(prob.b[1], 8.0, "Upper bound: b[1] should be 8.0");
+    }
+
+    /// Test mixed constraint types (equality, LE, GE) are handled correctly.
+    #[test]
+    fn test_mixed_constraint_types() {
+        // Problem:
+        //   x1 + x2 = 4      (equality)
+        //   x1 - x2 <= 2     (LE)
+        //   x1 + 2*x2 >= 5   (GE)
+        let qps = QpsProblem {
+            name: "test_mixed".to_string(),
+            n: 2,
+            m: 3,
+            obj_sense: 1.0,
+            q: vec![1.0, 1.0],
+            p_triplets: vec![],
+            a_triplets: vec![
+                (0, 0, 1.0), (0, 1, 1.0),   // Row 0: x1 + x2
+                (1, 0, 1.0), (1, 1, -1.0),  // Row 1: x1 - x2
+                (2, 0, 1.0), (2, 1, 2.0),   // Row 2: x1 + 2*x2
+            ],
+            con_lower: vec![4.0, f64::NEG_INFINITY, 5.0],  // eq=4, le=-inf, ge=5
+            con_upper: vec![4.0, 2.0, f64::INFINITY],       // eq=4, le=2, ge=+inf
+            var_lower: vec![0.0, 0.0],
+            var_upper: vec![f64::INFINITY, f64::INFINITY],
+            var_names: vec!["x1".to_string(), "x2".to_string()],
+            con_names: vec!["eq".to_string(), "le".to_string(), "ge".to_string()],
+        };
+
+        let prob = qps.to_problem_data().unwrap();
+
+        // Should have: 1 eq + 1 LE + 1 GE + 2 nonneg bounds = 5 constraints
+        assert_eq!(prob.A.rows(), 5, "Expected 5 constraints");
+
+        // Row 0: equality x1 + x2 = 4
+        assert_eq!(prob.b[0], 4.0, "Equality: b[0] should be 4.0");
+
+        // Row 1: LE x1 - x2 <= 2 (no negation)
+        assert_eq!(prob.b[1], 2.0, "LE: b[1] should be 2.0");
+
+        // Row 2: GE x1 + 2*x2 >= 5 (negated to -x1 - 2*x2 <= -5)
+        assert_eq!(prob.b[2], -5.0, "GE: b[2] should be -5.0");
+
+        // Check that we have correct cone structure
+        // First cone should be Zero (equality), second should be NonNeg (LE + GE + bounds)
+        assert_eq!(prob.cones.len(), 2);
+        match &prob.cones[0] {
+            crate::ConeSpec::Zero { dim } => assert_eq!(*dim, 1, "Zero cone should have dim 1"),
+            _ => panic!("First cone should be Zero"),
+        }
+        match &prob.cones[1] {
+            crate::ConeSpec::NonNeg { dim } => assert_eq!(*dim, 4, "NonNeg cone should have dim 4 (1 LE + 1 GE + 2 bounds)"),
+            _ => panic!("Second cone should be NonNeg"),
+        }
+    }
 }
