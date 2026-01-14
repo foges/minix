@@ -307,6 +307,18 @@ fn dual_cone_ok(prob: &ProblemData, z: &[f64], tol: f64) -> bool {
                 }
                 offset += dim;
             }
+            ConeSpec::Soc { dim } => {
+                let t = z[offset];
+                let mut x_norm2 = 0.0;
+                for xi in &z[offset + 1..offset + dim] {
+                    x_norm2 += xi * xi;
+                }
+                let x_norm = x_norm2.sqrt();
+                if t + tol < x_norm {
+                    return false;
+                }
+                offset += dim;
+            }
             _ => {
                 return false;
             }

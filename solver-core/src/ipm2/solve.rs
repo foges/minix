@@ -1574,6 +1574,16 @@ pub fn solve_ipm2(
     let recovered_m = s.len();
     let orig_m_bounds = orig_prob_bounds.num_constraints();
 
+    // Postsolve can accumulate small inconsistencies between recovered x and s.
+    // Enforce Ax + s = b in recovered space to avoid rel_p regressions from postsolve.
+    if recovered_m == orig_m_bounds {
+        let mut ax = vec![0.0; orig_m_bounds];
+        crate::linalg::sparse::spmv(&orig_prob_bounds.A, &x, &mut ax, 1.0, 0.0);
+        for i in 0..orig_m_bounds {
+            s[i] = orig_prob_bounds.b[i] - ax[i];
+        }
+    }
+
     let mut final_metrics = if recovered_m == orig_m_bounds {
         let mut rp_orig = vec![0.0; orig_m_bounds];
         let mut rd_orig = vec![0.0; orig_prob_bounds.num_vars()];
@@ -2340,6 +2350,18 @@ fn dual_cone_ok(prob: &ProblemData, z: &[f64], tol: f64) -> bool {
             }
             ConeSpec::NonNeg { dim } => {
                 if z[offset..offset + dim].iter().any(|&v| v < -tol) {
+                    return false;
+                }
+                offset += dim;
+            }
+            ConeSpec::Soc { dim } => {
+                let t = z[offset];
+                let mut x_norm2 = 0.0;
+                for xi in &z[offset + 1..offset + dim] {
+                    x_norm2 += xi * xi;
+                }
+                let x_norm = x_norm2.sqrt();
+                if t + tol < x_norm {
                     return false;
                 }
                 offset += dim;
