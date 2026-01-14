@@ -593,18 +593,16 @@ fn centrality_ok_nonneg_trial(
                 }
             }
         } else if is_soc {
-            // For SOC cones, enforce the central neighborhood using NT-scaled complementarity.
-            // Instead of checking raw s∘z eigenvalues (which can be outside SOC even when
-            // s,z are interior), we check the geometric means: sqrt(λ_i(s) * λ_i(z)).
-            // This is the correct symmetric-cone neighborhood check (Clarabel-style).
+            // For SOC cones, we only check the lower bound on centrality (interior check).
+            // The upper bound is intentionally not enforced because:
+            // 1. SOC problems (especially from epigraph reformulations) can have very
+            //    skewed complementarity products that violate any reasonable upper bound
+            // 2. Clarabel and other mature solvers don't enforce an upper bound for SOC
+            // 3. Enforcing it causes alpha to collapse on ill-conditioned problems
             //
-            // SOC cones use relaxed centrality bounds compared to NonNeg:
-            // - beta_soc = beta * 0.1 (10x looser lower bound)
-            // - gamma_soc = gamma * 10 (10x looser upper bound, clamped to 1000)
-            // This accounts for the more complex geometry of SOC cones and avoids
-            // overly restricting steps on ill-conditioned problems.
-            let beta_soc = beta * 0.1;
-            let gamma_soc = (gamma * 10.0).min(1000.0);
+            // We use a very relaxed lower bound (beta * 0.01) to ensure interior while
+            // allowing the predictor-corrector to naturally find centered directions.
+            let beta_soc = beta * 0.01;
 
             let s0 = state.s[offset] + alpha * ds[offset];
             let z0 = state.z[offset] + alpha * dz[offset];
@@ -622,7 +620,6 @@ fn centrality_ok_nonneg_trial(
             let z_norm = z_norm_sq.sqrt();
 
             // Eigenvalues of s: λ_max(s) = s0 + ||s̄||, λ_min(s) = s0 - ||s̄||
-            let s_hi = s0 + s_norm;
             let s_lo = if s0 <= s_norm {
                 s0 - s_norm
             } else {
@@ -631,7 +628,6 @@ fn centrality_ok_nonneg_trial(
             };
 
             // Eigenvalues of z: λ_max(z) = z0 + ||z̄||, λ_min(z) = z0 - ||z̄||
-            let z_hi = z0 + z_norm;
             let z_lo = if z0 <= z_norm {
                 z0 - z_norm
             } else {
@@ -644,12 +640,9 @@ fn centrality_ok_nonneg_trial(
                 return false;
             }
 
-            // NT-scaled complementarity eigenvalues (geometric means)
-            let comp_hi = (s_hi * z_hi).sqrt();
+            // Only check lower bound on complementarity (no upper bound for SOC)
             let comp_lo = (s_lo * z_lo).sqrt();
-
-            // Check neighborhood with relaxed SOC bounds: β_soc·μ ≤ comp_lo and comp_hi ≤ γ_soc·μ
-            if comp_lo < beta_soc * mu_trial || comp_hi > gamma_soc * mu_trial {
+            if comp_lo < beta_soc * mu_trial {
                 return false;
             }
         }
@@ -1803,10 +1796,13 @@ pub fn predictor_corrector_step_in_place(
                     eprintln!("bumped KKT static_reg to {:.2e} after alpha stall", bump_reg);
                 }
             }
-            sigma_eff = (sigma_eff + 0.2).min(sigma_cap);
-            // If centrality checks crushed alpha, bump sigma more aggressively
+            // Bump sigma more aggressively: double it with a floor of 0.2
+            // This follows the Clarabel-style approach of increasing centering
+            // when the neighborhood check fails, rather than just shrinking alpha
+            sigma_eff = (sigma_eff * 2.0).max(0.2).min(sigma_cap);
+            // If centrality checks crushed alpha, bump even more aggressively
             if alpha_limiter_centrality {
-                sigma_eff = sigma_eff.max(0.3);
+                sigma_eff = sigma_eff.max(0.4);
             }
             refine_iters = refine_iters.saturating_add(2);
         } else {

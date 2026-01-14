@@ -251,7 +251,7 @@ impl Default for SolverSettings {
             centrality_beta: 0.1,
             centrality_gamma: 10.0,
             sigma_max: 0.999,
-            line_search_max_iters: 0,
+            line_search_max_iters: 0,  // Disabled by default; enable for debugging
             warm_start: None,
             // Allow environment variable to enable direct mode (no HSDE tau/kappa)
             direct_mode: std::env::var("MINIX_DIRECT_MODE")
