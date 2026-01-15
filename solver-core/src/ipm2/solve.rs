@@ -840,6 +840,7 @@ pub fn solve_ipm2(
             &step_settings,
             &mut ws,
             &mut timers,
+            iter,
         );
 
         let step_result = match step_result {

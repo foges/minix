@@ -828,6 +828,9 @@ fn nt_scaling_soc_in_place(
 }
 
 /// Allocation-free predictor-corrector step using workspace buffers.
+///
+/// `iter` is the current iteration number (1-indexed). On iter=1, Mehrotra correction
+/// is dampened by alpha_aff to accommodate poorly centered starting points (Clarabel's approach).
 pub fn predictor_corrector_step_in_place(
     kkt: &mut UnifiedKktSolver,
     prob: &ProblemData,
@@ -840,6 +843,7 @@ pub fn predictor_corrector_step_in_place(
     settings: &SolverSettings,
     ws: &mut IpmWorkspace,
     timers: &mut PerfTimers,
+    iter: usize,
 ) -> Result<StepResult, String> {
     let n = prob.num_vars();
     let m = prob.num_constraints();
@@ -1183,6 +1187,11 @@ pub fn predictor_corrector_step_in_place(
         barrier_degree,
     ).min(sigma_cap);
 
+    // Mehrotra correction dampening for first iteration (Clarabel's approach).
+    // On iter=1, scale the Mehrotra correction by alpha_aff to accommodate
+    // poorly centered starting points. Full correction from iter=2 onwards.
+    let mehrotra_scale = if iter <= 1 { alpha_aff } else { 1.0 };
+
     // ======================================================================
     // Step 5: Combined corrector step (+ step size, with stall recovery)
     // ======================================================================
@@ -1224,7 +1233,8 @@ pub fn predictor_corrector_step_in_place(
         final_feas_weight = feas_weight;
         let target_mu = sigma_eff * mu;
 
-        let d_kappa_corr = state.kappa * state.tau + dkappa_aff * dtau_aff - target_mu;
+        // Apply Mehrotra dampening to the dkappa_aff * dtau_aff correction term
+        let d_kappa_corr = state.kappa * state.tau + mehrotra_scale * dkappa_aff * dtau_aff - target_mu;
 
         for i in 0..n {
             ws.rhs_x[i] = -feas_weight * residuals.r_x[i];
@@ -1297,7 +1307,8 @@ pub fn predictor_corrector_step_in_place(
                         let b = &w_half * &dz_aff_mat * &w_half;
 
                         // η = (AB + BA) / 2 (Jordan product)
-                        let eta = (&a * &b + &b * &a) * 0.5;
+                        // Apply Mehrotra dampening (scale by alpha_aff on iter 1)
+                        let eta = (&a * &b + &b * &a) * (0.5 * mehrotra_scale);
 
                         // v = λ² + η - σμ I
                         let mut v = &lambda * &lambda + eta;
@@ -1373,9 +1384,10 @@ pub fn predictor_corrector_step_in_place(
                         jordan_product_in_place(w_inv_ds, w_dz, eta);
                         jordan_product_in_place(lambda, lambda, lambda_sq);
 
-                        v[0] = lambda_sq[0] + eta[0] - target_mu;
+                        // Apply Mehrotra dampening (scale eta by alpha_aff on iter 1)
+                        v[0] = lambda_sq[0] + mehrotra_scale * eta[0] - target_mu;
                         for i in 1..dim {
-                            v[i] = lambda_sq[i] + eta[i];
+                            v[i] = lambda_sq[i] + mehrotra_scale * eta[i];
                         }
 
                         jordan_solve_in_place(lambda, v, u, e1, e2);
@@ -1396,7 +1408,8 @@ pub fn predictor_corrector_step_in_place(
                             };
 
                             // Bound the Mehrotra correction to prevent numerical blow-up
-                            let ds_dz = ws.ds_aff[i] * ws.dz_aff[i];
+                            // Apply mehrotra_scale (= alpha_aff on iter 1) for dampening
+                            let ds_dz = mehrotra_scale * ws.ds_aff[i] * ws.dz_aff[i];
                             let correction_bound = mu_i.abs().max(target_mu * 0.1);
                             let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
 
@@ -1457,9 +1470,10 @@ pub fn predictor_corrector_step_in_place(
 
                             // Barrier-based corrector with third-order correction:
                             // d_s = s + σ μ ∇f^*(z) + η
+                            // Apply Mehrotra dampening to η (scale by alpha_aff on iter 1)
                             for j in 0..3 {
                                 let i = block_offset + j;
-                                ws.d_s_comb[i] = s_block[j] + sigma * target_mu * grad_fstar[j] + eta[j];
+                                ws.d_s_comb[i] = s_block[j] + sigma * target_mu * grad_fstar[j] + mehrotra_scale * eta[j];
                             }
 
                             // Diagnostic logging at trace level (MINIX_VERBOSE=4)
@@ -1485,7 +1499,8 @@ pub fn predictor_corrector_step_in_place(
                             let z_safe = z_i.max(1e-14);
 
                             // Mehrotra correction term with bounding
-                            let ds_dz = ws.ds_aff[i] * ws.dz_aff[i];
+                            // Apply mehrotra_scale (= alpha_aff on iter 1) for dampening
+                            let ds_dz = mehrotra_scale * ws.ds_aff[i] * ws.dz_aff[i];
                             let correction_bound = mu_i.abs().max(target_mu * 0.1);
                             let ds_dz_bounded = ds_dz.clamp(-correction_bound, correction_bound);
 
