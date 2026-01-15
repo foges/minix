@@ -280,6 +280,18 @@ pub fn solve_ipm2(
         &prob.cones,
     );
 
+    // Log scaling info for debugging
+    if settings.verbose || std::env::var("MINIX_VERBOSE").map(|v| v.parse::<u32>().unwrap_or(0)).unwrap_or(0) >= 2 {
+        let row_min = scaling.row_scale.iter().cloned().fold(f64::INFINITY, f64::min);
+        let row_max = scaling.row_scale.iter().cloned().fold(0.0_f64, f64::max);
+        let col_min = scaling.col_scale.iter().cloned().fold(f64::INFINITY, f64::min);
+        let col_max = scaling.col_scale.iter().cloned().fold(0.0_f64, f64::max);
+        eprintln!(
+            "ruiz scaling: cost_scale={:.3e} row_scale=[{:.3e}, {:.3e}] col_scale=[{:.3e}, {:.3e}]",
+            scaling.cost_scale, row_min, row_max, col_min, col_max
+        );
+    }
+
     // Create scaled problem
     let scaled_prob = ProblemData {
         P: p_scaled,
@@ -604,6 +616,7 @@ pub fn solve_ipm2(
     // Polish can turn a solved problem into a failure when KKT is ill-conditioned.
     let mut skip_polish = chordal_active;
     let mut last_condition_number: f64 = 1.0;
+    let mut prev_condition_number: f64 = 1.0;  // Track previous for rate-of-change detection
 
     while iter < effective_max_iter {
         // Check time limit
@@ -722,6 +735,28 @@ pub fn solve_ipm2(
             }
         }
 
+        // Condition-number-based regularization boost:
+        // When KKT is ill-conditioned AND rising, increase static regularization to stabilize.
+        // Only boost aggressively when condition is actually degrading (rising > 10x).
+        // This avoids over-regularizing stably ill-conditioned problems.
+        let cond_rising = last_condition_number > prev_condition_number * 10.0;
+        if allow_reg_bumps && last_condition_number > 1e12 && cond_rising {
+            let cond_boost = if last_condition_number > 1e14 {
+                100.0
+            } else if last_condition_number > 1e13 {
+                10.0
+            } else {
+                3.0
+            };
+            let new_reg = (reg_state.static_reg_eff * cond_boost).min(reg_policy.static_reg_max);
+            if new_reg > reg_state.static_reg_eff {
+                reg_state.static_reg_eff = new_reg;
+                if diag.should_log(iter) {
+                    eprintln!("cond={:.1e} (rising): boosted static_reg to {:.3e}", last_condition_number, reg_state.static_reg_eff);
+                }
+            }
+        }
+
         if (kkt.static_reg() - reg_state.static_reg_eff).abs() > 0.0 {
             kkt.set_static_reg(reg_state.static_reg_eff)
                 .map_err(|e| format!("KKT reg update failed: {}", e))?;
@@ -772,6 +807,27 @@ pub fn solve_ipm2(
             step_settings.sigma_max = 0.999;
         }
 
+        // Condition-number-based step size limiting:
+        // When KKT system is ill-conditioned AND rising, the Newton direction becomes unreliable.
+        // Taking smaller steps prevents oscillation from garbage directions.
+        // AUG2DQP example: cond rises from 3e10 (iter 10) to 3e12 (iter 11) to 1e14 (iter 12).
+        // Only apply limiting when condition is both high AND rising (>10x increase).
+        // This avoids slowing down problems that are stably ill-conditioned (like QAFIRO).
+        let cond_rising = last_condition_number > prev_condition_number * 10.0;
+        if cond_rising && last_condition_number > 1e12 {
+            step_settings.max_alpha = if last_condition_number > 1e14 {
+                0.3
+            } else if last_condition_number > 1e13 {
+                0.5
+            } else {
+                0.7
+            };
+            if diag.should_log(iter) {
+                eprintln!("cond={:.1e} (rising from {:.1e}): limiting max_alpha to {:.2}",
+                    last_condition_number, prev_condition_number, step_settings.max_alpha);
+            }
+        }
+
         let step_result = predictor_corrector_step_in_place(
             &mut kkt,
             &scaled_prob,
@@ -793,6 +849,7 @@ pub fn solve_ipm2(
 
                 // V19: Log condition number (warn if > 1e12)
                 if let Some(cond) = kkt.estimate_condition_number() {
+                    prev_condition_number = last_condition_number;
                     last_condition_number = cond;
 
                     // Skip polish if condition is already high (polish can destabilize)
@@ -800,7 +857,10 @@ pub fn solve_ipm2(
                         skip_polish = true;
                     }
 
-                    if cond > 1e12 && diag.should_log(iter) {
+                    // Always log condition number at verbose level 2+ so we can track trajectory
+                    if diag.is_verbose() {
+                        eprintln!("iter {} cond={:.3e}", iter, cond);
+                    } else if cond > 1e12 && diag.should_log(iter) {
                         eprintln!("iter {} condition number: {:.3e} (ill-conditioned KKT)", iter, cond);
                     } else if cond > 1e15 && diag.enabled() {
                         eprintln!("iter {} condition number: {:.3e} (severely ill-conditioned!)", iter, cond);

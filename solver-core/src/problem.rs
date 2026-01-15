@@ -165,6 +165,11 @@ pub struct SolverSettings {
     /// Minimum pivot threshold for dynamic regularization
     pub dynamic_reg_min_pivot: f64,
 
+    /// Replacement value for dynamic regularization (when pivot < min_pivot)
+    /// Should be larger than min_pivot to provide actual regularization.
+    /// Clarabel uses 2e-7 with threshold 1e-13.
+    pub dynamic_reg_delta: f64,
+
     /// Iterative refinement steps for KKT solves
     pub kkt_refine_iters: usize,
 
@@ -213,6 +218,10 @@ pub struct SolverSettings {
     /// Decomposes large PSD cones into smaller overlapping ones based on sparsity.
     /// None = auto (enabled for PSD cones >= 10), Some(false) = disable.
     pub chordal_decomp: Option<bool>,
+
+    /// Maximum step size (0 < max_alpha <= 1.0). Used to limit Newton steps when
+    /// KKT system is ill-conditioned. Default 1.0.
+    pub max_alpha: f64,
 }
 
 impl Default for SolverSettings {
@@ -245,6 +254,7 @@ impl Default for SolverSettings {
             ruiz_iters,
             static_reg: 1e-8,
             dynamic_reg_min_pivot: 1e-13,
+            dynamic_reg_delta: 2e-7,  // Match Clarabel's replacement value
             kkt_refine_iters,
             feas_weight_floor: 0.05,
             mcc_iters,
@@ -270,6 +280,8 @@ impl Default for SolverSettings {
             chordal_decomp: std::env::var("MINIX_CHORDAL")
                 .ok()
                 .map(|s| s != "0" && s.to_lowercase() != "false"),
+            // Maximum step size - default is 1.0 (full Newton step allowed)
+            max_alpha: 1.0,
         }
     }
 }

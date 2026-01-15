@@ -1599,7 +1599,7 @@ pub fn predictor_corrector_step_in_place(
             alpha = alpha.min(alpha_kappa);
         }
 
-        alpha = (0.99 * alpha).min(1.0);
+        alpha = (0.99 * alpha).min(settings.max_alpha);
         let alpha_pre_prox = alpha;
 
         // Proximity-based step size reduction (experimental)
