@@ -135,8 +135,6 @@ fn expected_behavior(name: &str) -> (Option<SolveStatus>, Option<usize>) {
         // YAO, QBEACONF now converge with new Clarabel centering formula σ=(1-α)³
         "YAO" => (Some(SolveStatus::AlmostOptimal), Some(200)),
         "QBEACONF" => (Some(SolveStatus::AlmostOptimal), Some(200)),
-        // QSIERRA now converges with first-iteration Mehrotra dampening
-        "QSIERRA" => (Some(SolveStatus::AlmostOptimal), Some(200)),
 
         // Add more specific expected behaviors here as needed
         // For most problems: (None, None) means expect Optimal with variable iterations

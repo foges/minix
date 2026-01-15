@@ -1188,9 +1188,9 @@ pub fn predictor_corrector_step_in_place(
     ).min(sigma_cap);
 
     // Mehrotra correction dampening for first iteration (Clarabel's approach).
-    // On iter=1, scale the Mehrotra correction by alpha_aff to accommodate
-    // poorly centered starting points. Full correction from iter=2 onwards.
-    let mehrotra_scale = if iter <= 1 { alpha_aff } else { 1.0 };
+    // On iter=0, scale the Mehrotra correction by alpha_aff to accommodate
+    // poorly centered starting points. Full correction from iter>=1 onwards.
+    let mehrotra_scale = if iter == 0 { alpha_aff } else { 1.0 };
 
     // ======================================================================
     // Step 5: Combined corrector step (+ step size, with stall recovery)
