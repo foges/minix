@@ -1025,15 +1025,19 @@ pub fn solve_ipm2(
         let (min_s_now, min_z_now) = compute_barrier_min(&state, &cones);
         let cond_estimate = kkt.estimate_condition_number().unwrap_or(1.0);
 
-        // Check if we're close to convergence - use mu_old as a proxy since
-        // best_rel_p/best_rel_d haven't been updated for this iteration yet.
-        // If mu_old < 1e-4, the barrier parameter is already very small indicating convergence.
-        let close_to_convergence = mu_old < 1e-4;
+        // Check if we're close to convergence - use mu_old and best_rel_p as proxies.
+        // best_rel_p/best_rel_d haven't been updated for this iteration yet, but contain
+        // the best values from previous iterations.
+        // Skip margin shift if EITHER:
+        // 1. mu_old < 1e-4: barrier parameter is already very small
+        // 2. best_rel_p < 1e-10: primal residual is excellent (BOYD1-type problems where
+        //    mu stays large due to extreme scaling but pres is already converged)
+        let close_to_convergence = mu_old < 1e-4 || best_rel_p < 1e-10;
 
         // Use larger margin for ill-conditioned problems, but skip margin shift entirely
-        // when close to convergence (mu_old < 1e-4).
+        // when close to convergence.
         // Margin shift is needed for ill-conditioned problems to prevent z-collapse early on,
-        // but should NOT be applied when we're already converging (causes QAFIRO to stall).
+        // but should NOT be applied when we're already converging (causes QAFIRO/BOYD to stall).
         if !close_to_convergence {
             let adaptive_margin = if cond_estimate > 1e14 {
                 1e-4  // Ill-conditioned: need larger margin to prevent collapse

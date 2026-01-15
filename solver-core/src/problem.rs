@@ -243,6 +243,10 @@ impl Default for SolverSettings {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(0);
+        let sigma_max = std::env::var("MINIX_SIGMA_MAX")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.999);
 
         Self {
             max_iter: 100,
@@ -260,7 +264,7 @@ impl Default for SolverSettings {
             mcc_iters,
             centrality_beta: 0.1,
             centrality_gamma: 10.0,
-            sigma_max: 0.999,
+            sigma_max,
             line_search_max_iters: 0,
             warm_start: None,
             // Allow environment variable to enable direct mode (no HSDE tau/kappa)

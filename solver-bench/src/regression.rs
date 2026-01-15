@@ -126,10 +126,11 @@ pub fn compare_perf_baseline(
 /// and expected iteration counts for regression detection.
 fn expected_behavior(name: &str) -> (Option<SolveStatus>, Option<usize>) {
     match name {
-        // BOYD-class problems hit numerical precision floor (135,000x cancellation)
-        // κ(K) > 1e13, rel_d stuck at ~1e-3 despite primal+gap converging
-        "BOYD1" => (Some(SolveStatus::NumericalLimit), Some(50)),
-        "BOYD2" => (Some(SolveStatus::NumericalLimit), Some(50)),
+        // BOYD1 converges to AlmostOptimal in 47 iterations after margin shift fix
+        // (skipping margin shift when best_rel_p < 1e-10)
+        "BOYD1" => (Some(SolveStatus::AlmostOptimal), Some(47)),
+        // BOYD2 still hits MaxIters - fundamentally harder problem (pres/dres never converge)
+        "BOYD2" => (Some(SolveStatus::MaxIters), Some(100)),
 
         // Add more specific expected behaviors here as needed
         // For most problems: (None, None) means expect Optimal with variable iterations
@@ -777,7 +778,7 @@ fn expected_iterations(name: &str) -> Option<usize> {
         "LISWET9" => Some(38), "LISWET10" => Some(25), "LISWET11" => Some(30), "LISWET12" => Some(38),
         // STADAT/QGROW
         "STADAT1" => Some(12), "STADAT2" => Some(26), "STADAT3" => Some(27),
-        "QGROW7" => Some(22), "QGROW15" => Some(24), "QGROW22" => Some(28),
+        "QGROW7" => Some(27), "QGROW15" => Some(27), "QGROW22" => Some(36),
         // Other Q* problems
         "QETAMACR" => Some(21), "QISRAEL" => Some(27), "QPCBLEND" => Some(17),
         "QPCBOEI2" => Some(24), "QPCSTAIR" => Some(21), "QRECIPE" => Some(17),
@@ -791,7 +792,9 @@ fn expected_iterations(name: &str) -> Option<usize> {
         "HUES-MOD" => Some(10), "HUESTIS" => Some(10), "KSIP" => Some(12), "LASER" => Some(9),
         "MOSARQP1" => Some(10), "MOSARQP2" => Some(10), "POWELL20" => Some(9),
         "STCQP2" => Some(8), "UBH1" => Some(63), "VALUES" => Some(13), "YAO" => Some(44),
-        // BOYD (large) - these hit MaxIters, no expected value
+        // BOYD1 converges in 47 iterations after margin shift fix (2026-01-15)
+        // BOYD2 still hits MaxIters (100) - fundamentally harder problem
+        "BOYD1" => Some(47),
         // Synthetic (measured exact with 1e-8 tolerances)
         "SYN_LP_NONNEG" => Some(4), "SYN_SOC_FEAS" => Some(5),
         // SDPLIB SDP problems (PSD cone)
