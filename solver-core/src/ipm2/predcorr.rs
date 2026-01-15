@@ -2062,22 +2062,22 @@ fn compute_mu_aff(
 
 fn compute_centering_parameter(
     alpha_aff: f64,
-    mu: f64,
-    mu_aff: f64,
+    _mu: f64,
+    _mu_aff: f64,
     barrier_degree: usize,
 ) -> f64 {
     if barrier_degree == 0 {
         return 0.0;
     }
 
+    // Use Clarabel's centering formula: σ = (1 - α)³
+    // This is more robust than Mehrotra's (μ_aff/μ)³ because it only depends on
+    // step length (geometry), not on potentially ill-conditioned μ estimates.
+    // Small α (blocked step) → σ ≈ 1 (heavy centering)
+    // Large α (free step) → σ ≈ 0 (aggressive toward boundary)
     let sigma_min = 1e-3;
     let sigma_max = 0.999;
-    let sigma = if mu_aff.is_finite() && mu_aff > 0.0 && mu.is_finite() && mu > 0.0 {
-        let ratio = (mu_aff / mu).max(0.0);
-        ratio.powi(3)
-    } else {
-        (1.0 - alpha_aff).powi(3)
-    };
+    let sigma = (1.0 - alpha_aff).powi(3);
 
     sigma.max(sigma_min).min(sigma_max)
 }
@@ -2089,7 +2089,7 @@ fn compute_centering_parameter(
 fn compute_centering_parameter_adaptive(
     alpha_aff: f64,
     mu: f64,
-    mu_aff: f64,
+    _mu_aff: f64,
     barrier_degree: usize,
     residuals: &HsdeResiduals,
 ) -> f64 {
@@ -2097,13 +2097,8 @@ fn compute_centering_parameter_adaptive(
         return 0.0;
     }
 
-    // Base centering parameter (Mehrotra's formula)
-    let sigma_base = if mu_aff.is_finite() && mu_aff > 0.0 && mu.is_finite() && mu > 0.0 {
-        let ratio = (mu_aff / mu).max(0.0);
-        ratio.powi(3)
-    } else {
-        (1.0 - alpha_aff).powi(3)
-    };
+    // Use Clarabel's centering formula: σ = (1 - α)³
+    let sigma_base = (1.0 - alpha_aff).powi(3);
 
     // Adaptive sigma_min based on progress
     // When close to convergence (small mu and small residuals), use smaller sigma_min

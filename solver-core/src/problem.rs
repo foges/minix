@@ -249,7 +249,7 @@ impl Default for SolverSettings {
             .unwrap_or(0.999);
 
         Self {
-            max_iter: 100,
+            max_iter: 200,  // Match Clarabel default
             time_limit_ms: None,
             verbose: false,
             tol_feas: 1e-8,    // Match Clarabel/OSQP industry standard

@@ -1,116 +1,226 @@
-# Clarabel vs Minix Comparison Analysis
+# Clarabel vs Minix: Detailed Implementation Analysis
 
-## Summary
+## Executive Summary
 
-Analyzed why Minix struggles on QGROW/QSHELL/QSTAIR problems while Clarabel solves them efficiently.
+Minix achieves 87.5% (119/136) on Maros-Meszaros vs Clarabel's ~100%. The 9 MaxIters failures are:
+BOYD2, QBEACONF, QBORE3D, QSC205, QSCFXM2, QSCFXM3, QSHARE1B, QSIERRA, YAO
 
-## Key Findings
+Key differences identified through code analysis:
 
-### Problem: QGROW7
+## 1. Centering Parameter (σ) Computation - CRITICAL DIFFERENCE
 
-| Metric | Clarabel | Minix |
-|--------|----------|-------|
-| Iterations | 22 | 100 |
-| Status | Solved | AlmostOptimal |
-| Step sizes | 0.8-0.99 | 1e-6 to 1e-7 |
-| Condition number | ~2e20 | ~2e20 |
-
-### Root Cause
-
-The z values in Minix collapse from 3034 (iter 0) to ~1e-9 to 1e-13, which limits step sizes via the formula `α = -z[i]/dz[i]` when `dz[i] < 0`.
-
-Diagnostic output shows the breakdown:
+### Clarabel (simpler, more robust)
+```rust
+fn centering_parameter(&self, α: T) -> T {
+    T::powi(T::one() - α, 3)  // σ = (1 - α)³
+}
 ```
-iter  5: min_z=4.735e-7, step=8.57e-1  (still ok)
-iter 19: min_z=4.241e-8, step=1.03e-2  (starting to fail)
-iter 22: min_z=1.278e-8, step=1.33e-6  (collapsed)
-iter 99: min_z=1.423e-9, step=4.77e-6  (stuck)
+- Only depends on affine step length α
+- Small α (blocked step) → σ ≈ 1 (heavy centering)
+- Large α (free step) → σ ≈ 0 (aggressive toward boundary)
+- **Geometrically motivated**: step length captures how "blocked" we are
+
+### Minix (classic Mehrotra)
+```rust
+let sigma = (mu_aff / mu).powi(3);  // σ = (μ_aff/μ)³
 ```
+- Depends on ratio of predicted to current duality gap
+- More state-dependent, can be unstable when μ_aff is poorly estimated
+- On ill-conditioned problems, μ_aff can be garbage
 
-### Key Differences Found
+**Impact**: Clarabel's formula is more robust because it only depends on geometry (step length), not on potentially ill-conditioned μ estimates. This is likely a major factor in convergence differences.
 
-1. **First-iteration Mehrotra dampening** (Clarabel solver.rs:380-382):
-   ```rust
-   // make a reduced Mehrotra correction in the first iteration
-   // to accommodate badly centred starting points
-   let m = if iter > 1 {T::one()} else {α};
-   ```
-   Minix uses full correction from iteration 1.
+## 2. Default Parameters
 
-2. **Minimum step termination** (Clarabel settings):
-   - `min_switch_step_length = 0.1` - switch to Dual scaling (for asymmetric cones)
-   - `min_terminate_step_length = 1e-4` - terminate with InsufficientProgress
-   - Minix continues taking tiny steps for all 100 iterations
+| Parameter | Clarabel | Minix | Notes |
+|-----------|----------|-------|-------|
+| max_iter | **200** | **100** | **2x difference - easy fix** |
+| tol_gap_abs/rel | 1e-8 | 1e-8 | Same |
+| tol_feas | 1e-8 | 1e-8 | Same |
+| static_reg_constant | 1e-8 | 1e-8 | Same |
+| static_reg_proportional | ε² ≈ 5e-32 | N/A | Minix lacks this |
+| IR reltol | 1e-13 | N/A | Fixed iters in Minix |
+| IR abstol | 1e-12 | N/A | Fixed iters in Minix |
+| IR max_iter | 10 | 10 | Same |
+| IR stop_ratio | 5.0 | N/A | Early stop if < 5x improvement |
+| linesearch_backtrack | 0.8 | N/A | Minix uses different LS |
+| min_terminate_step | 1e-4 | 1e-4 | Same |
+| min_switch_step | 0.1 | N/A | For scaling strategy |
+| equilibrate_max_iter | 10 | 10 | Same |
+| equilibrate_min/max | 1e-4 / 1e4 | unbounded | **Minix doesn't bound** |
+| max_step_fraction | 0.99 | ~0.99 | Similar |
 
-3. **Iterative refinement tolerance** (Clarabel):
-   - Uses relative tolerance: `reltol = 1e-13 * ||b||` + `abstol = 1e-12`
-   - Stop ratio of 5.0 (stop if improvement < 5x per iteration)
-   - Minix uses fixed absolute tolerance 1e-12
+## 3. Scaling Strategy Checkpointing (Clarabel unique)
 
-4. **Initialization** (Clarabel):
-   - Uses symmetric KKT solve + `shift_to_cone_interior`
-   - Ensures well-centered starting point
-   - Minix uses simpler unit initialization
+Clarabel has a sophisticated strategy switching system:
 
-## Proposed Fixes
+1. **PrimalDual** scaling (default for symmetric cones)
+2. **Dual** scaling (fallback for asymmetric cones)
 
-### Tested but Not Helpful
+When issues occur:
+- Small step (α < 0.1) → switch PrimalDual → Dual
+- KKT solve failure → switch PrimalDual → Dual
+- Insufficient progress → restore previous iterate, try Dual
 
-1. **First-iteration Mehrotra dampening** (REJECTED)
-   - Tested scaling correction by α_aff on first iteration
-   - **Actually made things worse on QGROW7** (gap_rel went from 4.1e-3 to 4.7e-3)
-   - Conclusion: Clarabel's dampening is for a different issue (asymmetric cones)
-
-### IMPLEMENTED: InsufficientProgress Termination
-
-2. **Add InsufficientProgress status and early termination** (IMPLEMENTED)
-   - Added `SolveStatus::InsufficientProgress` for clearer failure mode
-   - Terminates early when step sizes collapse (> 50% of steps < 1e-3)
-   - Saves iterations on hopeless problems (QGROW7: 91 vs 100 iters)
-   - Files modified:
-     - `solver-core/src/problem.rs` - Added InsufficientProgress enum variant
-     - `solver-core/src/ipm2/solve.rs` - Added early termination logic
-     - `solver-bench/src/maros_meszaros.rs` - Updated status display
-   - Problems now terminating with InsufficientProgress:
-     - BOYD1 (70 iters), BOYD2 (86 iters), QBORE3D (92 iters)
-     - QGROW7 (91 iters), QRECIPE (83 iters), QSIERRA (91 iters)
-
-### Medium Priority (Future Work)
-
-3. **Improve iterative refinement**
-   - Use relative tolerance based on RHS norm
-   - Add stop ratio to detect stalling
-   - May improve accuracy on ill-conditioned problems
-
-4. **Better initialization**
-   - Implement `shift_to_cone_interior` similar to Clarabel
-   - Ensures z and s are well inside cone
-   - May prevent early collapse of z values
-
-### Low Priority (Research)
-
-5. **Scaling strategy switching**
-   - For asymmetric cones, can switch from PrimalDual to Dual scaling
-   - Not relevant for QGROW (NonNeg cones only)
-
-## Current Benchmark Results (after InsufficientProgress fix)
-
-```
-Maros-Meszaros Benchmark Summary
-============================================================
-Total problems:      136
-Optimal:             96 (70.6%)
-AlmostOptimal:       22 (16.2%)
-Combined (Opt+Almost): 118 (86.8%)
-Max iterations:      8
-Insufficient progress: 6
-Numerical errors:    0
-Parse errors:        0
+```rust
+fn strategy_checkpoint_small_step(&mut self, α: T, scaling: ScalingStrategy) {
+    if !self.cones.is_symmetric()
+        && scaling == ScalingStrategy::PrimalDual
+        && α < self.settings.core().min_switch_step_length  // 0.1
+    {
+        return StrategyCheckpoint::Update(ScalingStrategy::Dual);
+    }
+    // ...
+}
 ```
 
-## Testing Notes
+**Minix**: No scaling strategy switching. Uses NT scaling throughout.
 
-The InsufficientProgress termination:
-- Does not cause any regressions (118 solved remains the same)
-- Saves iterations on ill-conditioned problems (saves ~30-60 iterations on 6 problems)
-- Provides clearer failure mode than MaxIters for step-size collapse
+## 4. Iterative Refinement - Different Approach
+
+### Clarabel (adaptive)
+```rust
+// Stop early if improvement ratio < stop_ratio (5.0)
+let improved_ratio = lastnorme / norme;
+if improved_ratio < stopratio {
+    if improved_ratio > T::one() {
+        std::mem::swap(x, dx);  // Accept if any improvement
+    }
+    break;  // Stop refinement early
+}
+```
+- Tolerance-based stopping (reltol=1e-13, abstol=1e-12)
+- Early exit when improvements stall
+- Accepts partial improvements
+
+### Minix (fixed)
+- Fixed number of iterations (default 10)
+- No early stopping
+- No tolerance-based termination
+
+## 5. Static Regularization
+
+### Clarabel (adaptive)
+```rust
+let eps = settings.static_regularization_constant
+        + settings.static_regularization_proportional * maxdiag;
+// constant = 1e-8, proportional = ε² ≈ 5e-32 (essentially 0)
+```
+
+### Minix (fixed)
+```rust
+reg_state.static_reg_eff = settings.static_reg;  // Fixed 1e-8
+```
+
+Note: The proportional term ε² ≈ 5e-32 is essentially zero, so this is nearly equivalent. Not a major difference.
+
+## 6. First-Iteration Mehrotra Dampening
+
+### Clarabel
+```rust
+// Make a reduced Mehrotra correction in the first iteration
+// to accommodate badly centred starting points
+let m = if iter > 1 {T::one()} else {α};
+
+self.step_rhs.combined_step_rhs(
+    &self.residuals, &self.variables, &mut self.cones,
+    &mut self.step_lhs,
+    σ, μ, m  // <-- 'm' scales the Mehrotra correction
+);
+```
+
+On iter=1, Mehrotra correction is scaled by α (typically < 1).
+This prevents large corrections from badly centered initial points.
+
+### Minix
+No such dampening. Full Mehrotra correction from iteration 1.
+
+## 7. Insufficient Progress Recovery
+
+### Clarabel
+```rust
+fn strategy_checkpoint_insufficient_progress(&mut self, scaling: ScalingStrategy) {
+    if self.info.get_status() == SolverStatus::InsufficientProgress {
+        // Recover old iterate since "insufficient progress" often
+        // involves actual degradation of results
+        self.info.reset_to_prev_iterate(&mut self.variables, &self.prev_vars);
+
+        if !self.cones.is_symmetric() && scaling == ScalingStrategy::PrimalDual {
+            return StrategyCheckpoint::Update(ScalingStrategy::Dual);
+        }
+        return StrategyCheckpoint::Fail;
+    }
+}
+```
+
+Clarabel explicitly:
+1. Saves previous iterate before each step
+2. Restores it when progress stalls
+3. Tries alternative scaling strategy
+
+### Minix
+Has stall detection but different recovery:
+- Increases regularization
+- Has StallRecovery and Polish modes
+- Tracks consecutive failures
+- Does NOT restore previous iterate
+
+## 8. Equilibration Bounds
+
+### Clarabel
+```rust
+equilibrate_min_scaling: 1e-4,
+equilibrate_max_scaling: 1e4,
+```
+Bounds scaling factors to [1e-4, 1e4] (ratio 1e8 max).
+
+### Minix
+No explicit bounds on scaling factors.
+
+**Impact**: BOYD2 has extreme scaling. Unbounded equilibration may cause numerical issues.
+
+## 9. Summary of Missing Features in Minix
+
+| Feature | Impact | Effort |
+|---------|--------|--------|
+| max_iter=200 | Medium | Trivial |
+| σ = (1-α)³ centering | **High** | Easy |
+| Equilibration bounds | Medium | Easy |
+| First-iter Mehrotra dampening | Low-Medium | Easy |
+| Adaptive IR with early stop | Low | Medium |
+| Scaling strategy switching | Medium | Hard |
+| Previous iterate restoration | Medium | Medium |
+
+## Recommendations
+
+### Immediate (should help most)
+
+1. **Change max_iter from 100 to 200**
+   - File: `solver-core/src/problem.rs`
+   - Just change the default
+
+2. **Implement Clarabel's centering formula**
+   - File: `solver-core/src/ipm2/predcorr.rs`
+   - Change `sigma = (mu_aff/mu).powi(3)` to `sigma = (1.0 - alpha_aff).powi(3)`
+   - This is the most impactful change
+
+3. **Add equilibration bounds**
+   - File: `solver-core/src/presolve/ruiz.rs`
+   - Clamp scaling factors to [1e-4, 1e4]
+
+### Later
+
+4. First-iteration Mehrotra dampening
+5. Adaptive iterative refinement
+6. Previous iterate tracking and restoration
+
+## Test Protocol
+
+After each change, run:
+```bash
+cargo run --release -p solver-bench -- maros-meszaros --problem QSCFXM2
+cargo run --release -p solver-bench -- maros-meszaros --problem QSHARE1B
+cargo run --release -p solver-bench -- maros-meszaros --problem YAO
+```
+
+These are representative of the failing problems.

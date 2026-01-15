@@ -130,7 +130,11 @@ fn expected_behavior(name: &str) -> (Option<SolveStatus>, Option<usize>) {
         // (skipping margin shift when best_rel_p < 1e-10)
         "BOYD1" => (Some(SolveStatus::AlmostOptimal), Some(47)),
         // BOYD2 still hits MaxIters - fundamentally harder problem (pres/dres never converge)
-        "BOYD2" => (Some(SolveStatus::MaxIters), Some(100)),
+        // Now 200 iters since max_iter default changed from 100 to 200
+        "BOYD2" => (Some(SolveStatus::MaxIters), Some(200)),
+        // YAO, QBEACONF now converge with new Clarabel centering formula σ=(1-α)³
+        "YAO" => (Some(SolveStatus::AlmostOptimal), Some(200)),
+        "QBEACONF" => (Some(SolveStatus::AlmostOptimal), Some(200)),
 
         // Add more specific expected behaviors here as needed
         // For most problems: (None, None) means expect Optimal with variable iterations
