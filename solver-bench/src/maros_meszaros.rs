@@ -249,6 +249,8 @@ pub struct BenchmarkSummary {
     pub almost_optimal: usize,
     /// Problems hitting max iterations
     pub max_iters: usize,
+    /// Problems with insufficient progress (step size collapsed)
+    pub insufficient_progress: usize,
     /// Problems with numerical errors
     pub numerical_errors: usize,
     /// Problems that failed to parse
@@ -475,6 +477,7 @@ pub fn run_full_suite(
             SolveStatus::AlmostOptimal => "~",
             SolveStatus::MaxIters => "M",
             SolveStatus::NumericalError => "N",
+            SolveStatus::InsufficientProgress => "I",
             _ => "?",
         };
 
@@ -496,6 +499,7 @@ pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
     let mut optimal = 0;
     let mut almost_optimal = 0;
     let mut max_iters = 0;
+    let mut insufficient_progress = 0;
     let mut numerical_errors = 0;
     let mut parse_errors = 0;
     let mut total_time_s = 0.0;
@@ -537,6 +541,7 @@ pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
                 }
             }
             SolveStatus::MaxIters => max_iters += 1,
+            SolveStatus::InsufficientProgress => insufficient_progress += 1,
             SolveStatus::NumericalError => numerical_errors += 1,
             _ => {}
         }
@@ -560,6 +565,7 @@ pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
         optimal,
         almost_optimal,
         max_iters,
+        insufficient_progress,
         numerical_errors,
         parse_errors,
         total_time_s,
@@ -585,6 +591,7 @@ pub fn print_summary(summary: &BenchmarkSummary) {
              combined,
              100.0 * combined as f64 / summary.total as f64);
     println!("Max iterations:      {}", summary.max_iters);
+    println!("Insufficient progress: {}", summary.insufficient_progress);
     println!("Numerical errors:    {}", summary.numerical_errors);
     println!("Parse errors:        {}", summary.parse_errors);
     println!("Total time:          {:.2}s", summary.total_time_s);
@@ -607,6 +614,7 @@ pub fn print_results_table(results: &[BenchmarkResult]) {
             SolveStatus::NumericalError => "NumErr",
             SolveStatus::PrimalInfeasible => "PrimInf",
             SolveStatus::DualInfeasible => "DualInf",
+            SolveStatus::InsufficientProgress => "InsufPrg",
             _ => "Other",
         };
 

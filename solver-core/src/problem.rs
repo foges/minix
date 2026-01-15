@@ -251,7 +251,7 @@ impl Default for SolverSettings {
             centrality_beta: 0.1,
             centrality_gamma: 10.0,
             sigma_max: 0.999,
-            line_search_max_iters: 0,  // Disabled by default; enable for debugging
+            line_search_max_iters: 0,
             warm_start: None,
             // Allow environment variable to enable direct mode (no HSDE tau/kappa)
             direct_mode: std::env::var("MINIX_DIRECT_MODE")
@@ -306,6 +306,10 @@ pub enum SolveStatus {
     /// This indicates the dual residual floor is due to ill-conditioning and
     /// catastrophic cancellation, not an algorithmic issue.
     NumericalLimit,
+
+    /// Insufficient progress - step sizes too small to make progress
+    /// (like Clarabel's min_terminate_step_length termination)
+    InsufficientProgress,
 }
 
 impl fmt::Display for SolveStatus {
@@ -320,6 +324,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::TimeLimit => write!(f, "Time Limit"),
             SolveStatus::NumericalError => write!(f, "Numerical Error"),
             SolveStatus::NumericalLimit => write!(f, "NumericalLimit"),
+            SolveStatus::InsufficientProgress => write!(f, "InsufficientProgress"),
         }
     }
 }

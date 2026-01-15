@@ -586,11 +586,15 @@ pub fn solve_ipm2(
     let chordal_active = !chordal_decomposed.decompositions.is_empty();
     let convergence_threshold = if chordal_active { 1e-4 } else { criteria.tol_feas };
 
-    // Step-length termination: track consecutive small steps (like Clarabel's min_terminate_step_length)
-    // If alpha < 1e-4 for several iterations and we're "close enough", terminate.
+    // Step-length termination: track small steps (like Clarabel's min_terminate_step_length)
+    // If alpha < threshold for several iterations and we're "close enough", terminate.
+    // For converged case: use strict 1e-4 threshold (consecutive)
+    // For insufficient progress: use looser 1e-3 threshold (cumulative)
     let min_terminate_step_length = 1e-4;
-    let mut small_step_count: usize = 0;
+    let insufficient_progress_step_length = 1e-3;  // looser threshold for cumulative tracking
+    let mut small_step_count: usize = 0;  // consecutive small steps for converged case
     let small_step_terminate_iters: usize = 3;
+    let mut total_small_steps: usize = 0;  // total small steps (< 1e-3) for insufficient progress
 
     // Skip polish when chordal decomposition is active or condition is already high.
     // Polish can turn a solved problem into a failure when KKT is ill-conditioned.
@@ -882,10 +886,18 @@ pub fn solve_ipm2(
         // Step-length termination (like Clarabel's min_terminate_step_length):
         // If alpha < 1e-4 for N consecutive iterations and we're "close enough", terminate.
         // This prevents the solver from grinding away with tiny steps when already converged.
-        if step_result.alpha < min_terminate_step_length && step_result.alpha_sz < min_terminate_step_length {
+        let is_tiny_step = step_result.alpha < min_terminate_step_length && step_result.alpha_sz < min_terminate_step_length;
+        let is_small_step = step_result.alpha < insufficient_progress_step_length && step_result.alpha_sz < insufficient_progress_step_length;
+
+        if is_tiny_step {
             small_step_count += 1;
         } else {
             small_step_count = 0;
+        }
+
+        // Track cumulative small steps (< 1e-3) separately for insufficient progress detection
+        if is_small_step {
+            total_small_steps += 1;
         }
 
         // Check for step-length termination (similar to condition-based early termination)
@@ -906,6 +918,29 @@ pub fn solve_ipm2(
                 mu = best_mu;
             }
             status = SolveStatus::Optimal;
+            break;
+        }
+
+        // InsufficientProgress termination: if many steps are small (even non-consecutive), and we're
+        // not making progress, terminate early. This prevents grinding for 100+ iterations with no
+        // hope of convergence (like QGROW7 with condition number 2e20 and oscillating small steps).
+        // Threshold: 50% of iterations have step < 1e-3
+        const TOTAL_SMALL_STEP_THRESHOLD: usize = 50;
+        // Only trigger after at least 30 iterations to give solver a chance
+        const MIN_ITERS_FOR_INSUFFICIENT_PROGRESS: usize = 30;
+        if iter >= MIN_ITERS_FOR_INSUFFICIENT_PROGRESS && total_small_steps >= TOTAL_SMALL_STEP_THRESHOLD {
+            if diag.enabled() {
+                eprintln!(
+                    "insufficient progress: {} total small steps (< {:.0e}) out of {} iters, best at iter {} (gap={:.3e} rel_p={:.3e} rel_d={:.3e})",
+                    total_small_steps, insufficient_progress_step_length, iter, best_iter, best_gap_rel, best_rel_p, best_rel_d
+                );
+            }
+            // Use best state if available
+            if let Some(ref best) = best_state {
+                state = best.clone();
+                mu = best_mu;
+            }
+            status = SolveStatus::InsufficientProgress;
             break;
         }
 
@@ -1481,10 +1516,10 @@ pub fn solve_ipm2(
         status = SolveStatus::MaxIters;
     }
 
-    // On numerical cliff events (MaxIters, NumericalError), use best iterate if it's better.
+    // On numerical cliff events (MaxIters, NumericalError, InsufficientProgress), use best iterate if it's better.
     // This is critical for chordal decomposition where the solver converges but then
     // the KKT becomes ill-conditioned causing subsequent iterates to degrade.
-    if matches!(status, SolveStatus::MaxIters | SolveStatus::NumericalError) {
+    if matches!(status, SolveStatus::MaxIters | SolveStatus::NumericalError | SolveStatus::InsufficientProgress) {
         if let Some(ref best) = best_state {
             // Compare merit: use best if it has better combined metrics
             let current_merit = (best_rel_p / convergence_threshold)
@@ -1622,7 +1657,7 @@ pub fn solve_ipm2(
     // "Almost optimal" acceptance: ONLY accept if ALL criteria are close to tolerance.
     // This is conservative - we only accept solutions that are genuinely close to optimal.
     // Previous loose acceptance tiers (40% gap, 15% dual) were accepting bad solutions.
-    if matches!(status, SolveStatus::NumericalError | SolveStatus::MaxIters) {
+    if matches!(status, SolveStatus::NumericalError | SolveStatus::MaxIters | SolveStatus::InsufficientProgress) {
         let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
         let dual_ok = final_metrics.rel_d <= criteria.tol_feas * 100.0; // Allow 100x slack (1e-6 default)
         let gap_ok = final_metrics.gap_rel <= criteria.tol_gap_rel * 10.0; // Allow 10x slack
@@ -1636,7 +1671,7 @@ pub fn solve_ipm2(
     }
 
     // Dual residual diagnostics for failed problems at Trace level (MINIX_VERBOSE=4)
-    if status == SolveStatus::MaxIters && diag.is_trace() {
+    if matches!(status, SolveStatus::MaxIters | SolveStatus::InsufficientProgress) && diag.is_trace() {
         // Get problem name from environment or use default
         let problem_name = std::env::var("MINIX_PROBLEM_NAME").unwrap_or_else(|_| "unknown".to_string());
         // Compute r_d for diagnostic purposes
@@ -1671,7 +1706,7 @@ pub fn solve_ipm2(
     // Optional active-set polish (Zero + NonNeg only):
     // If we are essentially optimal in primal + gap but still stuck on dual
     // feasibility, run a one-shot crossover to recover high-quality multipliers.
-    if status == SolveStatus::MaxIters {
+    if matches!(status, SolveStatus::MaxIters | SolveStatus::InsufficientProgress) {
         let primal_ok = final_metrics.rp_inf <= criteria.tol_feas * final_metrics.primal_scale;
         let dual_ok = final_metrics.rd_inf <= criteria.tol_feas * final_metrics.dual_scale;
         let gap_scale_abs = final_metrics.obj_p.abs().min(final_metrics.obj_d.abs()).max(1.0);
@@ -1993,7 +2028,7 @@ pub fn solve_ipm2(
     // Condition-aware acceptance: check if we hit a numerical precision floor
     // This happens when primal+gap converged, dual is stuck, KKT is ill-conditioned,
     // and dual has stalled for many iterations (indicating we've hit the precision limit)
-    if status == SolveStatus::MaxIters {
+    if matches!(status, SolveStatus::MaxIters | SolveStatus::InsufficientProgress) {
         let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
         // For ill-conditioned problems, accept gap up to 1e-4 (loose but realistic)
         let gap_ok = final_metrics.gap_rel <= 1e-4;
@@ -2029,9 +2064,9 @@ pub fn solve_ipm2(
         }
     }
 
-    // Final check: if we hit MaxIters but meet AlmostOptimal thresholds, upgrade status
+    // Final check: if we hit MaxIters/InsufficientProgress but meet AlmostOptimal thresholds, upgrade status
     // This check happens AFTER polish, so we've given the solver every chance to reach Optimal
-    if status == SolveStatus::MaxIters && is_almost_optimal(&final_metrics) {
+    if matches!(status, SolveStatus::MaxIters | SolveStatus::InsufficientProgress) && is_almost_optimal(&final_metrics) {
         status = SolveStatus::AlmostOptimal;
     }
 
