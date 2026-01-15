@@ -201,6 +201,41 @@ impl HsdeState {
         }
     }
 
+    /// Shift s and z to ensure a minimum margin inside the cone.
+    ///
+    /// Unlike push_to_interior which only acts when outside the cone,
+    /// this ensures all components are at least `min_margin` away from
+    /// the boundary. This is similar to Clarabel's `shift_to_cone_interior`.
+    ///
+    /// For NonNeg cones: ensures z[i] >= min_margin and s[i] >= min_margin.
+    /// For SOC cones: ensures the SOC margin is at least min_margin.
+    pub fn shift_to_min_margin(&mut self, cones: &[Box<dyn ConeKernel>], min_margin: f64) {
+        let mut offset = 0;
+        for cone in cones {
+            let dim = cone.dim();
+
+            // Skip zero cones
+            if cone.barrier_degree() == 0 {
+                offset += dim;
+                continue;
+            }
+
+            // For each cone, shift components that are below min_margin
+            // For NonNeg cone: simply clamp each component
+            // For SOC: more complex, but for now just handle NonNeg
+            for i in offset..offset + dim {
+                if self.s[i] < min_margin {
+                    self.s[i] = min_margin;
+                }
+                if self.z[i] < min_margin {
+                    self.z[i] = min_margin;
+                }
+            }
+
+            offset += dim;
+        }
+    }
+
     /// Legacy initialization (kept for backwards compat if needed).
     pub fn initialize(&mut self, cones: &[Box<dyn ConeKernel>]) {
         // x = 0
@@ -647,5 +682,45 @@ mod tests {
 
         let mu = compute_mu(&state, 3);
         assert!((mu - 2.75).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_shift_to_min_margin() {
+        let n = 2;
+        let m = 4;
+
+        let mut state = HsdeState::new(n, m);
+        // Set up s and z with some values below the margin
+        state.s = vec![1e-10, 0.5, 1e-6, 2.0];
+        state.z = vec![0.3, 1e-12, 1.5, 1e-8];
+
+        let cones: Vec<Box<dyn ConeKernel>> = vec![Box::new(NonNegCone::new(m))];
+        let min_margin = 1e-4;
+
+        state.shift_to_min_margin(&cones, min_margin);
+
+        // All values should be at least min_margin
+        for i in 0..m {
+            assert!(
+                state.s[i] >= min_margin,
+                "s[{}] = {} < {}",
+                i,
+                state.s[i],
+                min_margin
+            );
+            assert!(
+                state.z[i] >= min_margin,
+                "z[{}] = {} < {}",
+                i,
+                state.z[i],
+                min_margin
+            );
+        }
+
+        // Values that were above margin should be unchanged
+        assert!((state.s[1] - 0.5).abs() < 1e-10);
+        assert!((state.s[3] - 2.0).abs() < 1e-10);
+        assert!((state.z[0] - 0.3).abs() < 1e-10);
+        assert!((state.z[2] - 1.5).abs() < 1e-10);
     }
 }

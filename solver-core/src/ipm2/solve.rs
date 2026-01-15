@@ -414,6 +414,10 @@ pub fn solve_ipm2(
     // Ensure initial point is strictly interior (critical for exp/pow cones)
     state.push_to_interior(&cones, 1e-2);
 
+    // Also ensure minimum margin like Clarabel's shift_to_cone_interior.
+    // This prevents z values from being too small even after scaling.
+    state.shift_to_min_margin(&cones, 1.0);
+
     // In direct mode, fix tau=1 and kappa=0 (no homogeneous embedding)
     if settings.direct_mode {
         state.tau = 1.0;
@@ -949,6 +953,31 @@ pub fn solve_ipm2(
         // Only trigger when μ explodes massively (100x+) - 10x is too aggressive and hurts normal convergence.
         let mu_old = mu;
         mu = step_result.mu_new;
+
+        // Adaptive margin enforcement: only apply when z values have collapsed significantly.
+        // Use a small default margin (1e-8) that doesn't hurt normal convergence.
+        // Apply a larger margin (1e-4) only when KKT system is severely ill-conditioned
+        // (which causes z-value collapse like seen in QGROW7: z goes from 3034 to 3.88e-5).
+        // Only check barrier cones (NonNeg, SOC, etc.) - zero cones can have any value.
+        let (min_s_now, min_z_now) = compute_barrier_min(&state, &cones);
+        let cond_estimate = kkt.estimate_condition_number().unwrap_or(1.0);
+        // Use larger margin for ill-conditioned problems, smaller for well-conditioned
+        let adaptive_margin = if cond_estimate > 1e14 {
+            1e-4  // Ill-conditioned: need larger margin to prevent collapse
+        } else {
+            1e-8  // Well-conditioned: use tiny margin for tight convergence
+        };
+        if min_s_now < adaptive_margin || min_z_now < adaptive_margin {
+            state.shift_to_min_margin(&cones, adaptive_margin);
+            mu = compute_mu(&state, barrier_degree);
+            if diag.is_verbose() {
+                let (min_s_after, min_z_after) = compute_barrier_min(&state, &cones);
+                eprintln!(
+                    "     margin shift: min_s {:.2e}->{:.2e}, min_z {:.2e}->{:.2e}, mu_new={:.2e} (cond={:.1e})",
+                    min_s_now, min_s_after, min_z_now, min_z_after, mu, cond_estimate
+                );
+            }
+        }
 
         // Log μ decomposition when μ is large (for debugging QFORPLAN-type problems)
         if diag.should_log(iter) && mu > 1e10 {
@@ -2123,6 +2152,25 @@ fn build_cones(specs: &[ConeSpec]) -> Result<Vec<Box<dyn ConeKernel>>, Box<dyn s
     }
 
     Ok(cones)
+}
+
+/// Compute minimum s and z values over barrier cones only.
+/// Zero cones (barrier_degree=0) are skipped since they don't require interior.
+fn compute_barrier_min(state: &HsdeState, cones: &[Box<dyn ConeKernel>]) -> (f64, f64) {
+    let mut min_s = f64::INFINITY;
+    let mut min_z = f64::INFINITY;
+    let mut offset = 0;
+    for cone in cones {
+        let dim = cone.dim();
+        if cone.barrier_degree() > 0 {
+            for i in offset..offset + dim {
+                min_s = min_s.min(state.s[i]);
+                min_z = min_z.min(state.z[i]);
+            }
+        }
+        offset += dim;
+    }
+    (min_s, min_z)
 }
 
 fn compute_metrics(
