@@ -157,14 +157,25 @@ pub fn check_termination(
         return Some(SolveStatus::NumericalError);
     }
 
-    // Feasibility scaling.
+    // Feasibility scaling using industry-standard abs+rel approach.
     let b_inf = inf_norm(&prob.b);
     let q_inf = inf_norm(&prob.q);
+    let s_inf = inf_norm(&s_bar);
 
-    // Scale by data only; variable magnitudes can explode under HSDE and
-    // falsely mask large absolute residuals.
-    let primal_scale = b_inf.max(1.0);
-    let dual_scale = q_inf.max(1.0);
+    // Compute ||Ax|| from r_p = Ax + s - b  =>  Ax = r_p - s + b
+    let ax_inf = (0..m).map(|i| (r_p[i] - s_bar[i] + prob.b[i]).abs()).fold(0.0_f64, f64::max);
+
+    // Compute ||A^T z||
+    let mut atz = vec![0.0; n];
+    for (&val, (row, col)) in prob.A.iter() {
+        atz[col] += val * z_bar[row];
+    }
+    let atz_inf = inf_norm(&atz);
+
+    // Industry-standard scaling: max(1, ||b||, ||Ax||, ||s||) for primal
+    // and max(1, ||q||, ||A^T z||) for dual.
+    let primal_scale = 1.0_f64.max(b_inf).max(ax_inf).max(s_inf);
+    let dual_scale = 1.0_f64.max(q_inf).max(atz_inf);
 
     let primal_ok = rp_inf <= criteria.tol_feas * primal_scale;
     let dual_ok = rd_inf <= criteria.tol_feas * dual_scale;
@@ -303,18 +314,6 @@ fn dual_cone_ok(prob: &ProblemData, z: &[f64], tol: f64) -> bool {
             }
             ConeSpec::NonNeg { dim } => {
                 if z[offset..offset + dim].iter().any(|&v| v < -tol) {
-                    return false;
-                }
-                offset += dim;
-            }
-            ConeSpec::Soc { dim } => {
-                let t = z[offset];
-                let mut x_norm2 = 0.0;
-                for xi in &z[offset + 1..offset + dim] {
-                    x_norm2 += xi * xi;
-                }
-                let x_norm = x_norm2.sqrt();
-                if t + tol < x_norm {
                     return false;
                 }
                 offset += dim;

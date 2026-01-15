@@ -242,7 +242,14 @@ pub fn equilibrate(
         0.0
     };
     let max_cost_norm = q_norm.max(p_norm);
-    let cost_scale = if max_cost_norm > 1e-12 { max_cost_norm } else { 1.0 };
+    // Cap cost_scale to avoid extreme multipliers in z unscaling.
+    // z_original = cost_scale * row_scale * z_scaled, so large cost_scale
+    // combined with large row_scale range can cause numerical issues.
+    let cost_scale = if max_cost_norm > 1e-12 {
+        max_cost_norm.min(10.0)  // Cap at 10 for stability
+    } else {
+        1.0
+    };
 
     // Apply cost scaling
     let q_scaled: Vec<f64> = q_scaled.iter().map(|&qi| qi / cost_scale).collect();

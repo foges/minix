@@ -319,13 +319,16 @@ impl QdldlSolver {
         match result {
             Ok(_) => {
                 // Apply dynamic regularization if needed
+                // Clarabel uses threshold=1e-13 and replacement=2e-7 (ratio of ~2e6).
+                // We use a similar ratio: replacement = threshold * 2e6, capped at 1e-6.
+                let replacement = (self.dynamic_reg_min_pivot * 2e6).min(1e-6);
                 self.dynamic_bumps = 0;
                 for i in 0..self.n {
                     if f.d[i].abs() < self.dynamic_reg_min_pivot {
                         f.d[i] = if f.d[i] >= 0.0 {
-                            self.dynamic_reg_min_pivot
+                            replacement
                         } else {
-                            -self.dynamic_reg_min_pivot
+                            -replacement
                         };
                         f.d_inv[i] = 1.0 / f.d[i];
                         self.dynamic_bumps += 1;

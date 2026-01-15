@@ -132,5 +132,15 @@ pub fn maros_meszaros_expected_failures() -> &'static [&'static str] {
         // - Mu oscillating (1e21 to 1e26) instead of decreasing
         // - HSDE showing infeasibility signals (different from BOYD)
         "QFORPLAN",
+
+        // Problems with dual divergence or gap issues (previously excluded from regression)
+        // These hit MaxIters or NumericalLimit with honest metrics
+        "Q25FV47", "QADLITTL", "QBANDM", "QBEACONF", "QBORE3D", "QBRANDY",
+        "QCAPRI", "QE226", "QFFFFF80", "QGFRDXPN",
+        "QPCBOEI1", "QPILOTNO",
+        "QSCAGR25", "QSCAGR7", "QSCFXM1", "QSCFXM2", "QSCFXM3", "QSCORPIO", "QSCRS8",
+        "QSHARE1B",
+        "QSHIP04L", "QSHIP04S", "QSHIP08L", "QSHIP08S", "QSHIP12L", "QSHIP12S",
+        "STCQP1",
     ]
 }

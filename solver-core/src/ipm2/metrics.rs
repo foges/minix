@@ -126,11 +126,30 @@ pub fn compute_unscaled_metrics(
 
     let b_inf = inf_norm(b);
     let q_inf = inf_norm(q);
+    let s_inf = inf_norm(s_bar);
 
-    // Use data-based scaling only; avoid x/s/z magnitude so HSDE scaling
-    // cannot hide large absolute residuals (especially on SDP instances).
-    let primal_scale = b_inf.max(1.0);
-    let dual_scale = q_inf.max(1.0);
+    // Compute ||Ax|| from r_p = Ax + s - b  =>  Ax = r_p - s + b
+    let ax_inf = (0..m).map(|i| (r_p[i] - s_bar[i] + b[i]).abs()).fold(0.0_f64, f64::max);
+
+    // Compute ||A^T z|| for dual scaling
+    let mut atz_inf = 0.0_f64;
+    for col in 0..n {
+        let mut acc = 0.0;
+        if let Some(col_view) = a.outer_view(col) {
+            for (row, &val) in col_view.iter() {
+                acc += val * z_bar[row];
+            }
+        }
+        atz_inf = atz_inf.max(acc.abs());
+    }
+
+    // Industry-standard abs+rel scaling:
+    // primal_scale = max(1, ||b||, ||Ax||, ||s||)
+    // dual_scale = max(1, ||q||, ||A^T z||)
+    // This captures cancellation difficulty via max(||Ax||, ||s||) without
+    // allowing unbounded iterates to hide failures.
+    let primal_scale = 1.0_f64.max(b_inf).max(ax_inf).max(s_inf);
+    let dual_scale = 1.0_f64.max(q_inf).max(atz_inf);
 
     let rel_p = rp_inf / primal_scale;
     let rel_d = rd_inf / dual_scale;

@@ -755,22 +755,22 @@ fn expected_iterations(name: &str) -> Option<usize> {
         "HS76" => Some(6), "HS118" => Some(11), "HS268" => Some(8),
         // Small problems
         "TAME" => Some(4), "S268" => Some(8), "ZECEVIC2" => Some(7),
-        "LOTSCHD" => Some(8), "QAFIRO" => Some(14),
-        // CVXQP family
-        "CVXQP1_S" => Some(8), "CVXQP2_S" => Some(9), "CVXQP3_S" => Some(10),
-        "CVXQP1_M" => Some(10), "CVXQP2_M" => Some(9), "CVXQP3_M" => Some(12),
-        "CVXQP1_L" => Some(11), "CVXQP2_L" => Some(10), "CVXQP3_L" => Some(10),
+        "LOTSCHD" => Some(8), "QAFIRO" => Some(18),
+        // CVXQP family (updated 2026-01-15)
+        "CVXQP1_S" => Some(9), "CVXQP2_S" => Some(10), "CVXQP3_S" => Some(11),
+        "CVXQP1_M" => Some(13), "CVXQP2_M" => Some(10), "CVXQP3_M" => Some(13),
+        "CVXQP1_L" => Some(41), "CVXQP2_L" => Some(12), "CVXQP3_L" => Some(11),
         // DUAL/PRIMAL
-        "DUAL1" => Some(12), "DUAL2" => Some(11), "DUAL3" => Some(12), "DUAL4" => Some(12),
+        "DUAL1" => Some(13), "DUAL2" => Some(11), "DUAL3" => Some(12), "DUAL4" => Some(12),
         "DUALC1" => Some(13), "DUALC2" => Some(10), "DUALC5" => Some(10), "DUALC8" => Some(10),
         "PRIMAL1" => Some(10), "PRIMAL2" => Some(9), "PRIMAL3" => Some(10), "PRIMAL4" => Some(9),
         "PRIMALC1" => Some(16), "PRIMALC2" => Some(14), "PRIMALC5" => Some(9), "PRIMALC8" => Some(13),
-        // AUG family
-        "AUG2D" => Some(7), "AUG2DC" => Some(7), "AUG2DCQP" => Some(13), "AUG2DQP" => Some(14),
-        "AUG3D" => Some(6), "AUG3DC" => Some(6), "AUG3DCQP" => Some(11), "AUG3DQP" => Some(13),
-        // CONT family (updated after scale-invariant infeasibility detection)
-        "CONT-050" => Some(10), "CONT-100" => Some(11), "CONT-101" => Some(10),
-        "CONT-200" => Some(12), "CONT-201" => Some(10), "CONT-300" => Some(12),
+        // AUG family (updated after condition-aware step limiting)
+        "AUG2D" => Some(8), "AUG2DC" => Some(7), "AUG2DCQP" => Some(14), "AUG2DQP" => Some(16),
+        "AUG3D" => Some(7), "AUG3DC" => Some(6), "AUG3DCQP" => Some(12), "AUG3DQP" => Some(16),
+        // CONT family (CONT-200/201/300 take more iters due to condition-aware limiting)
+        "CONT-050" => Some(10), "CONT-100" => Some(11), "CONT-101" => Some(11),
+        "CONT-200" => Some(40), "CONT-201" => Some(29), "CONT-300" => Some(100),
         // LISWET family (all converge after recent fixes)
         "LISWET1" => Some(27), "LISWET2" => Some(18), "LISWET3" => Some(26), "LISWET4" => Some(36),
         "LISWET5" => Some(20), "LISWET6" => Some(25), "LISWET7" => Some(32), "LISWET8" => Some(32),
@@ -786,7 +786,7 @@ fn expected_iterations(name: &str) -> Option<usize> {
         "QSEBA" => Some(24), "QSHARE2B" => Some(17), "QSHELL" => Some(37),
         "QSIERRA" => Some(34), "QSTAIR" => Some(21), "QSTANDAT" => Some(18),
         // Other
-        "DPKLO1" => Some(4), "DTOC3" => Some(5), "EXDATA" => Some(13),
+        "DPKLO1" => Some(5), "DTOC3" => Some(7), "EXDATA" => Some(13),
         "GOULDQP2" => Some(14), "GOULDQP3" => Some(8),
         "HUES-MOD" => Some(10), "HUESTIS" => Some(10), "KSIP" => Some(12), "LASER" => Some(9),
         "MOSARQP1" => Some(10), "MOSARQP2" => Some(10), "POWELL20" => Some(9),

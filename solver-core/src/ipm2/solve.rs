@@ -1019,23 +1019,37 @@ pub fn solve_ipm2(
         // Apply a larger margin (1e-4) only when KKT system is severely ill-conditioned
         // (which causes z-value collapse like seen in QGROW7: z goes from 3034 to 3.88e-5).
         // Only check barrier cones (NonNeg, SOC, etc.) - zero cones can have any value.
+        //
+        // IMPORTANT: Don't apply margin shift when residuals are already very close to convergence!
+        // This was causing QAFIRO to reset at iter 12 when pres=1.4e-10 (nearly converged).
         let (min_s_now, min_z_now) = compute_barrier_min(&state, &cones);
         let cond_estimate = kkt.estimate_condition_number().unwrap_or(1.0);
-        // Use larger margin for ill-conditioned problems, smaller for well-conditioned
-        let adaptive_margin = if cond_estimate > 1e14 {
-            1e-4  // Ill-conditioned: need larger margin to prevent collapse
-        } else {
-            1e-8  // Well-conditioned: use tiny margin for tight convergence
-        };
-        if min_s_now < adaptive_margin || min_z_now < adaptive_margin {
-            state.shift_to_min_margin(&cones, adaptive_margin);
-            mu = compute_mu(&state, barrier_degree);
-            if diag.is_verbose() {
-                let (min_s_after, min_z_after) = compute_barrier_min(&state, &cones);
-                eprintln!(
-                    "     margin shift: min_s {:.2e}->{:.2e}, min_z {:.2e}->{:.2e}, mu_new={:.2e} (cond={:.1e})",
-                    min_s_now, min_s_after, min_z_now, min_z_after, mu, cond_estimate
-                );
+
+        // Check if we're close to convergence - use mu_old as a proxy since
+        // best_rel_p/best_rel_d haven't been updated for this iteration yet.
+        // If mu_old < 1e-4, the barrier parameter is already very small indicating convergence.
+        let close_to_convergence = mu_old < 1e-4;
+
+        // Use larger margin for ill-conditioned problems, but skip margin shift entirely
+        // when close to convergence (mu_old < 1e-4).
+        // Margin shift is needed for ill-conditioned problems to prevent z-collapse early on,
+        // but should NOT be applied when we're already converging (causes QAFIRO to stall).
+        if !close_to_convergence {
+            let adaptive_margin = if cond_estimate > 1e14 {
+                1e-4  // Ill-conditioned: need larger margin to prevent collapse
+            } else {
+                1e-8  // Well-conditioned: use tiny margin
+            };
+            if min_s_now < adaptive_margin || min_z_now < adaptive_margin {
+                state.shift_to_min_margin(&cones, adaptive_margin);
+                mu = compute_mu(&state, barrier_degree);
+                if diag.is_verbose() {
+                    let (min_s_after, min_z_after) = compute_barrier_min(&state, &cones);
+                    eprintln!(
+                        "     margin shift: min_s {:.2e}->{:.2e}, min_z {:.2e}->{:.2e}, mu_new={:.2e} (cond={:.1e})",
+                        min_s_now, min_s_after, min_z_now, min_z_after, mu, cond_estimate
+                    );
+                }
             }
         }
 

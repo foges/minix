@@ -38,19 +38,20 @@ pub enum UnifiedKktSolver {
 /// Check if problem is suitable for normal equations.
 ///
 /// Returns true if:
-/// - MINIX_NORMAL_EQNS=1 environment variable is set (opt-in for now)
+/// - MINIX_NORMAL_EQNS is not set to "0" (enabled by default)
 /// - m > 5*n (tall problem)
 /// - n <= 500 (dense ops are fast)
 /// - All cones are Zero or NonNeg (diagonal H)
 ///
-/// Note: Normal equations solver is disabled by default until properly validated.
-/// Enable with MINIX_NORMAL_EQNS=1 for testing.
+/// For tall LP/QP problems, normal equations reduce KKT from (n+m)×(n+m) to n×n,
+/// giving significant speedups (e.g., KSIP: 2330ms → 19ms).
+/// Disable with MINIX_NORMAL_EQNS=0 if issues arise.
 pub fn should_use_normal_equations(n: usize, m: usize, cones: &[ConeSpec]) -> bool {
-    // Opt-in for now - normal equations needs more testing
-    let enabled = std::env::var("MINIX_NORMAL_EQNS")
-        .map(|v| v != "0")
+    // Enabled by default; set MINIX_NORMAL_EQNS=0 to disable
+    let disabled = std::env::var("MINIX_NORMAL_EQNS")
+        .map(|v| v == "0")
         .unwrap_or(false);
-    if !enabled {
+    if disabled {
         return false;
     }
 
@@ -247,16 +248,11 @@ mod tests {
 
     #[test]
     fn test_should_use_normal_equations() {
-        // Normal equations is opt-in via MINIX_NORMAL_EQNS env var
-        // When not enabled, always returns false
+        // Normal equations is enabled by default (opt-out with MINIX_NORMAL_EQNS=0)
         let cones = vec![ConeSpec::NonNeg { dim: 100 }];
 
-        // Without env var, should always be false
+        // Without env var, should use if structural criteria are met
         std::env::remove_var("MINIX_NORMAL_EQNS");
-        assert!(!should_use_normal_equations(10, 100, &cones));
-
-        // With env var set, check structural criteria
-        std::env::set_var("MINIX_NORMAL_EQNS", "1");
 
         // Tall problem with only NonNeg cones - should use
         assert!(should_use_normal_equations(10, 100, &cones));
@@ -271,6 +267,10 @@ mod tests {
         // n too large - should not use
         let cones_large = vec![ConeSpec::NonNeg { dim: 10000 }];
         assert!(!should_use_normal_equations(600, 10000, &cones_large));
+
+        // With MINIX_NORMAL_EQNS=0, should always be disabled
+        std::env::set_var("MINIX_NORMAL_EQNS", "0");
+        assert!(!should_use_normal_equations(10, 100, &cones));
 
         // Clean up
         std::env::remove_var("MINIX_NORMAL_EQNS");
