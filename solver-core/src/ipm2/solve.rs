@@ -270,6 +270,15 @@ pub fn solve_ipm2(
         }
     }
 
+    // Compute max diagonal BEFORE scaling for Clarabel-style proportional regularization
+    let p_max_diag_before_scaling = if let Some(p_mat) = prob.P.as_ref() {
+        p_mat.iter()
+            .filter_map(|(&val, (row, col))| if row == col { Some(val.abs()) } else { None })
+            .fold(1.0_f64, f64::max)
+    } else {
+        1.0
+    };
+
     // Apply Ruiz equilibration
     let (a_scaled, p_scaled, q_scaled, b_scaled, scaling) = equilibrate(
         &prob.A,
@@ -509,6 +518,16 @@ pub fn solve_ipm2(
     reg_policy.dynamic_min_pivot = settings.dynamic_reg_min_pivot;
     reg_policy.polish_static_reg =
         (reg_policy.static_reg * 0.01).max(reg_policy.static_reg_min);
+
+    // Use max_diag from ORIGINAL P (before scaling) for Clarabel-style proportional regularization
+    reg_policy.max_diag = p_max_diag_before_scaling;
+    if diag.is_debug() {
+        eprintln!(
+            "prop_reg: max_diag={:.3e} (pre-scale) prop_static_reg={:.3e} use_proportional={}",
+            reg_policy.max_diag, reg_policy.proportional_static_reg(), reg_policy.use_proportional
+        );
+    }
+
     let mut reg_state = reg_policy.init_state(reg_scale);
     if has_psd && diag.is_debug() {
         eprintln!(
