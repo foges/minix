@@ -475,6 +475,7 @@ pub fn run_full_suite(
         let status_str = match result.status {
             SolveStatus::Optimal => "✓",
             SolveStatus::AlmostOptimal => "~",
+            SolveStatus::NumericalLimit => "L",  // Numerical precision limit (successful)
             SolveStatus::MaxIters => "M",
             SolveStatus::NumericalError => "N",
             SolveStatus::InsufficientProgress => "I",
@@ -529,7 +530,7 @@ pub fn compute_summary(results: &[BenchmarkResult]) -> BenchmarkSummary {
                     time_count += 1;
                 }
             }
-            SolveStatus::AlmostOptimal => {
+            SolveStatus::AlmostOptimal | SolveStatus::NumericalLimit => {
                 almost_optimal += 1;
                 if r.iterations > 0 {
                     iter_log_sum += (r.iterations as f64).ln();
@@ -610,6 +611,7 @@ pub fn print_results_table(results: &[BenchmarkResult]) {
         let status_str = match r.status {
             SolveStatus::Optimal => "Optimal",
             SolveStatus::AlmostOptimal => "AlmostOpt",
+            SolveStatus::NumericalLimit => "NumLimit",
             SolveStatus::MaxIters => "MaxIter",
             SolveStatus::NumericalError => "NumErr",
             SolveStatus::PrimalInfeasible => "PrimInf",

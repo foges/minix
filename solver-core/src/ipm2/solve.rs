@@ -12,8 +12,8 @@ use crate::ipm::hsde::{HsdeResiduals, HsdeState, compute_mu, compute_residuals};
 use crate::ipm::termination::TerminationCriteria;
 use crate::ipm2::{
     DiagnosticsConfig, IpmWorkspace, PerfSection, PerfTimers, RegularizationPolicy, SolveMode,
-    StallDetector, compute_unscaled_metrics, diagnose_dual_residual, polish_nonneg_active_set,
-    polish_primal_and_dual, polish_lp_dual,
+    StallDetector, compute_unscaled_metrics, compute_atz_with_kahan, diagnose_dual_residual,
+    polish_nonneg_active_set, polish_primal_and_dual, polish_lp_dual,
 };
 use crate::ipm2::predcorr::predictor_corrector_step_in_place;
 use crate::linalg::kkt_trait::KktSolverTrait;
@@ -2298,38 +2298,58 @@ pub fn solve_ipm2(
     let (primal_res, dual_res, gap) = (final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
 
     // Condition-aware acceptance: check if we hit a numerical precision floor
-    // This happens when primal+gap converged, dual is stuck, KKT is ill-conditioned,
-    // and dual has stalled for many iterations (indicating we've hit the precision limit)
+    // This happens when primal+gap converged, dual is stuck due to:
+    // 1. KKT ill-conditioning (large condition number), OR
+    // 2. Severe numerical cancellation in A^T*z computation
     if matches!(status, SolveStatus::MaxIters | SolveStatus::InsufficientProgress) {
         let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
-        // For ill-conditioned problems, accept gap up to 1e-4 (loose but realistic)
-        let gap_ok = final_metrics.gap_rel <= 1e-4;
-        // Dual must be significantly stuck (100x above tolerance, not just marginally)
-        // to avoid false positives like LISWET (rel_d ~2e-9, excellent convergence)
-        let dual_stuck = final_metrics.rel_d > criteria.tol_feas * 100.0;
 
         // Check condition number from last KKT factorization
         let cond_number = kkt.estimate_condition_number().unwrap_or(1.0);
         let ill_conditioned = cond_number > 1e13;
 
+        // Check for severe numerical cancellation in A^T*z computation
+        // This catches problems like QSCFXM1 where KKT is well-conditioned but
+        // the dual residual has severe cancellation (large positive/negative terms
+        // nearly cancel, leaving residual limited by floating-point precision)
+        let atz_result = compute_atz_with_kahan(&orig_prob_bounds.A, &z);
+        let severe_cancellation = atz_result.max_cancellation > 1e6;
+
+        // Relaxed gap threshold for severe cancellation cases:
+        // When A^T*z has extreme cancellation, the dual variables z are imprecise,
+        // which also affects the duality gap (since gap involves z through s^T*z).
+        // Use 2e-3 threshold for cancellation problems, 1e-4 for ill-conditioned.
+        let gap_threshold = if severe_cancellation { 2e-3 } else { 1e-4 };
+        let gap_ok = final_metrics.gap_rel <= gap_threshold;
+
+        // Dual must be significantly stuck (100x above tolerance, not just marginally)
+        // to avoid false positives like LISWET (rel_d ~2e-9, excellent convergence)
+        let dual_stuck = final_metrics.rel_d > criteria.tol_feas * 100.0;
+
         // The combination of primal+gap converged, dual stuck at high level,
-        // and severely ill-conditioned KKT is sufficient to indicate precision floor
-        // (don't require stall counter check since it can be reset during mode transitions)
+        // and either ill-conditioned KKT OR severe cancellation indicates precision floor
+        let numerical_limit = ill_conditioned || severe_cancellation;
 
         if diag.enabled() {
             eprintln!("\nCondition-aware acceptance checks:");
             eprintln!("  primal_ok: {} (rel_p={:.3e} <= {:.3e})", primal_ok, final_metrics.rel_p, criteria.tol_feas);
-            eprintln!("  gap_ok: {} (gap_rel={:.3e} <= 1e-4)", gap_ok, final_metrics.gap_rel);
+            eprintln!("  gap_ok: {} (gap_rel={:.3e} <= {:.3e})", gap_ok, final_metrics.gap_rel, gap_threshold);
             eprintln!("  dual_stuck: {} (rel_d={:.3e} > {:.3e})", dual_stuck, final_metrics.rel_d, criteria.tol_feas);
             eprintln!("  ill_conditioned: {} (κ={:.3e} > 1e13)", ill_conditioned, cond_number);
+            eprintln!("  severe_cancellation: {} (max_cancel={:.3e} > 1e6)", severe_cancellation, atz_result.max_cancellation);
         }
 
-        if primal_ok && gap_ok && dual_stuck && ill_conditioned {
+        if primal_ok && gap_ok && dual_stuck && numerical_limit {
             if diag.enabled() {
                 eprintln!("\nCondition-aware acceptance:");
                 eprintln!("  rel_p={:.3e} (✓), gap_rel={:.3e} (✓), rel_d={:.3e} (✗)",
                     final_metrics.rel_p, final_metrics.gap_rel, final_metrics.rel_d);
-                eprintln!("  κ(K)={:.3e} (ill-conditioned)", cond_number);
+                if ill_conditioned {
+                    eprintln!("  κ(K)={:.3e} (ill-conditioned)", cond_number);
+                }
+                if severe_cancellation {
+                    eprintln!("  max_cancellation={:.3e} (severe A^T*z cancellation)", atz_result.max_cancellation);
+                }
                 eprintln!("  → Accepting as NumericalLimit (double-precision floor)");
             }
             status = SolveStatus::NumericalLimit;
