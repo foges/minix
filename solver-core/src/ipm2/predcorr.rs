@@ -1520,14 +1520,17 @@ pub fn predictor_corrector_step_in_place(
                 ws.rhs_z[i] = ws.d_s_comb[i] - feas_weight * residuals.r_z[i];
             }
 
-            kkt.solve_refined(
-                &factor,
-                &ws.rhs_x,
-                &ws.rhs_z,
-                &mut ws.dx,
-                &mut ws.dz,
-                refine_iters,
-            );
+            {
+                let _g = timers.scoped(PerfSection::Corrector);
+                kkt.solve_refined(
+                    &factor,
+                    &ws.rhs_x,
+                    &ws.rhs_z,
+                    &mut ws.dx,
+                    &mut ws.dz,
+                    refine_iters,
+                );
+            }
 
             let d_tau_corr = feas_weight * residuals.r_tau;
 

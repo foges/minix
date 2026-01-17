@@ -280,11 +280,15 @@ impl KktBackend for FaerLdlBackend {
     fn symbolic_factorization(&mut self, kkt: &SparseCsc) -> Result<(), BackendError> {
         self.n = kkt.cols();
 
-        // Check if we should use CAMD or faer's AMD
-        // Default to faer's AMD - it produces better supernodal structure despite more fill
-        let use_camd = std::env::var("MINIX_USE_CAMD")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(false);
+        // Check if we should use CAMD or faer's AMD.
+        // CAMD produces less fill-in and is faster for large problems (n > 10000).
+        // faer's AMD has less permutation overhead and is faster for small problems.
+        // Default: auto-select based on problem size. Override with MINIX_USE_CAMD=0|1.
+        let use_camd = match std::env::var("MINIX_USE_CAMD").as_deref() {
+            Ok("1") | Ok("true") => true,
+            Ok("0") | Ok("false") => false,
+            _ => self.n > 20_000, // Auto: CAMD for large problems
+        };
 
         let ordering = if use_camd {
             // Compute CAMD ordering and pre-permute

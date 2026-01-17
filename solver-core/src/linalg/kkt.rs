@@ -17,7 +17,9 @@
 //! The solver implements the two-solve strategy from §5.4.1 of the design doc
 //! for efficient predictor-corrector steps.
 
-use super::backend::{BackendError, KktBackend, QdldlBackend};
+use super::backend::{BackendError, KktBackend};
+#[cfg(not(any(feature = "faer", feature = "suitesparse-ldl")))]
+use super::backend::QdldlBackend;
 use super::kkt_trait::KktSolverTrait;
 use super::sparse::{SparseCsc, SparseSymmetricCsc};
 use crate::scaling::ScalingBlock;
@@ -2098,13 +2100,24 @@ impl<B: KktBackend> KktSolverTrait for KktSolverImpl<B> {
     }
 }
 
-#[cfg(feature = "suitesparse-ldl")]
+// Backend selection priority: faer > suitesparse-ldl > qdldl
+// faer provides parallel supernodal factorization (best performance)
+// suitesparse-ldl is a fallback high-quality option
+// qdldl is the default pure-Rust fallback
+
+#[cfg(feature = "faer")]
+use super::backends::FaerLdlBackend;
+
+#[cfg(feature = "faer")]
+type DefaultBackend = FaerLdlBackend;
+
+#[cfg(all(feature = "suitesparse-ldl", not(feature = "faer")))]
 use super::backends::SuiteSparseLdlBackend;
 
-#[cfg(feature = "suitesparse-ldl")]
+#[cfg(all(feature = "suitesparse-ldl", not(feature = "faer")))]
 type DefaultBackend = SuiteSparseLdlBackend;
 
-#[cfg(not(feature = "suitesparse-ldl"))]
+#[cfg(not(any(feature = "faer", feature = "suitesparse-ldl")))]
 type DefaultBackend = QdldlBackend;
 
 pub type KktSolver = KktSolverImpl<DefaultBackend>;
