@@ -27,6 +27,10 @@ sprs_suitesparse_camd = "0.3.0"
 sprs_suitesparse_ldl = "0.8.0"
 suitesparse_camd_sys = { version = "0.1.1", features = ["static"] }
 
+# Faer - high-performance linear algebra with parallel sparse solvers
+faer = "0.21"
+faer-traits = "0.21"
+
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"
