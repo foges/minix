@@ -1601,6 +1601,7 @@ pub fn predictor_corrector_step_in_place(
         let tau_old = state.tau;
         dkappa = -(d_kappa_corr + state.kappa * dtau) / tau_old;
 
+        let _ls_guard = timers.scoped(PerfSection::LineSearch);
         alpha_sz = compute_step_size(&state.s, &ws.ds, &state.z, &ws.dz, cones, 1.0);
         alpha = alpha_sz;
         alpha_tau = f64::INFINITY;
@@ -1872,6 +1873,7 @@ pub fn predictor_corrector_step_in_place(
     // ======================================================================
     // Step 7: Update state
     // ======================================================================
+    let _state_guard = timers.scoped(PerfSection::StateUpdate);
     for i in 0..n {
         state.x[i] += alpha * ws.dx[i];
     }
@@ -2079,22 +2081,13 @@ fn compute_centering_parameter(
     alpha_aff: f64,
     _mu: f64,
     _mu_aff: f64,
-    barrier_degree: usize,
+    _barrier_degree: usize,
 ) -> f64 {
-    if barrier_degree == 0 {
-        return 0.0;
-    }
-
-    // Use Clarabel's centering formula: σ = (1 - α)³
-    // This is more robust than Mehrotra's (μ_aff/μ)³ because it only depends on
-    // step length (geometry), not on potentially ill-conditioned μ estimates.
+    // Match Clarabel's centering formula: σ = (1 - α)³ with no floor.
     // Small α (blocked step) → σ ≈ 1 (heavy centering)
     // Large α (free step) → σ ≈ 0 (aggressive toward boundary)
-    let sigma_min = 1e-3;
-    let sigma_max = 0.999;
     let sigma = (1.0 - alpha_aff).powi(3);
-
-    sigma.max(sigma_min).min(sigma_max)
+    sigma.min(0.999)
 }
 
 /// Adaptive centering parameter that reduces centering when close to convergence.
@@ -2103,41 +2096,15 @@ fn compute_centering_parameter(
 /// residuals and complementarity gap are small, speeding up convergence.
 fn compute_centering_parameter_adaptive(
     alpha_aff: f64,
-    mu: f64,
+    _mu: f64,
     _mu_aff: f64,
-    barrier_degree: usize,
-    residuals: &HsdeResiduals,
+    _barrier_degree: usize,
+    _residuals: &HsdeResiduals,
 ) -> f64 {
-    if barrier_degree == 0 {
-        return 0.0;
-    }
-
-    // Use Clarabel's centering formula: σ = (1 - α)³
-    let sigma_base = (1.0 - alpha_aff).powi(3);
-
-    // Adaptive sigma_min based on progress
-    // When close to convergence (small mu and small residuals), use smaller sigma_min
-    // to allow less aggressive centering
-    let r_x_norm = residuals.r_x.iter().map(|&x| x.abs()).fold(0.0_f64, f64::max);
-    let r_z_norm = residuals.r_z.iter().map(|&x| x.abs()).fold(0.0_f64, f64::max);
-    let res_norm = r_x_norm.max(r_z_norm).max(residuals.r_tau.abs());
-
-    // Compute adaptive sigma_min:
-    // - Far from convergence (res > 1e-4 or mu > 1e-4): sigma_min = 1e-3 (standard)
-    // - Close to convergence (res < 1e-6 and mu < 1e-6): sigma_min = 1e-5 (aggressive)
-    // - In between: interpolate
-    let sigma_min = if res_norm > 1e-4 || mu > 1e-4 {
-        1e-3  // Standard centering far from optimum
-    } else if res_norm < 1e-6 && mu < 1e-6 {
-        1e-5  // Aggressive (less centering) near optimum
-    } else {
-        // Interpolate between 1e-5 and 1e-3 based on progress
-        let progress = ((res_norm.max(mu) - 1e-6) / (1e-4 - 1e-6)).clamp(0.0, 1.0);
-        1e-5 + progress * (1e-3 - 1e-5)
-    };
-
-    let sigma_max = 0.999;
-    sigma_base.max(sigma_min).min(sigma_max)
+    // Match Clarabel's centering formula: σ = (1 - α)³ with no floor.
+    // The centering parameter naturally decreases when we're taking good steps (large α).
+    let sigma = (1.0 - alpha_aff).powi(3);
+    sigma.min(0.999)
 }
 
 /// Apply proximity-based step size control to keep iterates close to central path.
@@ -2270,4 +2237,44 @@ fn apply_proximity_step_control(
 
     // If we exhausted backtracks, return the reduced alpha
     alpha
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that centering parameter follows Clarabel formula σ = (1-α)³ with no floor.
+    /// This is critical: a sigma floor causes stalls on ill-conditioned problems (CVXQP1_L).
+    #[test]
+    fn test_centering_parameter_no_floor() {
+        // With α = 0.99, sigma should be (0.01)³ = 1e-6, NOT floored at 1e-3
+        let sigma = compute_centering_parameter(0.99, 1.0, 0.1, 1000);
+        assert!(sigma < 1e-5, "sigma should be ~1e-6 for α=0.99, got {}", sigma);
+        assert!(sigma > 1e-8, "sigma should be positive, got {}", sigma);
+
+        // With α = 0.999, sigma should be (0.001)³ = 1e-9
+        let sigma = compute_centering_parameter(0.999, 1.0, 0.1, 1000);
+        assert!(sigma < 1e-8, "sigma should be ~1e-9 for α=0.999, got {}", sigma);
+
+        // With α = 0.5, sigma should be (0.5)³ = 0.125
+        let sigma = compute_centering_parameter(0.5, 1.0, 0.5, 1000);
+        assert!((sigma - 0.125).abs() < 1e-10, "sigma should be 0.125 for α=0.5, got {}", sigma);
+
+        // Sigma should be capped at 0.999 (not 1.0)
+        let sigma = compute_centering_parameter(0.0, 1.0, 1.0, 1000);
+        assert!(sigma <= 0.999, "sigma should be capped at 0.999, got {}", sigma);
+    }
+
+    /// Test that adaptive centering parameter also has no floor.
+    #[test]
+    fn test_centering_parameter_adaptive_no_floor() {
+        let residuals = HsdeResiduals {
+            r_x: vec![0.0; 10],
+            r_z: vec![0.0; 10],
+            r_tau: 0.0,
+        };
+
+        let sigma = compute_centering_parameter_adaptive(0.99, 1.0, 0.1, 1000, &residuals);
+        assert!(sigma < 1e-5, "adaptive sigma should be ~1e-6 for α=0.99, got {}", sigma);
+    }
 }

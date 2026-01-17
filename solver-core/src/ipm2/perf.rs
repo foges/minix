@@ -7,7 +7,13 @@ pub enum PerfSection {
     KktUpdate,
     Factorization,
     Solve,
+    LineSearch,
+    StateUpdate,
+    Corrector,
+    PreStep,
+    PostStep,
     Termination,
+    LoopEnd,
     Other,
 }
 
@@ -18,7 +24,13 @@ pub struct PerfTimers {
     pub kkt_update: Duration,
     pub factorization: Duration,
     pub solve: Duration,
+    pub line_search: Duration,
+    pub state_update: Duration,
+    pub corrector: Duration,
+    pub pre_step: Duration,
+    pub post_step: Duration,
     pub termination: Duration,
+    pub loop_end: Duration,
     pub other: Duration,
 }
 
@@ -34,7 +46,13 @@ impl PerfTimers {
             PerfSection::KktUpdate => self.kkt_update += dt,
             PerfSection::Factorization => self.factorization += dt,
             PerfSection::Solve => self.solve += dt,
+            PerfSection::LineSearch => self.line_search += dt,
+            PerfSection::StateUpdate => self.state_update += dt,
+            PerfSection::Corrector => self.corrector += dt,
+            PerfSection::PreStep => self.pre_step += dt,
+            PerfSection::PostStep => self.post_step += dt,
             PerfSection::Termination => self.termination += dt,
+            PerfSection::LoopEnd => self.loop_end += dt,
             PerfSection::Other => self.other += dt,
         }
     }

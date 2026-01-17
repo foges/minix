@@ -562,6 +562,119 @@ pub fn solve_ipm2(
         return Err(format!("KKT symbolic factorization failed: {}", e).into());
     }
 
+    // Clarabel-style initial point: solve KKT with identity scaling.
+    // For QP: [P+ε, A^T; A, -(I+ε)] * [x; z] = [-q; b], then s = -z
+    // For LP: Same with P=0, but solve two systems to get (x, s) and z separately
+    // This gives a better starting point than x=0, s=z=e.
+    let use_kkt_init = std::env::var("MINIX_KKT_INIT")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true);  // Default: enabled
+
+    if use_kkt_init {
+        // ws.scaling already contains identity scaling from init_cones
+        if let Err(e) = kkt.update_numeric(scaled_prob.P.as_ref(), &scaled_prob.A, &ws.scaling) {
+            if diag.is_verbose() {
+                eprintln!("KKT init point: update_numeric failed ({}), using simple init", e);
+            }
+        } else if let Ok(factor) = kkt.factorize() {
+            // Allocate solution vectors
+            let mut sol_x = vec![0.0; n];
+            let mut sol_z = vec![0.0; m];
+
+            // RHS: [-q; b]
+            let rhs_x: Vec<f64> = scaled_prob.q.iter().map(|&v| -v).collect();
+            let rhs_z: Vec<f64> = scaled_prob.b.clone();
+
+            // Solve KKT system
+            kkt.solve_refined(&factor, &rhs_x, &rhs_z, &mut sol_x, &mut sol_z, 3);
+
+            // Check solution quality - use norms relative to problem data
+            let x_norm: f64 = sol_x.iter().map(|&v| v * v).sum::<f64>().sqrt();
+            let z_norm: f64 = sol_z.iter().map(|&v| v * v).sum::<f64>().sqrt();
+            let q_norm: f64 = scaled_prob.q.iter().map(|&v| v * v).sum::<f64>().sqrt().max(1.0);
+            let b_norm: f64 = scaled_prob.b.iter().map(|&v| v * v).sum::<f64>().sqrt().max(1.0);
+
+            let x_finite = sol_x.iter().all(|&v| v.is_finite());
+            let z_finite = sol_z.iter().all(|&v| v.is_finite());
+            // Use more conservative bounds: solution should be comparable to problem data
+            let x_reasonable = x_norm < 1000.0 * (q_norm + b_norm);
+            let z_reasonable = z_norm < 1000.0 * (q_norm + b_norm);
+
+            if diag.is_debug() {
+                eprintln!(
+                    "KKT init: |x|={:.3e}, |z|={:.3e}, |q|={:.3e}, |b|={:.3e}, x_ok={}, z_ok={}",
+                    x_norm, z_norm, q_norm, b_norm, x_reasonable, z_reasonable
+                );
+            }
+
+            if x_finite && z_finite && x_reasonable && z_reasonable {
+                // Apply Clarabel-style initialization:
+                // Use x from KKT solution
+                state.x.copy_from_slice(&sol_x);
+
+                // For s and z: use the Clarabel symmetric initialization approach.
+                // First set s = -z (for primal feasibility A*x + s ≈ b),
+                // then shift both s and z to be strictly in the cone interior.
+                for i in 0..m {
+                    state.s[i] = -sol_z[i];  // s = -z for primal feasibility
+                    state.z[i] = sol_z[i];   // Keep z from solution
+                }
+
+                // Clarabel-style symmetric_initialization:
+                // Shift s and z so that ALL components are >= target margin.
+                // This preserves the relative structure while ensuring cone interior.
+                let target_margin = 1.0;
+                let mut offset = 0;
+                for cone in &cones {
+                    let dim = cone.dim();
+                    if cone.barrier_degree() == 0 {
+                        // Zero cone: s must be 0, z can be anything
+                        for i in offset..offset + dim {
+                            state.s[i] = 0.0;
+                        }
+                        offset += dim;
+                        continue;
+                    }
+
+                    // Find minimum values for this cone block
+                    let min_s = state.s[offset..offset + dim]
+                        .iter()
+                        .copied()
+                        .fold(f64::INFINITY, f64::min);
+                    let min_z = state.z[offset..offset + dim]
+                        .iter()
+                        .copied()
+                        .fold(f64::INFINITY, f64::min);
+
+                    // Shift all components by (target - min) if min < target
+                    // This makes the minimum exactly equal to target
+                    if min_s < target_margin {
+                        let shift = target_margin - min_s;
+                        for i in offset..offset + dim {
+                            state.s[i] += shift;
+                        }
+                    }
+                    if min_z < target_margin {
+                        let shift = target_margin - min_z;
+                        for i in offset..offset + dim {
+                            state.z[i] += shift;
+                        }
+                    }
+
+                    offset += dim;
+                }
+
+                if diag.is_verbose() {
+                    eprintln!("KKT init point: |x|={:.3e}, |z|={:.3e}", x_norm, z_norm);
+                }
+            } else if diag.is_verbose() {
+                eprintln!("KKT init point: solution out of bounds, using simple init");
+            }
+        } else if diag.is_verbose() {
+            eprintln!("KKT init point: factorize failed, using simple init");
+        }
+    }
+
     // Termination criteria
     let criteria = TerminationCriteria {
         tol_feas: settings.tol_feas,
@@ -634,8 +747,14 @@ pub fn solve_ipm2(
     // Skip polish when chordal decomposition is active or condition is already high.
     // Polish can turn a solved problem into a failure when KKT is ill-conditioned.
     let mut skip_polish = chordal_active;
-    let mut last_condition_number: f64 = 1.0;
-    let mut prev_condition_number: f64 = 1.0;  // Track previous for rate-of-change detection
+    // Initialize both to high values so first real measurement doesn't spuriously trigger "rising" check.
+    // The condition-rising check compares last > prev*10. Since prev = last at each update,
+    // we need both high so the first two iterations don't trigger.
+    let mut last_condition_number: f64 = 1e18;
+    let mut prev_condition_number: f64 = 1e18;
+
+    // Pre-allocate step_settings once (avoids clone per iteration)
+    let mut step_settings = settings.clone();
 
     while iter < effective_max_iter {
         // Check time limit
@@ -655,6 +774,9 @@ pub fn solve_ipm2(
             compute_residuals(&scaled_prob, &state, &mut residuals);
         }
 
+        // Pre-step processing (regularization, mode handling, etc.)
+        let _pre_step_guard = timers.scoped(PerfSection::PreStep);
+
         // CLARABEL-style iteration logging (always in verbose mode)
         // Print header on first iteration
         if diag.is_verbose() && iter == 0 {
@@ -664,8 +786,8 @@ pub fn solve_ipm2(
         }
 
         // Compute and print metrics every iteration in verbose mode
-        let current_mu = compute_mu(&state, barrier_degree);
         if diag.is_verbose() {
+            let current_mu = compute_mu(&state, barrier_degree);
             let mut rp_temp = vec![0.0; m];
             let mut rd_temp = vec![0.0; n];
             let mut px_temp = vec![0.0; n];
@@ -781,11 +903,12 @@ pub fn solve_ipm2(
                 .map_err(|e| format!("KKT reg update failed: {}", e))?;
         }
 
-        let mut step_settings = settings.clone();
+        // Reset step_settings to base values (avoid clone per iteration)
         step_settings.static_reg = reg_state.static_reg_eff;
         step_settings.kkt_refine_iters = reg_state.refine_iters;
         step_settings.feas_weight_floor = settings.feas_weight_floor;
         step_settings.sigma_max = settings.sigma_max;
+        step_settings.max_alpha = settings.max_alpha;
 
         // σ anti-stall: when primal is stalling (rel_p not improving for several iterations
         // when μ is already tiny), cap σ to prevent over-centering which preserves the stall
@@ -847,6 +970,9 @@ pub fn solve_ipm2(
             }
         }
 
+        // Drop pre-step guard before predictor-corrector step
+        drop(_pre_step_guard);
+
         let step_result = predictor_corrector_step_in_place(
             &mut kkt,
             &scaled_prob,
@@ -861,6 +987,9 @@ pub fn solve_ipm2(
             &mut timers,
             iter,
         );
+
+        // Post-step processing (tracked for profiling) - starts right after predictor_corrector_step
+        let _post_step_guard = timers.scoped(PerfSection::PostStep);
 
         let step_result = match step_result {
             Ok(result) => {
@@ -955,6 +1084,7 @@ pub fn solve_ipm2(
                 state.push_to_interior(&cones, recovery_margin);
                 mu = compute_mu(&state, barrier_degree);
                 iter += 1;
+                drop(_post_step_guard);
                 continue;
             }
         };
@@ -1048,21 +1178,24 @@ pub fn solve_ipm2(
         // Check if we're close to convergence - use mu_old and best_rel_p as proxies.
         // best_rel_p/best_rel_d haven't been updated for this iteration yet, but contain
         // the best values from previous iterations.
-        // Skip margin shift if EITHER:
+        // Skip margin shift if ANY of:
         // 1. mu_old < 1e-4: barrier parameter is already very small
-        // 2. best_rel_p < 1e-10: primal residual is excellent (BOYD1-type problems where
-        //    mu stays large due to extreme scaling but pres is already converged)
-        let close_to_convergence = mu_old < 1e-4 || best_rel_p < 1e-10;
+        // 2. best_rel_p < 1e-7: primal residual is close to tolerance (relaxed from 1e-10
+        //    to avoid stalling CVXQP1_L-type problems where rel_p hovers just above tolerance)
+        // 3. best_rel_p < 10 * tolerance: within an order of magnitude of convergence
+        let close_to_convergence = mu_old < 1e-4 || best_rel_p < 1e-7 || best_rel_d < 1e-7;
 
         // Use larger margin for ill-conditioned problems, but skip margin shift entirely
         // when close to convergence.
         // Margin shift is needed for ill-conditioned problems to prevent z-collapse early on,
         // but should NOT be applied when we're already converging (causes QAFIRO/BOYD to stall).
         if !close_to_convergence {
+            // Use smaller margins to match Clarabel's approach (no per-iteration margin shift).
+            // The margin is just a safety net, not a forcing function.
             let adaptive_margin = if cond_estimate > 1e14 {
-                1e-4  // Ill-conditioned: need larger margin to prevent collapse
+                1e-6  // Ill-conditioned: small margin to prevent collapse without stalling
             } else {
-                1e-8  // Well-conditioned: use tiny margin
+                1e-10 // Well-conditioned: tiny margin
             };
             if min_s_now < adaptive_margin || min_z_now < adaptive_margin {
                 state.shift_to_min_margin(&cones, adaptive_margin);
@@ -1202,6 +1335,9 @@ pub fn solve_ipm2(
                 }
             }
         }
+
+        // Drop post-step guard before termination check
+        drop(_post_step_guard);
 
         let mut term_status = None;
         let metrics = {
@@ -1475,6 +1611,9 @@ pub fn solve_ipm2(
             }
             metrics
         };
+
+        // Loop-end processing (stall detection, mode transition, best state tracking)
+        let _loop_end_guard = timers.scoped(PerfSection::LoopEnd);
 
         // Track best achieved metrics AND state for early termination when condition number explodes
         // (especially important for chordal decomposition).
@@ -2195,6 +2334,42 @@ pub fn solve_ipm2(
     // This check happens AFTER polish, so we've given the solver every chance to reach Optimal
     if matches!(status, SolveStatus::MaxIters | SolveStatus::InsufficientProgress) && is_almost_optimal(&final_metrics) {
         status = SolveStatus::AlmostOptimal;
+    }
+
+    // Print timing breakdown in verbose mode
+    if diag.is_verbose() {
+        // Use microseconds for finer resolution
+        let total_us = (solve_time_ms as f64) * 1000.0;
+        let factor_us = timers.factorization.as_micros() as f64;
+        let solve_us = timers.solve.as_micros() as f64;
+        let scaling_us = timers.scaling.as_micros() as f64;
+        let residuals_us = timers.residuals.as_micros() as f64;
+        let kkt_update_us = timers.kkt_update.as_micros() as f64;
+        let line_search_us = timers.line_search.as_micros() as f64;
+        let state_update_us = timers.state_update.as_micros() as f64;
+        let corrector_us = timers.corrector.as_micros() as f64;
+        let pre_step_us = timers.pre_step.as_micros() as f64;
+        let post_step_us = timers.post_step.as_micros() as f64;
+        let termination_us = timers.termination.as_micros() as f64;
+        let loop_end_us = timers.loop_end.as_micros() as f64;
+        let tracked_us = factor_us + solve_us + scaling_us + residuals_us + kkt_update_us
+            + line_search_us + state_update_us + corrector_us + pre_step_us + post_step_us
+            + termination_us + loop_end_us;
+        let other_us = total_us - tracked_us;
+        eprintln!("\nTiming breakdown ({} iterations, {:.1}ms total):", iter, total_us / 1000.0);
+        eprintln!("  KKT factorization: {:.2}ms ({:.1}%)", factor_us / 1000.0, 100.0 * factor_us / total_us);
+        eprintln!("  KKT solve:         {:.2}ms ({:.1}%)", solve_us / 1000.0, 100.0 * solve_us / total_us);
+        eprintln!("  KKT update:        {:.2}ms ({:.1}%)", kkt_update_us / 1000.0, 100.0 * kkt_update_us / total_us);
+        eprintln!("  Cone scaling:      {:.2}ms ({:.1}%)", scaling_us / 1000.0, 100.0 * scaling_us / total_us);
+        eprintln!("  Pre-step:          {:.2}ms ({:.1}%)", pre_step_us / 1000.0, 100.0 * pre_step_us / total_us);
+        eprintln!("  Line search:       {:.2}ms ({:.1}%)", line_search_us / 1000.0, 100.0 * line_search_us / total_us);
+        eprintln!("  State update:      {:.2}ms ({:.1}%)", state_update_us / 1000.0, 100.0 * state_update_us / total_us);
+        eprintln!("  Corrector:         {:.2}ms ({:.1}%)", corrector_us / 1000.0, 100.0 * corrector_us / total_us);
+        eprintln!("  Post-step:         {:.2}ms ({:.1}%)", post_step_us / 1000.0, 100.0 * post_step_us / total_us);
+        eprintln!("  Termination:       {:.2}ms ({:.1}%)", termination_us / 1000.0, 100.0 * termination_us / total_us);
+        eprintln!("  Loop-end:          {:.2}ms ({:.1}%)", loop_end_us / 1000.0, 100.0 * loop_end_us / total_us);
+        eprintln!("  Residuals:         {:.2}ms ({:.1}%)", residuals_us / 1000.0, 100.0 * residuals_us / total_us);
+        eprintln!("  Other:             {:.2}ms ({:.1}%)", other_us / 1000.0, 100.0 * other_us / total_us);
     }
 
     Ok(SolveResult {
