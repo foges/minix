@@ -377,16 +377,11 @@ impl KktBackend for FaerLdlBackend {
     }
 
     fn numeric_factorization(&mut self, kkt: &SparseCsc) -> Result<Self::Factorization, BackendError> {
-        let do_timing = std::env::var("MINIX_FACTOR_TIMING").is_ok();
-        let t0 = if do_timing { Some(std::time::Instant::now()) } else { None };
-
         // Update permuted values from KKT
         let nzval = kkt.data();
         for (orig_idx, &perm_idx) in self.perm_map.iter().enumerate() {
             self.perm_nzval[perm_idx] = nzval[orig_idx];
         }
-
-        let t1 = if do_timing { Some(std::time::Instant::now()) } else { None };
 
         // Add static regularization using cached diagonal positions (O(n) instead of O(nnz))
         let static_reg = self.static_reg;
@@ -397,8 +392,6 @@ impl KktBackend for FaerLdlBackend {
                 }
             }
         }
-
-        let t2 = if do_timing { Some(std::time::Instant::now()) } else { None };
 
         // Create sparse matrix view
         let symb_mat = SymbolicSparseColMatRef::new_checked(
@@ -437,15 +430,6 @@ impl KktBackend for FaerLdlBackend {
                 self.ldlt_params,
             )
             .map_err(|e| BackendError::Message(format!("faer numeric factorization failed: {:?}", e)))?;
-
-        let t3 = if do_timing { Some(std::time::Instant::now()) } else { None };
-
-        if let (Some(t0), Some(t1), Some(t2), Some(t3)) = (t0, t1, t2, t3) {
-            eprintln!("  factor: copy={:.2}ms reg={:.2}ms ldlt={:.2}ms",
-                (t1 - t0).as_secs_f64() * 1000.0,
-                (t2 - t1).as_secs_f64() * 1000.0,
-                (t3 - t2).as_secs_f64() * 1000.0);
-        }
 
         Ok(())
     }
