@@ -118,4 +118,8 @@ impl KktBackend for SuiteSparseLdlBackend {
     fn dynamic_bumps(&self) -> u64 {
         0
     }
+
+    fn estimate_condition_number(&self) -> Option<f64> {
+        None
+    }
 }

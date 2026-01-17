@@ -60,6 +60,9 @@ pub struct FaerLdlBackend {
 
     // Track dynamic regularization bumps
     dynamic_bump_count: u64,
+
+    // Whether we need to manually permute (true when using CAMD, false when using faer's AMD)
+    needs_manual_perm: bool,
 }
 
 impl FaerLdlBackend {
@@ -255,6 +258,7 @@ impl KktBackend for FaerLdlBackend {
             parallelism,
             ldlt_params: Spec::default(),
             dynamic_bump_count: 0,
+            needs_manual_perm: true, // Default to CAMD ordering with manual permutation
         }
     }
 
@@ -276,24 +280,50 @@ impl KktBackend for FaerLdlBackend {
     fn symbolic_factorization(&mut self, kkt: &SparseCsc) -> Result<(), BackendError> {
         self.n = kkt.cols();
 
-        // Compute AMD ordering
-        let (perm, iperm) = Self::compute_amd_ordering(kkt);
-        self.perm = perm;
-        self.iperm = iperm;
+        // Check if we should use CAMD or faer's AMD
+        // Default to faer's AMD - it produces better supernodal structure despite more fill
+        let use_camd = std::env::var("MINIX_USE_CAMD")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
 
-        // Permute matrix
-        let indptr = kkt.indptr();
-        let colptr = indptr.raw_storage();
-        let rowval = kkt.indices();
-        let nzval = kkt.data();
+        let ordering = if use_camd {
+            // Compute CAMD ordering and pre-permute
+            let (perm, iperm) = Self::compute_amd_ordering(kkt);
+            self.perm = perm;
+            self.iperm = iperm;
 
-        let (perm_colptr, perm_rowval, perm_nzval, perm_map) =
-            Self::permute_symmetric(colptr, rowval, nzval, &self.iperm);
+            // Permute matrix
+            let indptr = kkt.indptr();
+            let colptr = indptr.raw_storage();
+            let rowval = kkt.indices();
+            let nzval = kkt.data();
 
-        self.perm_colptr = perm_colptr;
-        self.perm_rowval = perm_rowval;
-        self.perm_nzval = perm_nzval;
-        self.perm_map = perm_map;
+            let (perm_colptr, perm_rowval, perm_nzval, perm_map) =
+                Self::permute_symmetric(colptr, rowval, nzval, &self.iperm);
+
+            self.perm_colptr = perm_colptr;
+            self.perm_rowval = perm_rowval;
+            self.perm_nzval = perm_nzval;
+            self.perm_map = perm_map;
+            self.needs_manual_perm = true; // We handle permutation manually
+
+            SymmetricOrdering::Identity // We've already permuted
+        } else {
+            // Let faer compute AMD ordering (no pre-permutation)
+            self.perm = (0..self.n).collect();
+            self.iperm = self.perm.clone();
+
+            // Store matrix directly (no permutation)
+            let indptr = kkt.indptr();
+            let colptr = indptr.raw_storage();
+            self.perm_colptr = colptr.to_vec();
+            self.perm_rowval = kkt.indices().to_vec();
+            self.perm_nzval = kkt.data().to_vec();
+            self.perm_map = (0..self.perm_nzval.len()).collect();
+            self.needs_manual_perm = false; // faer handles permutation internally
+
+            SymmetricOrdering::Amd // Let faer compute optimal ordering
+        };
 
         // Setup diagonal signs and cache diagonal positions for fast regularization
         self.setup_dsigns_and_diag_positions();
@@ -316,13 +346,23 @@ impl KktBackend for FaerLdlBackend {
         let symbolic = factorize_symbolic_cholesky(
             symb_mat,
             Side::Upper,
-            SymmetricOrdering::Identity, // We've already permuted
+            ordering,
             cholesky_params,
         )
         .map_err(|e| BackendError::Message(format!("faer symbolic factorization failed: {:?}", e)))?;
 
         // Allocate space for L*D values
-        self.ld_vals = vec![0.0; symbolic.len_val()];
+        let factor_nnz = symbolic.len_val();
+        self.ld_vals = vec![0.0; factor_nnz];
+
+        // Debug: print matrix stats
+        if std::env::var("MINIX_VERBOSE_KKT").is_ok() ||
+           std::env::var("MINIX_VERBOSE").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0) >= 3 {
+            let matrix_nnz = self.perm_nzval.len();
+            let fill_ratio = factor_nnz as f64 / matrix_nnz as f64;
+            eprintln!("faer: n={} nnz(K)={} nnz(L)={} fill={:.2}x",
+                      self.n, matrix_nnz, factor_nnz, fill_ratio);
+        }
 
         // Allocate workspace
         let req_factor = symbolic.factorize_numeric_ldlt_scratch::<f64>(self.parallelism, self.ldlt_params);
@@ -337,11 +377,16 @@ impl KktBackend for FaerLdlBackend {
     }
 
     fn numeric_factorization(&mut self, kkt: &SparseCsc) -> Result<Self::Factorization, BackendError> {
+        let do_timing = std::env::var("MINIX_FACTOR_TIMING").is_ok();
+        let t0 = if do_timing { Some(std::time::Instant::now()) } else { None };
+
         // Update permuted values from KKT
         let nzval = kkt.data();
         for (orig_idx, &perm_idx) in self.perm_map.iter().enumerate() {
             self.perm_nzval[perm_idx] = nzval[orig_idx];
         }
+
+        let t1 = if do_timing { Some(std::time::Instant::now()) } else { None };
 
         // Add static regularization using cached diagonal positions (O(n) instead of O(nnz))
         let static_reg = self.static_reg;
@@ -352,6 +397,8 @@ impl KktBackend for FaerLdlBackend {
                 }
             }
         }
+
+        let t2 = if do_timing { Some(std::time::Instant::now()) } else { None };
 
         // Create sparse matrix view
         let symb_mat = SymbolicSparseColMatRef::new_checked(
@@ -391,6 +438,15 @@ impl KktBackend for FaerLdlBackend {
             )
             .map_err(|e| BackendError::Message(format!("faer numeric factorization failed: {:?}", e)))?;
 
+        let t3 = if do_timing { Some(std::time::Instant::now()) } else { None };
+
+        if let (Some(t0), Some(t1), Some(t2), Some(t3)) = (t0, t1, t2, t3) {
+            eprintln!("  factor: copy={:.2}ms reg={:.2}ms ldlt={:.2}ms",
+                (t1 - t0).as_secs_f64() * 1000.0,
+                (t2 - t1).as_secs_f64() * 1000.0,
+                (t3 - t2).as_secs_f64() * 1000.0);
+        }
+
         Ok(())
     }
 
@@ -403,10 +459,15 @@ impl KktBackend for FaerLdlBackend {
             }
         };
 
-        // Use sol as scratch space for permuted RHS (avoids allocation)
-        // Permute RHS: sol[i] = rhs[perm[i]]
-        for (i, &p) in self.perm.iter().enumerate() {
-            sol[i] = rhs[p];
+        if self.needs_manual_perm {
+            // CAMD case: we pre-permuted the matrix, so we need to manually permute rhs/sol
+            // Permute RHS: sol[i] = rhs[perm[i]]
+            for (i, &p) in self.perm.iter().enumerate() {
+                sol[i] = rhs[p];
+            }
+        } else {
+            // faer AMD case: just copy rhs to sol
+            sol[..self.n].copy_from_slice(&rhs[..self.n]);
         }
 
         // Solve in place using pre-allocated workspace
@@ -428,19 +489,16 @@ impl KktBackend for FaerLdlBackend {
             MemStack::new(&mut work),
         );
 
-        // Now sol contains the permuted solution. We need to inverse permute.
-        // Use the pre-allocated bperm buffer by copying first.
-        // But wait - we can't mutate self. Let's do it in-place using sol.
-        //
-        // We need: final_sol[perm[i]] = current_sol[i]
-        // This requires a temporary buffer because indices may overlap.
-        //
-        // Alternative: inverse permute in-place using cycle following.
-        // For simplicity, use a small stack allocation for the temp copy.
-        let temp: Vec<f64> = sol[..self.n].to_vec();
-        for (i, &p) in self.perm.iter().enumerate() {
-            sol[p] = temp[i];
+        if self.needs_manual_perm {
+            // CAMD case: inverse permute the solution
+            // We need: final_sol[perm[i]] = current_sol[i]
+            // This requires a temporary buffer because indices may overlap.
+            let temp: Vec<f64> = sol[..self.n].to_vec();
+            for (i, &p) in self.perm.iter().enumerate() {
+                sol[p] = temp[i];
+            }
         }
+        // faer AMD case: faer handles the inverse permutation internally
     }
 
     fn dynamic_bumps(&self) -> u64 {
