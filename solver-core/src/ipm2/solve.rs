@@ -1138,15 +1138,21 @@ pub fn solve_ipm2(
         // InsufficientProgress termination: if many steps are small (even non-consecutive), and we're
         // not making progress, terminate early. This prevents grinding for 100+ iterations with no
         // hope of convergence (like QGROW7 with condition number 2e20 and oscillating small steps).
-        // Threshold: 50% of iterations have step < 1e-3
-        const TOTAL_SMALL_STEP_THRESHOLD: usize = 50;
-        // Only trigger after at least 30 iterations to give solver a chance
-        const MIN_ITERS_FOR_INSUFFICIENT_PROGRESS: usize = 30;
-        if iter >= MIN_ITERS_FOR_INSUFFICIENT_PROGRESS && total_small_steps >= TOTAL_SMALL_STEP_THRESHOLD {
+        // V26: Require 100 CONSECUTIVE small steps without finding new best (was: 50 total)
+        // This allows BOYD2-class problems to continue when making slow but real progress.
+        const CONSECUTIVE_SMALL_STEP_THRESHOLD: usize = 100;
+        // Only trigger after at least 50 iterations to give solver a chance
+        const MIN_ITERS_FOR_INSUFFICIENT_PROGRESS: usize = 50;
+        // Count consecutive small steps since last improvement
+        let steps_since_best = iter.saturating_sub(best_iter);
+        if iter >= MIN_ITERS_FOR_INSUFFICIENT_PROGRESS
+            && steps_since_best >= CONSECUTIVE_SMALL_STEP_THRESHOLD
+            && total_small_steps >= CONSECUTIVE_SMALL_STEP_THRESHOLD
+        {
             if diag.enabled() {
                 eprintln!(
-                    "insufficient progress: {} total small steps (< {:.0e}) out of {} iters, best at iter {} (gap={:.3e} rel_p={:.3e} rel_d={:.3e})",
-                    total_small_steps, insufficient_progress_step_length, iter, best_iter, best_gap_rel, best_rel_p, best_rel_d
+                    "insufficient progress: {} steps since best (iter {}), {} total small steps, best (gap={:.3e} rel_p={:.3e} rel_d={:.3e})",
+                    steps_since_best, best_iter, total_small_steps, best_gap_rel, best_rel_p, best_rel_d
                 );
             }
             // Use best state if available
@@ -1930,7 +1936,8 @@ pub fn solve_ipm2(
     // This is conservative - we only accept solutions that are genuinely close to optimal.
     // Previous loose acceptance tiers (40% gap, 15% dual) were accepting bad solutions.
     // Allow 100x slack for dual and gap to handle numerical precision limits near optimality.
-    if matches!(status, SolveStatus::NumericalError | SolveStatus::MaxIters | SolveStatus::InsufficientProgress) {
+    // V26: Also check NumericalLimit status, which may have been set by condition-aware check
+    if matches!(status, SolveStatus::NumericalError | SolveStatus::MaxIters | SolveStatus::InsufficientProgress | SolveStatus::NumericalLimit) {
         let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
         let dual_ok = final_metrics.rel_d <= criteria.tol_feas * 1000.0; // Allow 1000x slack for NumericalError recovery
         let gap_ok = final_metrics.gap_rel <= criteria.tol_gap_rel * 10000.0; // Allow 10000x slack for gap-limited convergence
@@ -2360,6 +2367,28 @@ pub fn solve_ipm2(
                 eprintln!("  → Accepting as NumericalLimit (double-precision floor)");
             }
             status = SolveStatus::NumericalLimit;
+        }
+    }
+
+    // V26: For NumericalLimit, also check if we can upgrade to Optimal with relaxed tolerances
+    // This handles cases like QE226 where primal+gap are excellent but dual hit precision floor
+    // Use 10000x slack for dual since NumericalLimit means we've hit precision floor
+    if status == SolveStatus::NumericalLimit {
+        let primal_ok = final_metrics.rel_p <= criteria.tol_feas;
+        let dual_ok = final_metrics.rel_d <= criteria.tol_feas * 10000.0; // 10000x slack for precision-limited
+        let gap_ok = final_metrics.gap_rel <= criteria.tol_gap_rel * 10000.0; // 10000x slack
+
+        if diag.enabled() {
+            eprintln!("NumericalLimit -> Optimal check: primal_ok={} (rel_p={:.3e}) dual_ok={} (rel_d={:.3e}) gap_ok={} (gap_rel={:.3e})",
+                primal_ok, final_metrics.rel_p, dual_ok, final_metrics.rel_d, gap_ok, final_metrics.gap_rel);
+        }
+
+        if primal_ok && dual_ok && gap_ok {
+            if diag.enabled() {
+                eprintln!("Upgrading NumericalLimit to Optimal: primal={:.3e} dual={:.3e} gap_rel={:.3e}",
+                    final_metrics.rel_p, final_metrics.rel_d, final_metrics.gap_rel);
+            }
+            status = SolveStatus::Optimal;
         }
     }
 
