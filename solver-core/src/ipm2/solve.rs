@@ -1452,7 +1452,10 @@ pub fn solve_ipm2(
                 let gap_close = metrics.gap_rel <= criteria.tol_gap_rel * 100.0;
 
                 // Case 1: Dual stuck - try dual polish (existing logic)
-                if primal_ok && (gap_ok || gap_close) && !dual_ok && iter >= 10 {
+                // Rate limit: only try every 10 iterations to avoid repeated overhead
+                let should_try_polish = primal_ok && (gap_ok || gap_close) && !dual_ok
+                    && iter >= 10 && iter % 10 == 0;
+                if should_try_polish {
                     // Extract unscaled solution and expand to original dimensions via postsolve
                     // This is necessary because singleton elimination changes vector dimensions
                     let inv_tau = if state.tau > 1e-8 { 1.0 / state.tau } else { 0.0 };
@@ -1532,7 +1535,10 @@ pub fn solve_ipm2(
 
                 // Case 2: Primal stuck - try primal projection polish
                 // When dual is excellent but primal is stuck (YAO-like problems)
-                if !primal_ok && dual_ok && gap_ok && iter >= 20 && stall.primal_stalling() {
+                // Rate limit: only try every 10 iterations to avoid repeated overhead
+                let should_try_primal_polish = !primal_ok && dual_ok && gap_ok
+                    && iter >= 20 && iter % 10 == 0 && stall.primal_stalling();
+                if should_try_primal_polish {
                     // Extract unscaled solution and expand to original dimensions via postsolve
                     let inv_tau = if state.tau > 1e-8 { 1.0 / state.tau } else { 0.0 };
 

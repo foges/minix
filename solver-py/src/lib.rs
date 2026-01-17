@@ -324,6 +324,7 @@ impl From<SolveResult> for MinixResult {
             SolveStatus::TimeLimit => "time_limit",
             SolveStatus::NumericalError => "numerical_error",
             SolveStatus::NumericalLimit => "numerical_limit",
+            SolveStatus::InsufficientProgress => "insufficient_progress",
         };
 
         MinixResult {
