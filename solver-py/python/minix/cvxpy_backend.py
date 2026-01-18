@@ -37,6 +37,8 @@ try:
     import cvxpy.settings as s
     from cvxpy.constraints import ExpCone, NonNeg, PSD, PowCone3D, SOC, Zero
     from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
+    from cvxpy.reductions.solvers import utilities
+    from cvxpy.reductions.solution import Solution, failure_solution
 
     CVXPY_AVAILABLE = True
 except ImportError:
@@ -44,14 +46,118 @@ except ImportError:
     ConicSolver = object  # type: ignore[misc,assignment]
 
 
+def _svec_to_full(lower_tri: np.ndarray, n: int) -> np.ndarray:
+    """Convert svec (scaled lower triangular) format to full matrix.
+
+    The svec format stores the lower triangular part with off-diagonal
+    elements scaled by sqrt(2). This function reverses that transformation.
+
+    Parameters
+    ----------
+    lower_tri : numpy.ndarray
+        A NumPy array of length n*(n+1)//2 representing the lower triangular
+        part of a symmetric matrix in column-major order, with off-diagonal
+        elements scaled by sqrt(2).
+    n : int
+        The size of the full square matrix.
+
+    Returns
+    -------
+    numpy.ndarray
+        A flattened array of length n*n representing the full matrix in
+        column-major (Fortran) order.
+    """
+    full = np.zeros((n, n))
+    full[np.tril_indices(n)] = lower_tri
+    full += full.T
+    full[np.diag_indices(n)] /= 2
+    # Undo sqrt(2) scaling on off-diagonals
+    full[np.tril_indices(n, k=-1)] /= np.sqrt(2)
+    full[np.triu_indices(n, k=1)] /= np.sqrt(2)
+    return np.reshape(full, n * n, order="F")
+
+
+def _svec_cvxpy_to_minix_perm(n: int) -> np.ndarray:
+    """Compute permutation to convert CVXPY svec ordering to Minix ordering.
+
+    CVXPY uses column-major lower triangular: (0,0), (1,0), (2,0), (1,1), (2,1), (2,2)
+    Minix uses column-major upper triangular: (0,0), (0,1), (1,1), (0,2), (1,2), (2,2)
+
+    Returns permutation P such that minix_vec = cvxpy_vec[P]
+    """
+    svec_dim = n * (n + 1) // 2
+
+    # Build CVXPY ordering: column-major lower triangular
+    cvxpy_indices = []  # list of (i, j) pairs in CVXPY order
+    for col in range(n):
+        for row in range(col, n):
+            cvxpy_indices.append((row, col))
+
+    # Build Minix ordering: column-major upper triangular (i <= j)
+    minix_indices = []  # list of (i, j) pairs in Minix order
+    for col in range(n):
+        for row in range(col + 1):
+            minix_indices.append((row, col))
+
+    # For symmetric matrices, (i,j) and (j,i) represent the same element
+    # Normalize to (min, max) for comparison
+    def normalize(pair):
+        return (min(pair), max(pair))
+
+    # Build map from normalized index to CVXPY position
+    cvxpy_pos = {normalize(idx): pos for pos, idx in enumerate(cvxpy_indices)}
+
+    # Build permutation: minix_pos -> cvxpy_pos
+    perm = np.zeros(svec_dim, dtype=np.int64)
+    for minix_pos, idx in enumerate(minix_indices):
+        perm[minix_pos] = cvxpy_pos[normalize(idx)]
+
+    return perm
+
+
+def _svec_minix_to_cvxpy_perm(n: int) -> np.ndarray:
+    """Compute permutation to convert Minix svec ordering to CVXPY ordering.
+
+    Returns permutation P such that cvxpy_vec = minix_vec[P]
+    """
+    svec_dim = n * (n + 1) // 2
+
+    # Build CVXPY ordering: column-major lower triangular
+    cvxpy_indices = []
+    for col in range(n):
+        for row in range(col, n):
+            cvxpy_indices.append((row, col))
+
+    # Build Minix ordering: column-major upper triangular
+    minix_indices = []
+    for col in range(n):
+        for row in range(col + 1):
+            minix_indices.append((row, col))
+
+    def normalize(pair):
+        return (min(pair), max(pair))
+
+    # Build map from normalized index to Minix position
+    minix_pos_map = {normalize(idx): pos for pos, idx in enumerate(minix_indices)}
+
+    # Build permutation: cvxpy_pos -> minix_pos
+    perm = np.zeros(svec_dim, dtype=np.int64)
+    for cvxpy_pos, idx in enumerate(cvxpy_indices):
+        perm[cvxpy_pos] = minix_pos_map[normalize(idx)]
+
+    return perm
+
+
 def _get_status_map() -> dict[str, str]:
     """Map minix status strings to CVXPY status constants."""
     return {
         "optimal": s.OPTIMAL,
+        "almost_optimal": s.OPTIMAL_INACCURATE,
         "primal_infeasible": s.INFEASIBLE,
         "dual_infeasible": s.UNBOUNDED,
         "unbounded": s.UNBOUNDED,
-        "max_iterations": s.OPTIMAL_INACCURATE,  # May have converged close enough
+        "max_iterations": s.OPTIMAL_INACCURATE,
+        "insufficient_progress": s.OPTIMAL_INACCURATE,  # Often still has useful solution
         "time_limit": s.OPTIMAL_INACCURATE,
         "numerical_error": s.SOLVER_ERROR,
     }
@@ -202,6 +308,34 @@ class MINIX(ConicSolver):
         if hasattr(dims, "exp") and dims.exp > 0:
             cones.append(("exp", dims.exp * 3))
 
+        # Apply svec ordering permutation for PSD cones
+        # CVXPY uses column-major lower triangular, Minix uses column-major upper triangular
+        # We need to permute the rows of A and b that correspond to PSD cones
+        psd_perms = []  # Store permutations for converting results back
+        if dims.psd:
+            # Calculate row offset where PSD cones start
+            psd_row_start = dims.zero + dims.nonneg + sum(dims.soc)
+
+            # Build row permutation for all PSD cones
+            row_perm = list(range(psd_row_start))  # Keep non-PSD rows unchanged
+
+            current_offset = psd_row_start
+            for psd_n in dims.psd:
+                svec_dim = psd_n * (psd_n + 1) // 2
+                # Get permutation for this PSD cone
+                perm = _svec_cvxpy_to_minix_perm(psd_n)
+                psd_perms.append((psd_n, perm))
+                # Add permuted row indices
+                for p in perm:
+                    row_perm.append(current_offset + p)
+                current_offset += svec_dim
+
+            # Apply row permutation to A and b
+            A_dense = A.toarray() if sparse.issparse(A) else A
+            A_permuted = A_dense[row_perm, :]
+            A = sparse.csc_matrix(A_permuted)
+            b = b[row_perm]
+
         # Convert to sparse CSC if needed
         if not sparse.issparse(A):
             A = sparse.csc_matrix(A)
@@ -262,11 +396,45 @@ class MINIX(ConicSolver):
             # ConicSolver.invert() expects eq_dual and ineq_dual
             # Split the dual vector based on cone structure
             y = result.y()
+
+            # Apply inverse permutation to convert y back to CVXPY ordering for PSD cones
+            if psd_perms:
+                psd_row_start = dims.zero + dims.nonneg + sum(dims.soc)
+                y_permuted = y.copy()
+                current_offset = psd_row_start
+                for psd_n, cvxpy_to_minix_perm in psd_perms:
+                    svec_dim = psd_n * (psd_n + 1) // 2
+                    # Inverse permutation: cvxpy_vec[i] = minix_vec[perm[i]]
+                    # We have minix_vec and want cvxpy_vec
+                    # Build inverse: minix_to_cvxpy such that cvxpy_vec = minix_vec[minix_to_cvxpy]
+                    minix_to_cvxpy = _svec_minix_to_cvxpy_perm(psd_n)
+                    y_block = y[current_offset:current_offset + svec_dim]
+                    y_permuted[current_offset:current_offset + svec_dim] = y_block[minix_to_cvxpy]
+                    current_offset += svec_dim
+                y = y_permuted
+
             n_eq = dims.zero if dims.zero > 0 else 0
             solution[s.EQ_DUAL] = y[:n_eq] if n_eq > 0 else np.array([])
             solution[s.INEQ_DUAL] = y[n_eq:]
 
         return solution
+
+    @staticmethod
+    def extract_dual_value(result_vec, offset, constraint):
+        """Extract dual value for constraint, handling PSD svec format.
+
+        For PSD constraints, converts from svec (scaled lower triangular)
+        format to full matrix format.
+        """
+        if isinstance(constraint, PSD):
+            dim = constraint.shape[0]
+            svec_dim = dim * (dim + 1) // 2
+            new_offset = offset + svec_dim
+            svec = result_vec[offset:new_offset]
+            full = _svec_to_full(svec, dim)
+            return full, new_offset
+        else:
+            return utilities.extract_dual_value(result_vec, offset, constraint)
 
     def invert(
         self,
@@ -275,9 +443,35 @@ class MINIX(ConicSolver):
     ) -> Solution:
         """Map solver output back to CVXPY solution.
 
-        This uses the parent class's standard inversion.
+        Handles PSD constraint dual variables by converting from svec format.
         """
-        return super().invert(solution, inverse_data)
+        status = solution[s.STATUS]
+
+        if status in s.SOLUTION_PRESENT:
+            opt_val = solution[s.VALUE]
+            primal_vars = {inverse_data[self.VAR_ID]: solution[s.PRIMAL]}
+
+            # Get dual values, using our custom extract for PSD
+            eq_dual = utilities.get_dual_values(
+                solution[s.EQ_DUAL],
+                self.extract_dual_value,
+                inverse_data[self.EQ_CONSTR]
+            )
+            ineq_dual = utilities.get_dual_values(
+                solution[s.INEQ_DUAL],
+                self.extract_dual_value,
+                inverse_data[self.NEQ_CONSTR]
+            )
+            eq_dual.update(ineq_dual)
+            dual_vars = eq_dual
+
+            attr = {
+                s.SOLVE_TIME: solution.get(s.SOLVE_TIME, 0.0),
+                s.NUM_ITERS: solution.get(s.NUM_ITERS, 0),
+            }
+            return Solution(status, opt_val, primal_vars, dual_vars, attr)
+        else:
+            return failure_solution(status)
 
 
 def install() -> None:
@@ -295,7 +489,13 @@ def install() -> None:
 
     from cvxpy.reductions.solvers import defines as slv_def
 
-    slv_def.INSTALLED_SOLVERS["MINIX"] = MINIX
+    # Register in the conic solver map (dict)
+    if "MINIX" not in slv_def.SOLVER_MAP_CONIC:
+        slv_def.SOLVER_MAP_CONIC["MINIX"] = MINIX
+
+    # Also add to installed solvers list if not present
+    if "MINIX" not in slv_def.INSTALLED_SOLVERS:
+        slv_def.INSTALLED_SOLVERS.append("MINIX")
 
 
 def is_installed() -> bool:

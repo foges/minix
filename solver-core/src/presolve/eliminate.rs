@@ -9,6 +9,12 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
     let n = prob.num_vars();
     let m = prob.num_constraints();
 
+    // Check if problem has PSD cones - if so, don't eliminate zero cone singletons
+    // because the resulting fixed variable elimination breaks SDP structure.
+    // The variable x represents a symmetric matrix in svec form, and eliminating
+    // one component leads to incorrect dual residual computation.
+    let has_psd_cones = prob.cones.iter().any(|c| matches!(c, ConeSpec::Psd { .. }));
+
     // Use cone-aware singleton detection to avoid eliminating rows from multi-dimensional cones
     let singletons = detect_singleton_rows_cone_aware(&prob.A, &prob.cones);
     if singletons.singleton_rows.is_empty() {
@@ -53,6 +59,11 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
         }
         match &prob.cones[cone_idx] {
             ConeSpec::Zero { .. } => {
+                // Skip zero cone singleton elimination when PSD cones are present
+                // to avoid breaking SDP structure through fixed variable elimination
+                if has_psd_cones {
+                    continue;
+                }
                 if row.val == 0.0 {
                     continue;
                 }
