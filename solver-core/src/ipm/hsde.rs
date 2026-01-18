@@ -20,8 +20,9 @@
 //!   s ∈ K, z ∈ K*, <s, z> = 0
 //!   τ ≥ 0, κ ≥ 0, τ κ = 0
 
-use crate::cones::ConeKernel;
+use crate::cones::{ConeKernel, ExpCone, PowCone};
 use crate::cones::psd::svec_to_mat;
+use std::any::Any;
 use crate::postsolve::PostsolveMap;
 use crate::presolve::ruiz::RuizScaling;
 use crate::problem::{ProblemData, WarmStart};
@@ -245,56 +246,81 @@ impl HsdeState {
                 let s_slice = &self.s[offset..offset + dim];
                 let z_slice = &self.z[offset..offset + dim];
 
-                // Detect PSD cone: dim = n*(n+1)/2, degree = n
+                // Detect cone types
                 let n_candidate = ((-1.0 + (1.0 + 8.0 * dim as f64).sqrt()) / 2.0).round() as usize;
                 let is_psd = n_candidate > 0 && n_candidate * (n_candidate + 1) / 2 == dim && degree == n_candidate;
+                let is_exp = (cone.as_ref() as &dyn Any).is::<ExpCone>();
+                let is_pow = (cone.as_ref() as &dyn Any).is::<PowCone>();
+                let is_nonsymmetric = is_exp || is_pow;
 
-                // If not interior, reset to unit initialization with margin
-                if !cone.is_interior_primal(s_slice) {
-                    let mut s_unit = vec![0.0; dim];
-                    let mut z_unit = vec![0.0; dim];
-                    cone.unit_initialization(&mut s_unit, &mut z_unit);
-                    for i in 0..dim {
-                        self.s[offset + i] = s_unit[i] * min_margin;
-                    }
-                } else {
-                    // Scale up if minimum margin is too small
-                    // For PSD: compute minimum eigenvalue
-                    // For SOC/Exp/Pow: use element-wise min
-                    let min_s = if is_psd {
-                        let s_mat = svec_to_mat(s_slice, n_candidate);
-                        let eig_s = SymmetricEigen::new(s_mat);
-                        eig_s.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
-                    } else {
-                        s_slice.iter().cloned().fold(f64::INFINITY, f64::min)
-                    };
-                    if min_s < min_margin && min_s > 0.0 {
-                        let scale = min_margin / min_s;
+                // For EXP/POW cones: only reset to unit initialization if not interior.
+                // Don't try to scale by element-wise min since these cones can have negative components.
+                if is_nonsymmetric {
+                    if !cone.is_interior_primal(s_slice) {
+                        let mut s_unit = vec![0.0; dim];
+                        let mut z_unit = vec![0.0; dim];
+                        cone.unit_initialization(&mut s_unit, &mut z_unit);
                         for i in 0..dim {
-                            self.s[offset + i] *= scale;
+                            self.s[offset + i] = s_unit[i] * min_margin;
                         }
                     }
-                }
-
-                if !cone.is_interior_dual(z_slice) {
-                    let mut s_unit = vec![0.0; dim];
-                    let mut z_unit = vec![0.0; dim];
-                    cone.unit_initialization(&mut s_unit, &mut z_unit);
-                    for i in 0..dim {
-                        self.z[offset + i] = z_unit[i] * min_margin;
-                    }
-                } else {
-                    let min_z = if is_psd {
-                        let z_mat = svec_to_mat(z_slice, n_candidate);
-                        let eig_z = SymmetricEigen::new(z_mat);
-                        eig_z.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
-                    } else {
-                        z_slice.iter().cloned().fold(f64::INFINITY, f64::min)
-                    };
-                    if min_z < min_margin && min_z > 0.0 {
-                        let scale = min_margin / min_z;
+                    if !cone.is_interior_dual(z_slice) {
+                        let mut s_unit = vec![0.0; dim];
+                        let mut z_unit = vec![0.0; dim];
+                        cone.unit_initialization(&mut s_unit, &mut z_unit);
                         for i in 0..dim {
-                            self.z[offset + i] *= scale;
+                            self.z[offset + i] = z_unit[i] * min_margin;
+                        }
+                    }
+                    // Skip margin scaling for nonsymmetric cones
+                } else {
+                    // For SOC/PSD: if not interior, reset to unit initialization with margin
+                    if !cone.is_interior_primal(s_slice) {
+                        let mut s_unit = vec![0.0; dim];
+                        let mut z_unit = vec![0.0; dim];
+                        cone.unit_initialization(&mut s_unit, &mut z_unit);
+                        for i in 0..dim {
+                            self.s[offset + i] = s_unit[i] * min_margin;
+                        }
+                    } else {
+                        // Scale up if minimum margin is too small
+                        // For PSD: compute minimum eigenvalue
+                        // For SOC: use element-wise min (all components are positive in interior)
+                        let min_s = if is_psd {
+                            let s_mat = svec_to_mat(s_slice, n_candidate);
+                            let eig_s = SymmetricEigen::new(s_mat);
+                            eig_s.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
+                        } else {
+                            s_slice.iter().cloned().fold(f64::INFINITY, f64::min)
+                        };
+                        if min_s < min_margin && min_s > 0.0 {
+                            let scale = min_margin / min_s;
+                            for i in 0..dim {
+                                self.s[offset + i] *= scale;
+                            }
+                        }
+                    }
+
+                    if !cone.is_interior_dual(z_slice) {
+                        let mut s_unit = vec![0.0; dim];
+                        let mut z_unit = vec![0.0; dim];
+                        cone.unit_initialization(&mut s_unit, &mut z_unit);
+                        for i in 0..dim {
+                            self.z[offset + i] = z_unit[i] * min_margin;
+                        }
+                    } else {
+                        let min_z = if is_psd {
+                            let z_mat = svec_to_mat(z_slice, n_candidate);
+                            let eig_z = SymmetricEigen::new(z_mat);
+                            eig_z.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
+                        } else {
+                            z_slice.iter().cloned().fold(f64::INFINITY, f64::min)
+                        };
+                        if min_z < min_margin && min_z > 0.0 {
+                            let scale = min_margin / min_z;
+                            for i in 0..dim {
+                                self.z[offset + i] *= scale;
+                            }
                         }
                     }
                 }

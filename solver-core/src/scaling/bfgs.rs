@@ -44,7 +44,7 @@ pub fn bfgs_scaling_3d(
     // Try rank-3 scaling first (more stable), fallback to rank-4 if needed
     match bfgs_scaling_3d_rank3(s, z, cone) {
         Ok(scaling) => Ok(scaling),
-        Err(_) => bfgs_scaling_3d_rank4(s, z, cone)
+        Err(_) => bfgs_scaling_3d_rank4(s, z, cone),
     }
 }
 
@@ -181,15 +181,25 @@ fn bfgs_scaling_3d_rank3(
     // Symmetrize (should already be symmetric, but numerical errors)
     let h = symmetrize_mat3(&h);
 
-    // Ensure positive definiteness
+    // Ensure bounded condition number for numerical stability
+    // The KKT system can become ill-conditioned if H has extreme eigenvalue spread.
+    // We limit the condition number to prevent overflow in the solve.
     let min_eig = min_eigenvalue(&h);
-    if !min_eig.is_finite() || min_eig <= 1e-10 {
-        let mut h_shifted = h;
-        let shift = (1e-6 - min_eig).max(1e-6);
-        h_shifted[0] += shift;
-        h_shifted[4] += shift;
-        h_shifted[8] += shift;
-        return Ok(ScalingBlock::Dense3x3 { h: h_shifted });
+    let max_eig = max_eigenvalue(&h);
+    let max_cond = 1e6;  // Maximum allowed condition number (tighter for exp cones)
+
+    // Fallback to identity-like scaling if anything goes wrong
+    let mu_scaled = (s_dot_z / 3.0).abs().max(1.0);
+    let fallback = [mu_scaled, 0.0, 0.0, 0.0, mu_scaled, 0.0, 0.0, 0.0, mu_scaled];
+
+    if !min_eig.is_finite() || !max_eig.is_finite() || min_eig <= 1e-10 {
+        return Ok(ScalingBlock::Dense3x3 { h: fallback });
+    }
+
+    let cond = max_eig / min_eig.max(1e-15);
+    if cond > max_cond {
+        // Condition number way too high - use identity fallback instead of trying to fix
+        return Ok(ScalingBlock::Dense3x3 { h: fallback });
     }
 
     Ok(ScalingBlock::Dense3x3 { h })
@@ -230,6 +240,10 @@ fn bfgs_scaling_3d_rank4(
         h_a[i] = mu * h_star[i];
     }
 
+    // Fallback to identity-like scaling for early returns
+    let mu_fallback = mu.max(1.0);
+    let fallback = [mu_fallback, 0.0, 0.0, 0.0, mu_fallback, 0.0, 0.0, 0.0, mu_fallback];
+
     let zts = [
         dot3(z, s),
         dot3(z, &s_tilde),
@@ -237,7 +251,7 @@ fn bfgs_scaling_3d_rank4(
         dot3(&z_tilde, &s_tilde),
     ];
     let Some(inv_zts) = inv_2x2(zts) else {
-        return Ok(ScalingBlock::Dense3x3 { h: symmetrize_mat3(&h_a) });
+        return Ok(ScalingBlock::Dense3x3 { h: fallback });
     };
 
     let hs0 = mat3_vec(&h_a, s);
@@ -250,7 +264,7 @@ fn bfgs_scaling_3d_rank4(
         dot3(&s_tilde, &hs1),
     ];
     let Some(inv_shas) = inv_2x2(shas) else {
-        return Ok(ScalingBlock::Dense3x3 { h: symmetrize_mat3(&h_a) });
+        return Ok(ScalingBlock::Dense3x3 { h: fallback });
     };
 
     let col0 = add_vec(&scale_vec(z, inv_zts[0]), &scale_vec(&z_tilde, inv_zts[2]));
@@ -266,13 +280,19 @@ fn bfgs_scaling_3d_rank4(
         h[i] = term1[i] + h_a[i] - term2[i];
     }
 
-    let mut h = symmetrize_mat3(&h);
+    let h = symmetrize_mat3(&h);
     let min_eig = min_eigenvalue(&h);
-    if !min_eig.is_finite() || min_eig <= 1e-10 {
-        let shift = (1e-6 - min_eig).max(1e-6);
-        h[0] += shift;
-        h[4] += shift;
-        h[8] += shift;
+    let max_eig = max_eigenvalue(&h);
+    let max_cond = 1e6;  // Maximum allowed condition number (tighter for exp cones)
+
+    if !min_eig.is_finite() || !max_eig.is_finite() || min_eig <= 1e-10 {
+        return Ok(ScalingBlock::Dense3x3 { h: fallback });
+    }
+
+    let cond = max_eig / min_eig.max(1e-15);
+    if cond > max_cond {
+        // Condition number way too high - use identity fallback
+        return Ok(ScalingBlock::Dense3x3 { h: fallback });
     }
 
     Ok(ScalingBlock::Dense3x3 { h })
@@ -345,4 +365,10 @@ fn min_eigenvalue(h: &[f64; 9]) -> f64 {
     let m = DMatrix::<f64>::from_row_slice(3, 3, h);
     let eig = SymmetricEigen::new(m);
     eig.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
+}
+
+fn max_eigenvalue(h: &[f64; 9]) -> f64 {
+    let m = DMatrix::<f64>::from_row_slice(3, 3, h);
+    let eig = SymmetricEigen::new(m);
+    eig.eigenvalues.iter().copied().fold(f64::NEG_INFINITY, f64::max)
 }
