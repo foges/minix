@@ -15,6 +15,12 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
     // one component leads to incorrect dual residual computation.
     let has_psd_cones = prob.cones.iter().any(|c| matches!(c, ConeSpec::Psd { .. }));
 
+    // Check if problem has EXP cones - if so, don't eliminate zero cone singletons
+    // because the resulting zero rows in A cause convergence issues.
+    // When A has zero rows, s[i] = b[i] becomes a hard constraint that interacts
+    // poorly with HSDE rescaling and the BFGS scaling for nonsymmetric cones.
+    let has_exp_cones = prob.cones.iter().any(|c| matches!(c, ConeSpec::Exp { .. }));
+
     // Use cone-aware singleton detection to avoid eliminating rows from multi-dimensional cones
     let singletons = detect_singleton_rows_cone_aware(&prob.A, &prob.cones);
     if singletons.singleton_rows.is_empty() {
@@ -59,9 +65,9 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
         }
         match &prob.cones[cone_idx] {
             ConeSpec::Zero { .. } => {
-                // Skip zero cone singleton elimination when PSD cones are present
-                // to avoid breaking SDP structure through fixed variable elimination
-                if has_psd_cones {
+                // Skip zero cone singleton elimination when PSD or EXP cones are present
+                // to avoid breaking SDP structure or EXP cone convergence
+                if has_psd_cones || has_exp_cones {
                     continue;
                 }
                 if row.val == 0.0 {
@@ -78,6 +84,8 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
                     val: row.val,
                     rhs,
                     kind: RemovedRowKind::Zero,
+                    a_col_entries: Vec::new(), // Populated after kept_rows is known
+                    q_col: prob.q[row.col],
                 });
             }
             ConeSpec::NonNeg { .. } => {}
@@ -93,6 +101,21 @@ pub fn eliminate_singleton_rows(prob: &ProblemData) -> PresolveResult {
             row_map[row] = Some(new_row);
             kept_rows.push(row);
             new_row += 1;
+        }
+    }
+
+    // Populate a_col_entries for removed Zero cone rows (for dual recovery)
+    // z[row] = (-q_col - sum_{j in kept} A[j,col]*z[j]) / A[row,col]
+    for removed in &mut removed_rows {
+        if matches!(removed.kind, RemovedRowKind::Zero) {
+            let col = removed.col;
+            if let Some(col_view) = prob.A.outer_view(col) {
+                for (orig_row, &val) in col_view.iter() {
+                    if let Some(kept_idx) = row_map[orig_row] {
+                        removed.a_col_entries.push((kept_idx, val));
+                    }
+                }
+            }
         }
     }
 

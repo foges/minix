@@ -1,0 +1,209 @@
+You’ve already done the hard part: you isolated a very specific structural difference between truss1 and control1 (the unconstrained PSD entries / zero A-columns), and you gathered iteration-level evidence that the algorithm is “making progress” in some metrics while primal feasibility in the original units is not improving and the objective is completely wrong.
+
+That combination usually means one of two things:
+	1.	you’re not actually solving the original problem (most commonly due to cone-unsafe scaling / unscaling or a mapping bug), or
+	2.	you are solving the right problem, but the Newton/KKT system becomes effectively singular in a free/degenerate subspace, so the IPM chases complementarity and the dual equation while stagnating on feasibility (classic SDP degeneracy / “singular SDP” behavior).
+
+For control1, given your “10 zero columns” observation and the huge “absolute residual not improving” story, I’d treat this as (1) until proven otherwise, because it’s the fastest to validate and the most likely to produce exactly “gap goes to 0 but r_p in original units is huge”.
+
+Below is a concrete plan that typically fixes this class of SDP failures in practice.
+
+⸻
+
+0) Reframe: zero A-columns are not inherently wrong
+
+In SDP form A x = b, x ∈ S_+, it is common that some entries of the matrix variable don’t appear in the linear constraints. That just means:
+	•	the feasible set has a “free” subspace inside the PSD cone,
+	•	the dual slack will have corresponding components pinned by s = c − Aᵀy,
+	•	and the solution may be non-unique.
+
+That should not cause “objective off by 7×” if the solver is solving the correct scaled problem and mapping back correctly.
+
+So the key question becomes:
+
+Are we accidentally applying a transformation that does not preserve the PSD cone, or not inverting it correctly?
+
+That’s where most custom SDP implementations go wrong.
+
+⸻
+
+1) The biggest likely culprit: cone-unsafe scaling (Ruiz / equilibration) applied to PSD variables
+
+Why this matters
+
+For PSD variables, the cone is not separable by coordinates. Scaling individual svec coordinates arbitrarily is not a cone automorphism.
+	•	For NonNeg: coordinate-wise scaling is fine.
+	•	For SOC: scaling must respect the SOC structure.
+	•	For PSD: a cone-preserving scaling is a congruence transform:
+X \mapsto D X D \quad (D \succ 0 \text{ diagonal or more general } D \text{ invertible})
+In svec coordinates, this induces structured per-coordinate scaling of entry (i,j) by d_i d_j — not arbitrary independent factors.
+
+If your equilibration is choosing a different scale for X_{6,7} than what’s implied by a single diagonal D, then in effect you are solving a different cone than PSD in the scaled space. That produces exactly what you’re seeing:
+	•	“nice looking” progress on scaled metrics,
+	•	but after “unscale”, the point is not feasible for the original PSD cone and constraints,
+	•	and the objective is wrong.
+
+The fast test (do this first)
+
+Run control1 with scaling disabled, or with column scaling disabled for PSD variables.
+
+You want to answer:
+Does the solution become qualitatively correct (objective near 17.78, r_p absolute drops) when PSD column scaling is removed?
+
+Even if it takes more iterations, if the answer is “yes”, you’ve found the real root cause.
+
+The minimal fix
+
+Make scaling cone-aware for PSD:
+
+Option A (lowest effort, often enough):
+	•	Allow only one scalar per PSD block for scaling the PSD variable block (i.e., scale the whole block uniformly).
+	•	Still allow row scaling on equality constraints.
+
+This preserves PSD cone membership (since X \mapsto \alpha X is a PSD automorphism).
+
+Option B (better, still pretty doable):
+	•	Implement diagonal congruence scaling for each PSD block:
+	•	choose d \in \mathbb{R}^n_{++},
+	•	scale each svec coordinate (i,j) by d_i d_j (taking svec’s √2 convention into account consistently).
+	•	Use your equilibration logic to update d (not each coordinate independently).
+
+A very pragmatic way to pick d:
+	•	Let w_{ij} = ||A[:, col(i,j)]|| (column norms of the equality constraint matrix in svec basis).
+	•	Solve for u_i = log d_i minimizing
+\sum_{(i,j)} (u_i + u_j + \log w_{ij})^2
+on the graph of matrix indices touched by constraints.
+	•	Then d_i = e^{u_i}.
+
+For a 10×10 block, this is tiny and stable.
+
+⸻
+
+2) Second likely culprit: your “relative residual” normalization is masking real infeasibility
+
+Your log screams this:
+	•	rel_p ~ 3e-5 looks “ok-ish”
+	•	but ||r_p|| (in original units) is ~220 and never improves
+
+That means your denominator for rel_p is exploding (likely because ||x|| or ||s|| is huge), not that constraints are being satisfied.
+
+What to do
+
+For SDPs (and honestly for everything), use “industry standard” residual scalings that don’t allow ||x|| to hide infeasibility:
+
+Typical choices:
+	•	Primal feasibility:
+\text{rel\_p} = \frac{\|Ax-b\|_\infty}{\max(1, \|b\|_\infty)}
+	•	Dual feasibility:
+\text{rel\_d} = \frac{\|A^Ty + s - c\|_\infty}{\max(1, \|c\|_\infty)}
+	•	Gap:
+\text{gap\_rel} = \frac{|c^Tx - b^Ty|}{\max(1, |c^Tx|, |b^Ty|)}
+
+And add an absolute residual check:
+	•	require ||r_p||_∞ <= atol + rtol * max(1, ||b||_∞).
+
+Even if you keep your old rel_p for reporting, you should have a “guard rail” metric that cannot be cheated by norm blow-up.
+
+Why this matters for control1
+
+Even if the solver is truly stuck, you’ll stop fooling yourself about “almost satisfied constraints”, and you can trigger recovery logic based on absolute feasibility stagnation.
+
+⸻
+
+3) The “10 zero columns” does matter — but the right fix is regularization/prox, not elimination
+
+If some coordinates of x don’t appear in A and don’t appear in the objective (c_j = 0, P=0), then those coordinates are:
+	•	not controlled by feasibility,
+	•	not controlled by objective,
+	•	only controlled by the cone + barrier.
+
+As μ gets small, the Newton system can become extremely ill-conditioned in exactly those directions.
+
+The practical fix: add curvature in those directions
+
+Detect “free” coordinates:
+	•	||A[:,j]|| == 0 (or <= ε)
+	•	and |c_j| <= ε_c
+	•	and P_jj == 0
+
+Then add a tiny proximal diagonal on those coordinates:
+	•	P_jj += ρ for those j
+	•	choose ρ relative to problem scale, e.g.:
+	•	ρ = 1e-8 * max(1, ||c||∞) or
+	•	ρ = 1e-8 * median_nonzero_col_norm(A)^2
+
+This doesn’t change feasibility; it just selects a minimum-norm representative among many solutions and prevents wild drift.
+
+This is exactly the “IPM + proximal stabilization” idea that shows up in several robust conic solvers, and it’s especially useful in SDPs.
+
+⸻
+
+4) Validate whether the solver is solving the scaled problem correctly
+
+This is the quickest way to distinguish “algorithmic degeneracy” from “mapping/scaling bug”.
+
+After a run, compute (in code, in one place, with no ambiguity):
+	•	r_p_scaled = A_scaled x_scaled - b_scaled
+	•	r_p_unscaled = A_orig x_unscaled - b_orig
+
+If scaling is correct and invertible, you should be able to predict one from the other exactly (up to floating error), based on your scaling operators.
+
+If you cannot reconcile scaled and unscaled residuals, your unscale logic is wrong or your scaling is not a true equivalence transform.
+
+For PSD variables, this check is especially important because cone-preserving transforms are structured.
+
+⸻
+
+5) About the “iter 25 jump”: treat it as a KKT-conditioning / step safeguard event
+
+That kind of sudden μ spike + feasibility stall usually happens when:
+	•	a step produces a much worse local linearization (often due to a near-singular KKT or cone scaling),
+	•	the algorithm then increases centering / regularization to recover,
+	•	but it’s already “fallen onto the wrong manifold”.
+
+Once you fix cone-safe scaling + free-direction proximal stabilization, this often disappears.
+
+If it doesn’t, add a simple safeguard:
+
+Feasibility restoration mode (very effective for SDPs)
+
+If for, say, 5–10 iterations:
+	•	||r_p|| (absolute, unscaled) doesn’t decrease by at least e.g. 20%, and
+	•	μ is decreasing (or gap decreasing),
+
+then temporarily switch to a “restore feasibility” policy:
+	•	set sigma = 1 (pure centering) for a few iterations
+	•	cap step sizes more aggressively (fraction-to-boundary smaller)
+	•	increase KKT regularization
+	•	optionally run more corrector steps (your mcc_iters feature)
+
+You’re basically telling the method: “stop chasing complementarity; fix feasibility first”.
+
+⸻
+
+What I would do next for control1 (in order)
+	1.	Disable scaling for SDP and run control1.
+	•	If objective becomes ~17.78 and feasibility improves, your main issue is scaling/unscaling or cone-unsafe scaling.
+	2.	If scaling is needed for conditioning:
+	•	Keep row scaling only, and
+	•	for PSD variables, allow only per-block scalar scaling (no per-coordinate scaling).
+	3.	Add free-direction proximal diagonal for zero A-columns with zero cost.
+	4.	Switch residual normalization to include absolute feasibility guards (unscaled).
+	5.	Add the “feasibility restoration mode” trigger if ||r_p|| is stuck while μ/gap shrinks.
+
+⸻
+
+One important sanity check on your “zero columns” interpretation
+
+Your conclusion “z[j] = 0 conflicts with PSD interior” is only true if you’re thinking entrywise positivity. PSD interior is about eigenvalues, and PD matrices can have many zero off-diagonal entries.
+
+So: keep using “zero column detection” as a conditioning / degeneracy signal, but don’t assume it inherently destroys interior feasibility. The thing that usually destroys you is:
+	•	letting those directions drift wildly due to weak curvature + bad scaling + KKT ill-conditioning.
+
+⸻
+
+If you want, paste just two things (no need for the whole codebase):
+	1.	The exact scaling logic you apply in SDP mode (how you scale A, b, and how you map x back), and
+	2.	The definition of rel_p and the “scale” term you print next to r_p_inf.
+
+With those, I can tell you pretty definitively whether you’re in the “cone-unsafe scaling” failure mode, or if it’s primarily “degenerate SDP needs prox/restoration.”

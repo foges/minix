@@ -1,0 +1,391 @@
+--- solver-core/src/ipm2/predcorr.rs
++++ solver-core/src/ipm2/predcorr.rs
+@@ -466,8 +466,28 @@
+         return false;
+     }
+ 
+-    let mut has_nonneg = false;
++    let lo = beta * mu_trial;
++    let hi = gamma * mu_trial;
++
++    let mut has_check = false;
+     let mut offset = 0;
++
++    // Scratch for SOC neighborhood checks (allocated lazily).
++    let mut soc_s = Vec::<f64>::new();
++    let mut soc_z = Vec::<f64>::new();
++    let mut soc_s_sqrt = Vec::<f64>::new();
++    let mut soc_u = Vec::<f64>::new();
++    let mut soc_u_inv = Vec::<f64>::new();
++    let mut soc_u_inv_sqrt = Vec::<f64>::new();
++    let mut soc_w = Vec::<f64>::new();
++    let mut soc_w_half = Vec::<f64>::new();
++    let mut soc_lambda = Vec::<f64>::new();
++    let mut soc_lambda_sq = Vec::<f64>::new();
++    let mut soc_e1 = Vec::<f64>::new();
++    let mut soc_e2 = Vec::<f64>::new();
++    let mut soc_tmp1 = Vec::<f64>::new();
++    let mut soc_tmp2 = Vec::<f64>::new();
++
+     for cone in cones {
+         let dim = cone.dim();
+         if dim == 0 {
+@@ -475,32 +495,104 @@
+         }
+ 
+         let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
+-        if !is_nonneg {
++        if is_nonneg {
++            has_check = true;
++            for i in 0..dim {
++                let idx = offset + i;
++                let s_i = state.s[idx] + alpha * ds[idx];
++                let z_i = state.z[idx] + alpha * dz[idx];
++                let w = s_i * z_i;
++                if w < lo || w > hi {
++                    return false;
++                }
++            }
+             offset += dim;
+             continue;
+         }
+ 
+-        has_nonneg = true;
+-        for i in 0..dim {
+-            let idx = offset + i;
+-            let s_i = state.s[idx] + alpha * ds[idx];
+-            let z_i = state.z[idx] + alpha * dz[idx];
+-            let w = s_i * z_i;
+-            if w < beta * mu_trial || w > gamma * mu_trial {
++        let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
++        if is_soc {
++            has_check = true;
++
++            soc_s.resize(dim, 0.0);
++            soc_z.resize(dim, 0.0);
++            for i in 0..dim {
++                let idx = offset + i;
++                soc_s[i] = state.s[idx] + alpha * ds[idx];
++                soc_z[i] = state.z[idx] + alpha * dz[idx];
++            }
++
++            soc_s_sqrt.resize(dim, 0.0);
++            soc_u.resize(dim, 0.0);
++            soc_u_inv.resize(dim, 0.0);
++            soc_u_inv_sqrt.resize(dim, 0.0);
++            soc_w.resize(dim, 0.0);
++            soc_w_half.resize(dim, 0.0);
++            soc_lambda.resize(dim, 0.0);
++            soc_lambda_sq.resize(dim, 0.0);
++            soc_e1.resize(dim, 0.0);
++            soc_e2.resize(dim, 0.0);
++            soc_tmp1.resize(dim, 0.0);
++            soc_tmp2.resize(dim, 0.0);
++
++            // Compute scaled complementarity eigenvalues via NT scaling.
++            // w = NT(s, z), lambda = Q_{sqrt(w)} z, lambda_sq = lambda ∘ lambda.
++            jordan_sqrt_in_place(&soc_s, &mut soc_s_sqrt, &mut soc_e1, &mut soc_e2);
++            quad_rep_in_place(&soc_s_sqrt, &soc_z, &mut soc_u, &mut soc_tmp1, &mut soc_tmp2);
++            jordan_inv_in_place(&soc_u, &mut soc_u_inv, &mut soc_e1, &mut soc_e2);
++            jordan_sqrt_in_place(
++                &soc_u_inv,
++                &mut soc_u_inv_sqrt,
++                &mut soc_e1,
++                &mut soc_e2,
++            );
++            quad_rep_in_place(
++                &soc_s_sqrt,
++                &soc_u_inv_sqrt,
++                &mut soc_w,
++                &mut soc_tmp1,
++                &mut soc_tmp2,
++            );
++
++            jordan_sqrt_in_place(&soc_w, &mut soc_w_half, &mut soc_e1, &mut soc_e2);
++            quad_rep_in_place(&soc_w_half, &soc_z, &mut soc_lambda, &mut soc_tmp1, &mut soc_tmp2);
++            jordan_product_in_place(&soc_lambda, &soc_lambda, &mut soc_lambda_sq);
++
++            let t = soc_lambda_sq[0];
++            let x_norm = soc_x_norm(&soc_lambda_sq);
++            let w_hi = t + x_norm;
++            let w_lo = if x_norm > 0.0 {
++                let denom = t + x_norm;
++                if denom > 0.0 {
++                    t.mul_add(t, -(x_norm * x_norm)) / denom
++                } else {
++                    t - x_norm
++                }
++            } else {
++                t
++            };
++
++            if !(w_lo.is_finite() && w_hi.is_finite()) {
+                 return false;
+             }
++
++            if w_lo < lo || w_lo > hi || w_hi < lo || w_hi > hi {
++                return false;
++            }
++
++            offset += dim;
++            continue;
+         }
+ 
+         offset += dim;
+     }
+ 
+-    if !has_nonneg {
++    if !has_check {
+         return true;
+     }
+ 
+     true
+ }
+-
+ // SOC helpers (allocation-free)
+ #[inline]
+ fn soc_x_norm(v: &[f64]) -> f64 {
+@@ -1948,76 +2040,156 @@
+     dkappa: f64,
+     cones: &[Box<dyn ConeKernel>],
+     barrier_degree: usize,
+-    alpha_init: f64,
+-    proximity_threshold: f64,
++    mut alpha: f64,
+ ) -> f64 {
+-    let mut alpha = alpha_init;
+-    let backtrack_factor = 0.8;
+-    let max_backtrack = 10;
+-
+-    for _ in 0..max_backtrack {
+-        // Compute trial iterate
++    let max_iters = 20;
++    let threshold = 10.0;
++
++    // Scratch for SOC proximity checks (allocated lazily).
++    let mut soc_s = Vec::<f64>::new();
++    let mut soc_z = Vec::<f64>::new();
++    let mut soc_s_sqrt = Vec::<f64>::new();
++    let mut soc_u = Vec::<f64>::new();
++    let mut soc_u_inv = Vec::<f64>::new();
++    let mut soc_u_inv_sqrt = Vec::<f64>::new();
++    let mut soc_w = Vec::<f64>::new();
++    let mut soc_w_half = Vec::<f64>::new();
++    let mut soc_lambda = Vec::<f64>::new();
++    let mut soc_lambda_sq = Vec::<f64>::new();
++    let mut soc_e1 = Vec::<f64>::new();
++    let mut soc_e2 = Vec::<f64>::new();
++    let mut soc_tmp1 = Vec::<f64>::new();
++    let mut soc_tmp2 = Vec::<f64>::new();
++
++    for _ in 0..max_iters {
++        // Compute mu_trial for this alpha.
+         let tau_trial = state.tau + alpha * dtau;
+         let kappa_trial = state.kappa + alpha * dkappa;
+-        let mut s_dot_z_trial = 0.0;
+-
++        if tau_trial <= 0.0 || kappa_trial <= 0.0 {
++            alpha *= 0.9;
++            continue;
++        }
++
++        let mut s_dot_z = 0.0;
++        for i in 0..state.s.len() {
++            let s_i = state.s[i] + alpha * ds[i];
++            let z_i = state.z[i] + alpha * dz[i];
++            s_dot_z += s_i * z_i;
++        }
++
++        let mu_trial = (s_dot_z + tau_trial * kappa_trial) / (barrier_degree as f64 + 1.0);
++        if mu_trial <= 0.0 {
++            alpha *= 0.9;
++            continue;
++        }
++
++        // Compute proximity (using max deviation of complementarity eigenvalues / mu_trial).
++        let mut max_deviation = 0.0;
+         let mut offset = 0;
+-        for cone in cones.iter() {
++        for cone in cones {
+             let dim = cone.dim();
+-            if dim == 0 || cone.barrier_degree() == 0 {
++            if dim == 0 {
++                continue;
++            }
++
++            let is_nonneg = (cone.as_ref() as &dyn Any).is::<NonNegCone>();
++            if is_nonneg {
++                for i in 0..dim {
++                    let idx = offset + i;
++                    let s_i = state.s[idx] + alpha * ds[idx];
++                    let z_i = state.z[idx] + alpha * dz[idx];
++                    let w = s_i * z_i;
++                    max_deviation = max_deviation.max((w - mu_trial).abs());
++                }
+                 offset += dim;
+                 continue;
+             }
+ 
++            let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
++            if is_soc {
++                soc_s.resize(dim, 0.0);
++                soc_z.resize(dim, 0.0);
++                for i in 0..dim {
++                    let idx = offset + i;
++                    soc_s[i] = state.s[idx] + alpha * ds[idx];
++                    soc_z[i] = state.z[idx] + alpha * dz[idx];
++                }
++
++                soc_s_sqrt.resize(dim, 0.0);
++                soc_u.resize(dim, 0.0);
++                soc_u_inv.resize(dim, 0.0);
++                soc_u_inv_sqrt.resize(dim, 0.0);
++                soc_w.resize(dim, 0.0);
++                soc_w_half.resize(dim, 0.0);
++                soc_lambda.resize(dim, 0.0);
++                soc_lambda_sq.resize(dim, 0.0);
++                soc_e1.resize(dim, 0.0);
++                soc_e2.resize(dim, 0.0);
++                soc_tmp1.resize(dim, 0.0);
++                soc_tmp2.resize(dim, 0.0);
++
++                jordan_sqrt_in_place(&soc_s, &mut soc_s_sqrt, &mut soc_e1, &mut soc_e2);
++                quad_rep_in_place(&soc_s_sqrt, &soc_z, &mut soc_u, &mut soc_tmp1, &mut soc_tmp2);
++                jordan_inv_in_place(&soc_u, &mut soc_u_inv, &mut soc_e1, &mut soc_e2);
++                jordan_sqrt_in_place(
++                    &soc_u_inv,
++                    &mut soc_u_inv_sqrt,
++                    &mut soc_e1,
++                    &mut soc_e2,
++                );
++                quad_rep_in_place(
++                    &soc_s_sqrt,
++                    &soc_u_inv_sqrt,
++                    &mut soc_w,
++                    &mut soc_tmp1,
++                    &mut soc_tmp2,
++                );
++
++                jordan_sqrt_in_place(&soc_w, &mut soc_w_half, &mut soc_e1, &mut soc_e2);
++                quad_rep_in_place(&soc_w_half, &soc_z, &mut soc_lambda, &mut soc_tmp1, &mut soc_tmp2);
++                jordan_product_in_place(&soc_lambda, &soc_lambda, &mut soc_lambda_sq);
++
++                let t = soc_lambda_sq[0];
++                let x_norm = soc_x_norm(&soc_lambda_sq);
++                let w_hi = t + x_norm;
++                let w_lo = if x_norm > 0.0 {
++                    let denom = t + x_norm;
++                    if denom > 0.0 {
++                        t.mul_add(t, -(x_norm * x_norm)) / denom
++                    } else {
++                        t - x_norm
++                    }
++                } else {
++                    t
++                };
++
++                max_deviation = max_deviation.max((w_hi - mu_trial).abs());
++                max_deviation = max_deviation.max((w_lo - mu_trial).abs());
++
++                offset += dim;
++                continue;
++            }
++
++            // Fallback: componentwise proximity (best-effort) for other cone types.
+             for i in 0..dim {
+                 let idx = offset + i;
+-                let s_trial = state.s[idx] + alpha * ds[idx];
+-                let z_trial = state.z[idx] + alpha * dz[idx];
+-                s_dot_z_trial += s_trial * z_trial;
++                let s_i = state.s[idx] + alpha * ds[idx];
++                let z_i = state.z[idx] + alpha * dz[idx];
++                let w = s_i * z_i;
++                max_deviation = max_deviation.max((w - mu_trial).abs());
+             }
+ 
+             offset += dim;
+         }
+ 
+-        // Compute trial mu
+-        let mu_trial = (s_dot_z_trial + tau_trial * kappa_trial) / (barrier_degree as f64 + 1.0);
+-
+-        if !mu_trial.is_finite() || mu_trial <= 0.0 {
+-            alpha *= backtrack_factor;
+-            continue;
+-        }
+-
+-        // Compute proximity (infinity norm of (s⊙z - μe) / μ)
+-        let mut proximity = 0.0_f64;
+-        offset = 0;
+-
+-        for cone in cones.iter() {
+-            let dim = cone.dim();
+-            if dim == 0 || cone.barrier_degree() == 0 {
+-                offset += dim;
+-                continue;
+-            }
+-
+-            for i in 0..dim {
+-                let idx = offset + i;
+-                let s_trial = state.s[idx] + alpha * ds[idx];
+-                let z_trial = state.z[idx] + alpha * dz[idx];
+-                let complementarity = s_trial * z_trial;
+-                let deviation = (complementarity - mu_trial).abs() / mu_trial;
+-                proximity = proximity.max(deviation);
+-            }
+-
+-            offset += dim;
+-        }
+-
+-        if proximity <= proximity_threshold {
+-            return alpha;
+-        }
+-
+-        // Reduce step size and try again
+-        alpha *= backtrack_factor;
+-    }
+-
+-    // If we exhausted backtracks, return the reduced alpha
++        let proximity = max_deviation / mu_trial;
++        if proximity <= threshold {
++            break;
++        }
++
++        alpha *= 0.9;
++    }
++
+     alpha
+ }
++
+
+--- solver-core/src/ipm2/solve.rs
++++ solver-core/src/ipm2/solve.rs
+@@ -55,6 +55,28 @@
+ 
+     // Convert var_bounds to explicit constraints if present
+     let prob = prob.with_bounds_as_constraints();
++
++    // Auto-enable the line search when SOC cones are present (for SOC neighborhood stability)
++    // unless the user has explicitly configured it.
++    let mut settings_local = settings.clone();
++    if settings_local.line_search_max_iters == 0 {
++        let disable_auto_soc_ls = std::env::var_os("MINIX_DISABLE_SOC_AUTOLS").is_some();
++        if !disable_auto_soc_ls {
++            let has_soc = prob
++                .cones
++                .iter()
++                .any(|c| matches!(c, ConeSpec::Soc { .. }));
++            if has_soc {
++                settings_local.line_search_max_iters = 15;
++                if settings_local.verbose {
++                    eprintln!(
++                        "ipm2: SOC cones detected; auto-enabling line_search_max_iters=15 (set MINIX_DISABLE_SOC_AUTOLS=1 to disable)"
++                    );
++                }
++            }
++        }
++    }
++    let settings = &settings_local;
+ 
+     let n = prob.num_vars();
+     let m = prob.num_constraints();

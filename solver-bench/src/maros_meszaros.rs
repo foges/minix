@@ -106,7 +106,8 @@ fn print_diagnostics(name: &str, prob: &ProblemData, res: &SolveResult) {
     let primal_obj = 0.5 * xpx + qtx;
     let dual_obj = -0.5 * xpx - btz;
     let gap = (primal_obj - dual_obj).abs();
-    let gap_scale = primal_obj.abs().max(dual_obj.abs()).max(1.0);
+    // Clarabel-style: use min of objectives for gap_rel denominator
+    let gap_scale = primal_obj.abs().min(dual_obj.abs()).max(1.0);
 
     let rel_p = rp_inf / primal_scale;
     let rel_d = rd_inf / dual_scale;

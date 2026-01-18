@@ -1,0 +1,194 @@
+What you’re seeing in control1 (gap/dual look great, primal feasibility doesn’t improve, objective is wrong) is exactly the pattern you get when the Newton system is being allowed to de‑emphasize feasibility, plus (for SDPs) when the Mehrotra correction isn’t being computed in the correct Jordan algebra.
+
+Below are the two biggest “this would produce your symptoms” issues I can see in the current implementation (based on rustfiles), plus the concrete fixes I’d try first.
+
+⸻
+
+1) The solver is explicitly down‑weighting feasibility in the KKT RHS
+
+In solver-core/src/ipm2/predcorr.rs, after you compute sigma_eff, you build the combined RHS like this:
+	•	feas_weight = max(1 - sigma_eff, feas_weight_floor)
+	•	rhs_x = -feas_weight * r_x
+	•	rhs_z = d_s_comb - feas_weight * r_z
+	•	d_tau_corr also subtracts a feas_weight * r_tau / kappa_safe term
+
+This is not Mehrotra’s predictor–corrector as typically implemented.
+
+Why this matches your exact symptom
+
+When sigma_eff → 1 (heavy centering, which often happens in “hard”/degenerate cases), then:
+	•	feas_weight → feas_weight_floor, and later you even set feas_weight_floor = 0.0 after stage_3 + stage_4, so it can go to ~0.
+	•	That makes the KKT system almost ignore r_z (primal feasibility) and r_x (dual feasibility).
+	•	The system then mostly focuses on the complementarity/corrector term (d_s_comb) and the cone equations.
+
+That is literally “chasing complementarity while ignoring feasibility”.
+
+Your “direct mode” experiment (tau fixed) is consistent with this too: even if tau is frozen, if feasibility is being downweighted (or driven to 0 weight), you can drive complementarity to ~0 while ||r_p|| stays ~||b|| forever.
+
+Fix to try immediately
+
+Make feasibility weight = 1.0 for the KKT RHS (at least for SDPs / symmetric cones, and honestly probably globally unless you have a very specific reason to keep it).
+
+Concretely: in the combined solve, change to:
+	•	rhs_x[i] = -residuals.r_x[i]
+	•	rhs_z[i] = ws.d_s_comb[i] - residuals.r_z[i]
+	•	remove feas_weight from d_tau_corr too
+
+And do the same for the affine solve (or keep affine as-is if you must, but the combined step is the most important).
+
+If you really want a feasibility weight knob, make it conditional on feasibility already being good, e.g. only allow it to drop below 1.0 when rp_inf and rd_inf are already below some absolute/relative threshold that cannot be gamed by exploding variable norms.
+
+⸻
+
+2) For PSD cones, your Mehrotra correction path is still “diagonal / nonneg style” unless you special-case it
+
+In the same file (ipm2/predcorr.rs), the “Step 5: cone-specific RHS for Mehrotra correction” logic only has a proper Jordan-algebra correction for SocCone, and uses an elementwise fallback for everything else.
+
+That fallback computes (schematically):
+	•	mu_i = s_i * z_i
+	•	w_base = mu_i + ds_aff[i] * dz_aff[i] (only if NonNeg)
+	•	d_s_comb[i] = (w_base - sigma*mu) / z_safe
+
+That is correct for the nonnegative orthant, and your SOC branch is correct for SOC.
+
+It is not the correct algebra for PSD cones.
+
+Why this matters specifically for control1 but not truss1
+
+truss1 has PSD block sizes [2,2,2,2,2,2,1]. A 2×2 PSD cone is isomorphic to a 3D SOC, and depending on how your conversion / cone selection happens, it’s very plausible truss1 is effectively being handled by your SOC machinery (or is simply “easy enough” that the wrong corrector doesn’t kill you).
+
+control1 has PSD blocks [10,5]. Now you’re in real PSD territory: if the corrector is computed as if the cone were diagonal, you’ll often get exactly what you’re seeing: complementarity seems to “converge” in some scalar sense, but you don’t actually move toward a feasible/optimal point of the true SDP KKT system.
+
+The right PSD corrector (what Clarabel is doing)
+
+For symmetric cones (SOC, PSD), the standard Mehrotra corrector in NT scaling is:
+	1.	Get NT scaling point W so that the quadratic representation Q_W maps Z \mapsto S.
+(Your nt_scaling_psd returns exactly this w_factor.)
+	2.	Let W_{1/2} = \sqrt{W}, W_{-1/2} = W_{1/2}^{-1}
+	3.	Define:
+
+	•	\Lambda = Q_{W_{1/2}}(Z)
+	•	\eta = Q_{W_{-1/2}}(\Delta S_{\text{aff}}) \circ Q_{W_{1/2}}(\Delta Z_{\text{aff}})
+	•	v = \Lambda \circ \Lambda + \eta - \sigma \mu \, e
+
+	4.	Solve the Jordan equation:
+
+	•	\Lambda \circ u = v
+
+For PSD, Jordan product is A \circ B = (AB + BA)/2, so solving \Lambda \circ u = v becomes the Sylvester equation:
+	•	\Lambda U + U \Lambda = 2V
+
+	5.	Map back:
+
+	•	\Delta S_{\text{corr}} = Q_{W_{1/2}}(u)
+
+This is exactly analogous to your SOC branch, except the “Jordan solve” is Sylvester.
+
+Fix
+
+Add a PSD branch in Step 5 that mirrors the SOC branch, but in matrix form:
+	•	convert the block’s slices of s, z, ds_aff, dz_aff from svec → symmetric matrix
+	•	compute W from scaling block (PsdStructured { w_factor })
+	•	compute W_{1/2}, W_{-1/2}
+	•	compute \Lambda, \eta, v
+	•	solve Sylvester for u
+	•	compute d_s\_block = Q_{W_{1/2}}(u)
+	•	convert back to svec and write into ws.d_s_comb[offset..]
+
+If you already thought you added this: double-check that it’s actually in the ipm2/predcorr.rs Step 5 path that runs for control1. The code as present in rustfiles doesn’t show a PSD special-case there.
+
+⸻
+
+3) Your “relative primal residual” scaling can hide a broken primal residual
+
+You already noticed this, and it’s real:
+
+compute_unscaled_metrics() uses
+	•	primal_scale = max(1, b_inf + x_inf + s_inf)
+	•	rel_p = rp_inf / primal_scale
+
+If x_inf or s_inf can blow up (which does happen in HSDE iterates for some SDPs), then rel_p can look tiny even when rp_inf is enormous.
+
+This interacts badly with any heuristic that depends on rel_p to decide “we’re feasible enough to center hard”, “drop feasibility weight floor”, “polish”, etc.
+
+Fix
+
+For SDPs / conic problems, the typical scaling is closer to:
+	•	rel_p = rp_inf / max(1, b_inf)
+	•	rel_d = rd_inf / max(1, q_inf) (or max(1, c_inf) depending on your convention)
+
+Optionally add a term involving ||A|| if you want, but do not include x_inf or s_inf directly in the denominator unless you’re very sure you want that behavior.
+
+Also: keep and display absolute residuals prominently, and ensure termination cannot be achieved unless abs feasibility is small enough too.
+
+⸻
+
+4) Your tau “normalization jump” is probably not the root cause, but it does explain the mu spike
+
+You logged:
+	•	tau drifting down to ~0.2–0.3
+	•	then normalize_tau_if_needed() resets tau to 1
+
+In your normalization, you scale x,s,z,kappa,tau by 1/tau.
+
+Because \mu is roughly proportional to s^T z, scaling s and z by ~5 multiplies \mu by ~25. That matches the kind of “mu spike” you saw around the normalization event.
+
+This doesn’t inherently break correctness (it’s a homogeneous scaling), but it can disrupt heuristics that assume mu decreases smoothly.
+
+If you keep normalization:
+	•	make sure no heuristics key off raw mu without being scale-invariant
+	•	consider normalizing using sqrt(tau^2 + kappa^2) (your normalize_tau_kappa_if_needed) and only when truly needed (very small/large), not when tau is merely 0.2
+
+But I’d fix the feasibility weighting + PSD corrector first; they’re much more directly tied to your failure mode.
+
+⸻
+
+A concrete “do this in order” plan
+
+Step 1 — Disable feasibility downweighting
+	•	Set feas_weight = 1.0 in both affine and combined RHS.
+	•	Remove the stage logic that drops feas_weight_floor to 0 unless you can prove feasibility is already achieved.
+
+Expected effect: control1 should stop behaving like “complementarity only” and start actually reducing ||r_p||.
+
+Step 2 — Ensure PSD Mehrotra correction uses PSD Jordan algebra (Sylvester)
+	•	Add the PSD branch in Step 5 mirroring SOC, using matrix operations + Sylvester solve.
+	•	Verify it’s hit for control1 blocks [10,5].
+
+Expected effect: fewer iterations and much more stable behavior in SDPs; prevents the “wrong correction term” from poisoning feasibility progress.
+
+Step 3 — Fix residual scaling / termination gating
+	•	Change relative residual denominators to not include x_inf/s_inf.
+	•	Add absolute feasibility thresholds (or at least absolute stall detection) so you can’t declare near-optimal while ||r_p|| is huge.
+
+Expected effect: you won’t mask primal infeasibility; your “feasibility restoration” triggers will actually trigger.
+
+Step 4 — Only if still needed: proximal stabilization for degenerate directions
+
+If after Steps 1–3 you still see stall due to true degeneracy (singular SDP / weakly feasible, etc.), then:
+	•	add a proximal term on the drifting subspace (e.g., ρI on the relevant free directions)
+	•	or do facial reduction/presolve (heavier)
+
+But given Clarabel solves your exact formulation cleanly, I would bet Steps 1–3 get you most/all the way there.
+
+⸻
+
+Quick sanity checks to add (cheap + very informative)
+	1.	Log feas_weight and sigma_eff every iter for control1.
+If you ever see feas_weight → 0 while rp_abs isn’t tiny, you’ve found the smoking gun.
+	2.	For each PSD block, log:
+
+	•	min eigenvalue of S and Z
+	•	condition numbers of S and Z
+	•	min eigenvalue of W (scaling point)
+
+	3.	Compare your termination residuals to Clarabel’s:
+
+	•	compute rp = ||A x + s - b||_∞ (or the correct form)
+	•	compute rd = ||P x + A^T z + q||_∞
+	•	compute gap = |obj_p - obj_d|
+and ensure you’re using the same unscaled variables.
+
+⸻
+
+If you want, I can sketch the exact Rust shape of the PSD Step 5 branch (matching your SOC branch structure and using your existing svec_to_mat / mat_to_svec helpers) in a way that drops into ipm2/predcorr.rs without changing your existing comments/docstrings.

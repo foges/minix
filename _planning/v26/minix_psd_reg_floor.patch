@@ -1,0 +1,12 @@
+*** a/solver-core/src/ipm2/solve.rs
+--- b/solver-core/src/ipm2/solve.rs
+@@
+-    } else if has_psd {
+-        // For PSD cones, use 1e-4 (sqrt of typical 1e-8) to match H diagonal scale
+-        settings.static_reg.max(1e-4)
++    } else if has_psd {
++        // For PSD cones, start smaller and rely on dynamic regularization if needed.
++        settings.static_reg.max(1e-8)
+     } else {
+         settings.static_reg
+     };

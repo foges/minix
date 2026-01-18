@@ -1,0 +1,18 @@
+diff --git a/solver-core/src/ipm2/predcorr.rs b/solver-core/src/ipm2/predcorr.rs
+--- a/solver-core/src/ipm2/predcorr.rs
++++ b/solver-core/src/ipm2/predcorr.rs
+@@ -514,8 +514,18 @@ fn spectral_decomposition_in_place(v: &[f64], lambda: &mut [f64; 2], e1: &mut [f6
+     let t = v[0];
+     let x_norm = if v.len() == 1 { 0.0 } else { soc_x_norm(v) };
+ 
+     lambda[0] = t + x_norm;
+-    lambda[1] = t - x_norm;
++    // Stable computation of lambda[1] = t - ||x||.
++    // Using (t^2 - ||x||^2) / (t + ||x||) avoids catastrophic cancellation near the SOC boundary.
++    let denom = lambda[0];
++    if denom.abs() > 1e-300 {
++        let t2_minus_x2 = t.mul_add(t, -(x_norm * x_norm));
++        lambda[1] = t2_minus_x2 / denom;
++    } else {
++        lambda[1] = t - x_norm;
++    }

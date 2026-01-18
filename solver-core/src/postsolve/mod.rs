@@ -20,6 +20,11 @@ pub struct RemovedRow {
     pub val: f64,
     pub rhs: f64,
     pub kind: RemovedRowKind,
+    /// For Zero cone rows: stores (kept_row_idx, A[kept_row, col]) for dual recovery
+    /// z[row] = (-q_col - sum of A[j,col]*z[j] for kept j) / A[row,col]
+    pub a_col_entries: Vec<(usize, f64)>,
+    /// For Zero cone rows: stores q[col] for dual recovery
+    pub q_col: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -229,7 +234,19 @@ impl PostsolveMap {
         for (red_idx, &orig_row) in row_map.kept_rows.iter().enumerate() {
             z_full[orig_row] = z_base[red_idx];
         }
-        // Removed rows default to zero duals.
+
+        // Recover duals for removed Zero cone rows using dual feasibility:
+        // z[row] = (-q_col - sum_{j in kept} A[j,col]*z[j]) / A[row,col]
+        for removed in &row_map.removed_rows {
+            if matches!(removed.kind, RemovedRowKind::Zero) && removed.val.abs() > 1e-15 {
+                let mut sum = 0.0;
+                for &(kept_idx, a_val) in &removed.a_col_entries {
+                    sum += a_val * z_base[kept_idx];
+                }
+                z_full[removed.row] = (-removed.q_col - sum) / removed.val;
+            }
+        }
+
         for (idx, &val) in z_bounds.iter().enumerate() {
             z_full[row_map.orig_m + idx] = val;
         }
@@ -253,6 +270,19 @@ impl PostsolveMap {
         for (red_idx, &orig_row) in row_map.kept_rows.iter().enumerate() {
             out[orig_row] = z_base[red_idx];
         }
+
+        // Recover duals for removed Zero cone rows using dual feasibility:
+        // z[row] = (-q_col - sum_{j in kept} A[j,col]*z[j]) / A[row,col]
+        for removed in &row_map.removed_rows {
+            if matches!(removed.kind, RemovedRowKind::Zero) && removed.val.abs() > 1e-15 {
+                let mut sum = 0.0;
+                for &(kept_idx, a_val) in &removed.a_col_entries {
+                    sum += a_val * z_base[kept_idx];
+                }
+                out[removed.row] = (-removed.q_col - sum) / removed.val;
+            }
+        }
+
         for (idx, &val) in z_bounds.iter().enumerate() {
             out[row_map.orig_m + idx] = val;
         }

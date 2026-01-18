@@ -1352,7 +1352,8 @@ pub fn solve_ipm2(
                     // force_to_interior doesn't know about problem data, so we fix here.
                     // For EXP cones, we also need to ensure the point is feasible after restoring.
                     // K_exp = {(x,y,z) : z >= y*exp(x/y), y > 0}
-                    // If s[1] is constrained to y0, we set x=0 and z = y0*(1 + margin) to be feasible.
+                    // Restore zero row constraints for EXP cones: s[i] = b[i] * tau
+                    // Then ensure the result is feasible in K_exp.
                     {
                         use crate::ipm2::predcorr::detect_zero_rows_in_block;
                         use std::any::Any;
@@ -1361,20 +1362,20 @@ pub fn solve_ipm2(
                             let dim = cone.dim();
                             if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
                                 let zero_rows = detect_zero_rows_in_block(&scaled_prob.A, offset);
-                                // Check if s[1] (the y component) is constrained
-                                if zero_rows[1] {
-                                    let y_val = scaled_prob.b[offset + 1] * state.tau;
-                                    // Set to a feasible interior point: (0, y_val, y_val * e)
-                                    // where e = exp(0) = 1, plus some margin
-                                    state.s[offset + 0] = 0.0;  // x = 0
-                                    state.s[offset + 1] = y_val;  // y constrained
-                                    state.s[offset + 2] = y_val * 2.0;  // z = 2*y gives z > y*exp(0) = y
-                                } else {
-                                    // Restore other zero row values
-                                    for j in 0..3 {
-                                        if zero_rows[j] {
-                                            state.s[offset + j] = scaled_prob.b[offset + j] * state.tau;
-                                        }
+                                // First, restore all zero row values
+                                for j in 0..3 {
+                                    if zero_rows[j] {
+                                        state.s[offset + j] = scaled_prob.b[offset + j] * state.tau;
+                                    }
+                                }
+                                // Now ensure feasibility: z >= y*exp(x/y) for K_exp
+                                // If s[2] (z) is NOT constrained, adjust it to be feasible
+                                if !zero_rows[2] {
+                                    let x_val = state.s[offset + 0];
+                                    let y_val = state.s[offset + 1].max(1e-8);
+                                    let min_z = y_val * (x_val / y_val).exp() * 1.1; // 10% margin
+                                    if state.s[offset + 2] < min_z {
+                                        state.s[offset + 2] = min_z;
                                     }
                                 }
                             }
@@ -1406,7 +1407,6 @@ pub fn solve_ipm2(
             state.push_to_interior(&cones, 1e-2);
 
             // Restore zero row constraints for EXP cones after push_to_interior
-            // Same logic as above: if s[1] is constrained, set to feasible interior point
             {
                 use crate::ipm2::predcorr::detect_zero_rows_in_block;
                 use std::any::Any;
@@ -1415,16 +1415,19 @@ pub fn solve_ipm2(
                     let dim = cone.dim();
                     if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
                         let zero_rows = detect_zero_rows_in_block(&scaled_prob.A, offset);
-                        if zero_rows[1] {
-                            let y_val = scaled_prob.b[offset + 1] * state.tau;
-                            state.s[offset + 0] = 0.0;
-                            state.s[offset + 1] = y_val;
-                            state.s[offset + 2] = y_val * 2.0;
-                        } else {
-                            for j in 0..3 {
-                                if zero_rows[j] {
-                                    state.s[offset + j] = scaled_prob.b[offset + j] * state.tau;
-                                }
+                        // First, restore all zero row values
+                        for j in 0..3 {
+                            if zero_rows[j] {
+                                state.s[offset + j] = scaled_prob.b[offset + j] * state.tau;
+                            }
+                        }
+                        // Ensure feasibility: z >= y*exp(x/y) for K_exp
+                        if !zero_rows[2] {
+                            let x_val = state.s[offset + 0];
+                            let y_val = state.s[offset + 1].max(1e-8);
+                            let min_z = y_val * (x_val / y_val).exp() * 1.1;
+                            if state.s[offset + 2] < min_z {
+                                state.s[offset + 2] = min_z;
                             }
                         }
                     }

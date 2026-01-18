@@ -1,0 +1,53 @@
+--- a/solver-core/src/scaling/nt.rs
++++ b/solver-core/src/scaling/nt.rs
+@@ -232,8 +232,20 @@
+         v[1..].iter().map(|xi| xi * xi).sum::<f64>().sqrt()
+     };
+ 
++    // λ₁ = t + ||x||
+     lambda[0] = t + x_norm;
+-    lambda[1] = t - x_norm;
++
++    // λ₂ = t - ||x||, but computed in a cancellation-resistant way when t ≈ ||x||.
++    // Using: λ₂ = det(v) / (t + ||x||) where det(v) = t² - ||x||².
++    let scale = t.abs().max(x_norm);
++    let det = if scale == 0.0 {
++        0.0
++    } else {
++        let ts = t / scale;
++        let xs = x_norm / scale;
++        ts.mul_add(ts, -(xs * xs)) * (scale * scale)
++    };
++    lambda[1] = (det / lambda[0]).max(0.0);
+ 
+     // e1 = (1, x/||x||) / 2
+     // e2 = (1, -x/||x||) / 2
+
+--- a/solver-core/src/ipm2/predcorr.rs
++++ b/solver-core/src/ipm2/predcorr.rs
+@@ -512,7 +512,24 @@
+     let x_norm = if v.len() == 1 { 0.0 } else { soc_x_norm(v) };
+ 
+     lambda[0] = t + x_norm;
+-    lambda[1] = t - x_norm;
++
++    // Compute lambda[1] stably to avoid catastrophic cancellation when t ≈ ||x||:
++    // λ₂ = t - ||x|| = (t² - ||x||²) / (t + ||x||).
++    let lambda0 = lambda[0];
++    if lambda0 != 0.0 {
++        let scale = t.abs().max(x_norm);
++        let det = if scale == 0.0 {
++            0.0
++        } else {
++            let ts = t / scale;
++            let xs = x_norm / scale;
++            ts.mul_add(ts, -(xs * xs)) * (scale * scale)
++        };
++        lambda[1] = (det / lambda0).max(0.0);
++    } else {
++        // Fallback (should be unreachable for interior points).
++        lambda[1] = t - x_norm;
++    }
+ 
+     if x_norm > 1e-14 {
+         let inv_norm = 1.0 / x_norm;

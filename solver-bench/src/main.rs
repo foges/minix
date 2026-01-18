@@ -505,56 +505,91 @@ fn run_regression_suite(
                 res.gap_rel,
             );
         } else {
+            let time_str = res.solve_time_ms
+                .map(|t| format!(" time={:.1}ms", t as f64))
+                .unwrap_or_default();
             println!(
-                "{}: OK iters={} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}",
+                "{}: OK iters={} rel_p={:.2e} rel_d={:.2e} gap_rel={:.2e}{}",
                 res.name,
                 res.iterations,
                 res.rel_p,
                 res.rel_d,
                 res.gap_rel,
+                time_str,
             );
         }
     }
 
+    // Compute timing statistics
+    let times: Vec<f64> = results.iter()
+        .filter_map(|r| r.solve_time_ms.map(|t| t as f64))
+        .collect();
+    let total_time: f64 = times.iter().sum();
+    let geom_mean = if !times.is_empty() {
+        let log_sum: f64 = times.iter().filter(|&&t| t > 0.0).map(|t| t.ln()).sum();
+        let count = times.iter().filter(|&&t| t > 0.0).count();
+        if count > 0 { (log_sum / count as f64).exp() } else { 0.0 }
+    } else { 0.0 };
+
     println!(
-        "summary: total={} failed={} skipped={}",
+        "summary: total={} failed={} skipped={} time={:.2}s geom_mean={:.1}ms",
         results.len(),
         failed,
-        skipped
+        skipped,
+        total_time / 1000.0,
+        geom_mean,
     );
 
     if failed == 0 {
+        // Save detailed baseline with per-problem timings
         if let Some(path) = baseline_out.as_ref() {
-            let summary = regression::perf_summary(&results);
-            let payload = serde_json::to_string_pretty(&summary)
-                .expect("failed to serialize perf summary");
+            let detailed = regression::DetailedBaseline::from_results(&results);
+            let payload = serde_json::to_string_pretty(&detailed)
+                .expect("failed to serialize detailed baseline");
             if let Err(e) = std::fs::write(path, payload) {
                 eprintln!("failed to write baseline {}: {}", path, e);
                 std::process::exit(1);
             }
+            println!("Saved baseline with {} problem timings to {}", detailed.problems.len(), path);
         }
 
+        // Compare against baseline (supports both old PerfSummary and new DetailedBaseline)
         if let Some(path) = baseline_in.as_ref() {
             let Ok(contents) = std::fs::read_to_string(path) else {
                 eprintln!("failed to read baseline {}", path);
                 std::process::exit(1);
             };
-            let baseline: regression::PerfSummary = match serde_json::from_str(&contents) {
-                Ok(val) => val,
-                Err(e) => {
-                    eprintln!("failed to parse baseline {}: {}", path, e);
-                    std::process::exit(1);
-                }
-            };
-            let summary = regression::perf_summary(&results);
-            let perf_failures =
-                regression::compare_perf_baseline(&baseline, &summary, max_regression);
-            if !perf_failures.is_empty() {
-                for msg in perf_failures {
-                    eprintln!("perf regression: {}", msg);
+
+            // Try parsing as DetailedBaseline first, fall back to PerfSummary
+            let current = regression::DetailedBaseline::from_results(&results);
+            let mut all_failures = Vec::new();
+
+            if let Ok(baseline) = serde_json::from_str::<regression::DetailedBaseline>(&contents) {
+                // New format: compare both summary and per-problem
+                let summary_failures = regression::compare_perf_baseline(
+                    &baseline.summary, &current.summary, max_regression);
+                all_failures.extend(summary_failures);
+
+                let problem_failures = baseline.compare_problems(&current, max_regression);
+                all_failures.extend(problem_failures);
+            } else if let Ok(baseline) = serde_json::from_str::<regression::PerfSummary>(&contents) {
+                // Old format: compare summary only
+                let summary_failures = regression::compare_perf_baseline(
+                    &baseline, &current.summary, max_regression);
+                all_failures.extend(summary_failures);
+            } else {
+                eprintln!("failed to parse baseline {} (tried DetailedBaseline and PerfSummary)", path);
+                std::process::exit(1);
+            }
+
+            if !all_failures.is_empty() {
+                println!("\nPerformance regressions detected:");
+                for msg in &all_failures {
+                    eprintln!("  {}", msg);
                 }
                 std::process::exit(1);
             }
+            println!("No performance regressions detected vs baseline");
         }
     }
 

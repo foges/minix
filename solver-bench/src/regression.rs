@@ -34,6 +34,66 @@ pub struct PerfSummary {
     pub cases: usize,
 }
 
+/// Per-problem timing record for detailed comparison
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProblemTiming {
+    pub name: String,
+    pub solve_time_ms: u64,
+    pub iterations: usize,
+    pub status: String,
+}
+
+/// Full baseline with per-problem timings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetailedBaseline {
+    pub summary: PerfSummary,
+    pub problems: Vec<ProblemTiming>,
+}
+
+impl DetailedBaseline {
+    pub fn from_results(results: &[RegressionResult]) -> Self {
+        let summary = perf_summary(results);
+        let problems: Vec<ProblemTiming> = results.iter()
+            .filter(|r| !r.skipped && r.solve_time_ms.is_some())
+            .map(|r| ProblemTiming {
+                name: r.name.clone(),
+                solve_time_ms: r.solve_time_ms.unwrap_or(0),
+                iterations: r.iterations,
+                status: format!("{:?}", r.status),
+            })
+            .collect();
+        Self { summary, problems }
+    }
+
+    /// Compare per-problem timings and return regressions
+    pub fn compare_problems(&self, current: &DetailedBaseline, max_regression: f64) -> Vec<String> {
+        use std::collections::HashMap;
+
+        let baseline_map: HashMap<&str, &ProblemTiming> = self.problems.iter()
+            .map(|p| (p.name.as_str(), p))
+            .collect();
+
+        let mut regressions = Vec::new();
+
+        for curr in &current.problems {
+            if let Some(base) = baseline_map.get(curr.name.as_str()) {
+                // Only compare if baseline time is meaningful (> 1ms)
+                if base.solve_time_ms > 1 {
+                    let ratio = curr.solve_time_ms as f64 / base.solve_time_ms as f64;
+                    if ratio > 1.0 + max_regression {
+                        regressions.push(format!(
+                            "{}: {:.1}x slower ({}ms -> {}ms)",
+                            curr.name, ratio, base.solve_time_ms, curr.solve_time_ms
+                        ));
+                    }
+                }
+            }
+        }
+
+        regressions
+    }
+}
+
 impl PerfSummary {
     fn empty() -> Self {
         Self {
@@ -166,6 +226,13 @@ pub fn run_regression_suite(
         test_problems::maros_meszaros_expected_failures().iter().copied().collect();
 
     for name in qps_cases {
+        // Apply filter if specified
+        if let Some(f) = filter {
+            if !name.starts_with(f) {
+                continue;
+            }
+        }
+
         let is_expected_failure = expected_failures.contains(name);
 
         match load_local_problem(name) {
@@ -281,6 +348,12 @@ pub fn run_regression_suite(
     let sdplib_dir = std::path::Path::new("_data/sdplib");
     if sdplib_dir.exists() {
         for name in sdplib_cases {
+            // Apply filter if specified
+            if let Some(f) = filter {
+                if !name.starts_with(f) {
+                    continue;
+                }
+            }
             let file_path = sdplib_dir.join(format!("{}.dat-s", name));
             if !file_path.exists() {
                 if require_cache {
@@ -421,6 +494,12 @@ pub fn run_regression_suite(
     // Tests SOC cone support with QP problems reformulated as SOCPs
     // Run the full MM suite as SOCPs to match CVXPY's conic form
     for name in mm_problem_names() {
+        // Apply filter if specified
+        if let Some(f) = filter {
+            if !name.starts_with(f) {
+                continue;
+            }
+        }
         let socp_name = format!("{}_SOCP", name);
         match load_local_problem(name) {
             Ok(qps) => {

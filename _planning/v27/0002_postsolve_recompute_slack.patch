@@ -1,0 +1,19 @@
+diff --git a/src/ipm2/solve.rs b/src/ipm2/solve.rs
+--- a/src/ipm2/solve.rs
++++ b/src/ipm2/solve.rs
+@@ -1542,5 +1542,15 @@
+     // This makes termination/reporting consistent with what the user sees.
+     // Note: dimensions may differ if presolve eliminated bound constraints
+     let recovered_m = s.len();
+     let orig_m_bounds = orig_prob_bounds.num_constraints();
+
++    // Postsolve can accumulate small inconsistencies between recovered x and s.
++    // Enforce Ax + s = b in recovered space to avoid rel_p regressions from postsolve.
++    if recovered_m == orig_m_bounds {
++        let mut ax = vec![0.0; orig_m_bounds];
++        crate::linalg::sparse::spmv(&orig_prob_bounds.A, &x, &mut ax, 1.0, 0.0);
++        for i in 0..orig_m_bounds {
++            s[i] = orig_prob_bounds.b[i] - ax[i];
++        }
++    }
++

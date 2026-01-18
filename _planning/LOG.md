@@ -12,7 +12,16 @@ Clarabel's formula is more robust because it only depends on step length (geomet
 
 1. **max_iter: 100 → 200** (matching Clarabel default)
 2. **Centering formula**: `σ = (1-α)³` instead of `(μ_aff/μ)³`
-3. Equilibration bounds [1e-4, 1e4] already implemented
+3. **First-iteration Mehrotra dampening**: Scale Mehrotra correction by alpha_aff on iter=0 only
+4. Equilibration bounds [1e-4, 1e4] already implemented
+
+### Bug Fix: Mehrotra Dampening Iter Indexing
+
+Fixed off-by-one error in Mehrotra dampening condition:
+- **Before**: `iter <= 1` (dampened first TWO iterations)
+- **After**: `iter == 0` (dampens only first iteration, matching Clarabel)
+
+The incorrect condition caused QBEACONF to regress from AlmostOptimal to MaxIters. With the fix, QBEACONF converges again.
 
 ### New Convergence Results
 

@@ -1,0 +1,140 @@
+Your write‑up matches what I’d expect to see in an SDP/IPM implementation once you start touching “make KKT factorizable” knobs: too much regularization can absolutely push you onto the wrong Newton direction (and for SDPs it can be dramatically wrong), even if everything else (NT scaling checks, Jordan Mehrotra corrector, etc.) is correct.
+
+Here’s my feedback / what I’d keep vs. what I’d tighten up.
+
+⸻
+
+Overall take: this is the right diagnosis
+
+Why your conclusion is believable
+	•	In SDPs, the “Hessian” contribution coming from the barrier scaling can be small in some directions late in the solve, especially with degeneracy / weakly constrained entries.
+	•	If you add a fixed regularization like 1e-4 into the PSD blocks, you’re not just “stabilizing the factorization” — you’re effectively solving a perturbed Newton system and therefore following the central path of a different problem.
+	•	The fact that:
+	•	MINIX_PSD_REG_FLOOR=1e-8 → objective matches SDPLIB (control1 rel err ~6e‑6)
+	•	MINIX_PSD_REG_FLOOR=1e-4 → reproduces the stall / wrong solution
+is very strong evidence that the solver was being biased, not merely suffering from conditioning.
+
+So: ✅ yes, “PSD failures were coming from over‑regularizing the PSD KKT blocks” is a solid conclusion.
+
+⸻
+
+Important nuance: “reg floor” should not become “reg policy”
+
+A floor is fine (avoid exact zeros / protect against tiny negative eigenvalues due to roundoff), but what you really want long-term is:
+	•	Try the smallest perturbation possible
+	•	Escalate only on failure
+	•	Don’t keep a large perturbation turned on if you don’t need it
+	•	Prefer accuracy recovery (iterative refinement) over increasing δ
+
+That’s basically how mature solvers avoid the “δ is now part of my algorithm” trap.
+
+⸻
+
+What I would improve next (low effort, high leverage)
+
+1) Make PSD regularization relative to scale, not absolute
+
+A hard 1e-8 is often OK, but it’s still an absolute value. Better is:
+	•	define a dimensionless relative knob eps_reg (say 1e-10 … 1e-7)
+	•	compute the actual δ from the local scale of the PSD block / KKT diagonal
+
+Examples that tend to behave well:
+	•	δ = max(δ_floor, eps_reg * mean_diag)
+	•	δ = max(δ_floor, eps_reg * ||diag(K)||_∞)
+	•	or per PSD block: δ_block = max(δ_floor, eps_reg * (trace(S)/n + trace(Z)/n))
+
+This keeps “1e-8” meaning “tiny compared to my current scale” even if your data are scaled weirdly.
+
+2) Add a cap to avoid “accidentally reintroducing 1e-4”
+
+Even if your floor is small, other codepaths may bump regularization (numeric recovery, shift-and-retry, LDL tweaks). If any of those can push PSD reg to 1e-4, you can land back in the same failure mode.
+
+So I’d explicitly log and enforce something like:
+	•	δ_psd <= δ_psd_max, where δ_psd_max might be relative (recommended) or a conservative absolute like 1e-6 for now.
+	•	If you hit the cap, you can:
+	•	switch strategy (refinement, different factorization, or declare numerical difficulty)
+	•	but don’t silently crank δ into “algorithm-changes-solution” territory.
+
+3) Prefer “regularize to factorize” + unregularized iterative refinement
+
+This is the single most “professional solver” move you can make, and it fits exactly what you observed:
+	•	Use (K + δI) only as a stable preconditioner / factorization target
+	•	But try to solve the original Newton system K Δ = rhs via refinement:
+
+Pseudo:
+
+# Solve a regularized system to get a stable initial direction
+Δ0 = solve((K + δI) Δ = rhs)
+
+# Then refine for the unregularized KKT
+repeat r times:
+    res = rhs - K * Δ
+    if ||res|| is small: break
+    corr = solve((K + δI) corr = res)
+    Δ += corr
+
+This lets you keep δ tiny in effect (direction accuracy) while still surviving LDL/Cholesky numerical issues.
+
+If you already have a patch for this (I saw minix_unregularized_kkt_refinement.patch mentioned earlier in the workspace), that’s the one I’d prioritize if you want “extra numerical safety” without reintroducing bias.
+
+4) Make it visible: log the effective PSD reg used
+
+Given how sensitive SDPs are, you want to be able to answer instantly:
+	•	What δ did we actually apply on this iteration?
+	•	Did it escalate? Did it stay high?
+	•	Did objective/residuals stall right when δ jumped?
+
+Minimal logging for SDPLIB runs is worth it:
+	•	iter, mu, alpha, δ_psd, δ_kkt, min_eig(S), min_eig(Z), rp_abs
+
+⸻
+
+Your stated “next steps” are good — I’d add 2 tweaks
+
+✅ Run full SDPLIB
+
+Yes. And record:
+	•	objective relative error to reference
+	•	feasibility residuals (absolute + relative)
+	•	any regularization escalation statistics
+
+✅ Sweep MINIX_PSD_REG_FLOOR
+
+Yes — but I’d sweep with two metrics:
+	1.	accuracy (objective rel err, feasibility)
+	2.	perturbation usage (how often did we exceed δ_floor via retry?)
+
+And I’d sweep more logarithmically:
+	•	1e-10, 1e-9, 1e-8, 3e-8, 1e-7, 3e-7, 1e-6
+
+If you see a cliff (like you did at 1e-4), you’ll know where the safe region ends.
+
+⸻
+
+Small caution about the interpretation
+
+When SDPs “suddenly start matching references” after reducing δ, it’s usually because:
+	•	you were previously biasing the Newton direction
+	•	not because the solver was “unstable”
+
+So I’d frame the conclusion as:
+
+“Large PSD regularization changes the Newton system enough to converge to the wrong KKT point; keeping PSD regularization minimal and using retry/refinement for factorization robustness preserves correctness.”
+
+That’s the most defensible and aligns with how others describe it in solver papers / implementations.
+
+⸻
+
+One practical request if you want code-level feedback
+
+Some of your earlier uploaded files in my workspace have expired, so I can’t open everything you previously shared. If you want me to sanity-check the exact implementation details (where the PSD reg enters, whether it’s in the barrier operator vs. the KKT diagonal, etc.), please re-upload the specific diff/patch or the relevant file(s) (e.g., kkt.rs / wherever PSD reg is applied). I can then comment much more concretely on whether the reg is applied in the safest place.
+
+⸻
+
+Bottom line
+	•	✅ Your diagnosis and fix direction are solid.
+	•	✅ Defaulting PSD reg to ~1e-8 (or “tiny relative to scale”) is the right baseline.
+	•	✅ “small floor + shift-and-retry” is a good policy.
+	•	🔧 To make it robust without reintroducing the stall: add unregularized refinement, relative scaling, and a cap + logging.
+
+If you paste the small snippet where MINIX_PSD_REG_FLOOR actually modifies the PSD KKT blocks (just that region), I’ll tell you whether it’s placed in the least invasive spot (and if not, how to move it).

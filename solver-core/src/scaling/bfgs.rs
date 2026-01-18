@@ -35,17 +35,59 @@ pub enum BfgsScalingError {
 /// Compute BFGS scaling for a single 3D nonsymmetric cone block.
 ///
 /// This uses the rank-3 formula by default (Clarabel-style), with fallback
-/// to dual-only scaling if stability checks fail.
+/// to dual-only scaling (μ*H_dual) if stability checks fail.
 pub fn bfgs_scaling_3d(
     s: &[f64],
     z: &[f64],
     cone: &dyn ConeKernel,
 ) -> Result<ScalingBlock, BfgsScalingError> {
-    // Try rank-3 scaling first (more stable), fallback to rank-4 if needed
+    // Try rank-3 scaling first (more stable), fallback to dual-only scaling if needed
     match bfgs_scaling_3d_rank3(s, z, cone) {
         Ok(scaling) => Ok(scaling),
-        Err(_) => bfgs_scaling_3d_rank4(s, z, cone),
+        Err(_) => {
+            // Fallback: use dual-only scaling Hs = μ * H_dual (like Clarabel)
+            // This is more accurate than μ*I and matches Clarabel's fallback
+            dual_only_scaling_3d(s, z, cone)
+        }
     }
+}
+
+/// Compute dual-only scaling: Hs = μ * H_dual
+///
+/// This is Clarabel's fallback when primal-dual scaling fails.
+/// Uses the actual Hessian of the dual barrier, scaled by μ.
+fn dual_only_scaling_3d(
+    s: &[f64],
+    z: &[f64],
+    cone: &dyn ConeKernel,
+) -> Result<ScalingBlock, BfgsScalingError> {
+    let s_dot_z = dot3(s, z);
+    let mu = (s_dot_z / 3.0).abs().max(1e-12);
+
+    // Get the Hessian of the dual barrier at z
+    let mut s_tilde = [0.0; 3];
+    let mut h_dual = [0.0; 9];
+    cone.dual_map(z, &mut s_tilde, &mut h_dual);
+
+    // Hs = μ * H_dual
+    let mut h = [0.0; 9];
+    for i in 0..9 {
+        h[i] = mu * h_dual[i];
+    }
+
+    // Symmetrize (should be symmetric, but numerical errors)
+    let h = symmetrize_mat3(&h);
+
+    // Sanity check: ensure H is positive definite
+    let min_eig = min_eigenvalue(&h);
+    if !min_eig.is_finite() || min_eig <= 1e-12 {
+        // Last resort: use μ*I
+        return Ok(ScalingBlock::Dense3x3 {
+            h: [mu, 0.0, 0.0, 0.0, mu, 0.0, 0.0, 0.0, mu],
+        });
+    }
+
+    Ok(ScalingBlock::Dense3x3 { h })
 }
 
 /// Compute rank-3 BFGS scaling (Clarabel-style).
@@ -186,20 +228,17 @@ fn bfgs_scaling_3d_rank3(
     // We limit the condition number to prevent overflow in the solve.
     let min_eig = min_eigenvalue(&h);
     let max_eig = max_eigenvalue(&h);
-    let max_cond = 1e6;  // Maximum allowed condition number (tighter for exp cones)
+    let max_cond = 1e6;  // Allow higher condition number (dual-only fallback handles edge cases)
 
-    // Fallback to identity-like scaling if anything goes wrong
-    let mu_scaled = (s_dot_z / 3.0).abs().max(1.0);
-    let fallback = [mu_scaled, 0.0, 0.0, 0.0, mu_scaled, 0.0, 0.0, 0.0, mu_scaled];
-
-    if !min_eig.is_finite() || !max_eig.is_finite() || min_eig <= 1e-10 {
-        return Ok(ScalingBlock::Dense3x3 { h: fallback });
+    if !min_eig.is_finite() || !max_eig.is_finite() || min_eig <= 1e-12 {
+        // Return error so outer function uses dual-only scaling fallback
+        return Err(BfgsScalingError::DualMapFailed);
     }
 
     let cond = max_eig / min_eig.max(1e-15);
     if cond > max_cond {
-        // Condition number way too high - use identity fallback instead of trying to fix
-        return Ok(ScalingBlock::Dense3x3 { h: fallback });
+        // Condition number too high - return error for dual-only fallback
+        return Err(BfgsScalingError::DualMapFailed);
     }
 
     Ok(ScalingBlock::Dense3x3 { h })
@@ -283,7 +322,7 @@ fn bfgs_scaling_3d_rank4(
     let h = symmetrize_mat3(&h);
     let min_eig = min_eigenvalue(&h);
     let max_eig = max_eigenvalue(&h);
-    let max_cond = 1e6;  // Maximum allowed condition number (tighter for exp cones)
+    let max_cond = 1e3;  // Maximum allowed condition number (very tight to avoid KKT overflow)
 
     if !min_eig.is_finite() || !max_eig.is_finite() || min_eig <= 1e-10 {
         return Ok(ScalingBlock::Dense3x3 { h: fallback });

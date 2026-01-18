@@ -1,0 +1,210 @@
+I took a look through rustfiles and I’m pretty sure your PSD/“SPD” cone is stalling for a very specific reason:
+
+The PSD cone is being treated like a componentwise cone in the Mehrotra corrector
+
+Your KKT/scaling plumbing for PSD looks basically right:
+	•	You’re representing PSD blocks in svec form (dim = n(n+1)/2) and converting with the √2 off‑diagonal convention (good: preserves inner products / trace(XY)).
+	•	NT scaling for PSD is implemented as the standard
+W = X^{1/2}(X^{1/2}ZX^{1/2})^{-1/2}X^{1/2}.
+(This is the right object so that WZW = X.)
+	•	The KKT builder’s PSD scaling block is filled by applying H(v)=W v W to basis vectors (slow but correct for small n).
+
+But in solver-core/src/ipm2/predcorr.rs the combined (predictor‑corrector) RHS d_s_comb is computed like this:
+	•	SOC gets a proper Jordan-algebra correction (great).
+	•	Everything else falls into an elementwise formula:
+
+let w_base = s_i * z_i + ds_aff_i * dz_aff_i;
+d_s_comb[i] = (w_base - target_mu - delta) / z_i;
+
+That logic is correct for NonNeg, and sometimes tolerable for some non-symmetric cones with custom hacks (exp/pow), but it is mathematically wrong for PSD, because PSD complementarity is not componentwise.
+
+For PSD, the complementarity is in the Jordan algebra of symmetric matrices:
+	•	Jordan product:
+X \circ Z = \tfrac{1}{2}(XZ + ZX)
+	•	Central path target:
+X \circ Z = \mu I
+
+If you feed PSD into a componentwise corrector, the “centering” direction is simply not aiming at the right central path. The usual symptom is exactly what you’re seeing: it makes progress early, then stalls / burns iterations / hits MaxIters even on small SDPs.
+
+⸻
+
+What you want instead: a PSD (Jordan) Mehrotra corrector, analogous to your SOC branch
+
+You already have the SOC version implemented. PSD should mirror it, except:
+	•	vectors ↔ symmetric matrices
+	•	Jordan solve is a Sylvester equation solve in the eigenbasis
+
+The standard symmetric-cone Mehrotra recipe specialized to PSD
+
+Let W be the NT scaling matrix such that W Z W = S (your w_factor).
+
+Define the symmetric square roots:
+	•	W^{1/2}, W^{-1/2}
+
+Compute:
+	•	\lambda = Q(W^{1/2})Z = W^{1/2} Z W^{1/2}
+	•	A = Q(W^{-1/2})\,dS_{\text{aff}} = W^{-1/2} dS_{\text{aff}} W^{-1/2}
+	•	B = Q(W^{1/2})\,dZ_{\text{aff}} = W^{1/2} dZ_{\text{aff}} W^{1/2}
+	•	\eta = A \circ B = \tfrac{1}{2}(AB + BA)
+	•	v = \lambda^2 + \eta - \sigma\mu I
+(here \lambda^2 is ordinary matrix square; same as \lambda \circ \lambda)
+
+Now solve for U in the Jordan equation:
+	•	\lambda \circ U = v
+	•	i.e. \tfrac{1}{2}(\lambda U + U\lambda)=v
+	•	i.e. Sylvester: \lambda U + U\lambda = 2v
+
+If \lambda = Q\,\mathrm{diag}(\ell)\,Q^\top, then in eigenbasis:
+	•	(\ell_i + \ell_j) \, U_{ij} = 2 V_{ij}
+	•	so U_{ij} = \dfrac{2V_{ij}}{\ell_i+\ell_j}
+
+Finally map back to svec:
+	•	dS_{\text{comb}} = Q(W^{1/2})U = W^{1/2} U W^{1/2}
+	•	and set your d_s_comb slice to svec(dS_comb).
+
+This is the PSD analogue of what your SOC branch is doing.
+
+⸻
+
+Concrete patch sketch
+
+1) Add imports in solver-core/src/ipm2/predcorr.rs
+
+At top:
+
+use crate::cones::psd::{mat_to_svec, svec_to_mat};
+use nalgebra::DMatrix;
+use nalgebra::linalg::SymmetricEigen;
+
+2) In the d_s_comb loop, add a PSD branch (between SOC and elementwise)
+
+Right now you have:
+
+let is_soc = (cone.as_ref() as &dyn Any).is::<SocCone>();
+let is_nonneg = matches!(cone, ConeSpec::NonNeg { .. });
+...
+if is_soc {
+   ...
+} else {
+   // elementwise fallback
+}
+
+Change to:
+
+let is_psd = (cone.as_ref() as &dyn Any).is::<PsdCone>();
+
+if is_soc {
+   ...
+} else if is_psd {
+   // PSD Jordan corrector (Sylvester solve)
+} else {
+   // elementwise fallback
+}
+
+3) PSD branch code (directly usable skeleton)
+
+} else if is_psd {
+    let (w_factor, n) = match &ws.scaling[cone_idx] {
+        ScalingBlock::PsdStructured { w_factor, n } => (w_factor.as_slice(), *n),
+        _ => panic!("PSD cone must use PsdStructured scaling block"),
+    };
+    debug_assert_eq!(dim, n * (n + 1) / 2);
+
+    let z_slice = &state.z[offset..offset + dim];
+    let ds_aff_slice = &ws.ds_aff[offset..offset + dim];
+    let dz_aff_slice = &ws.dz_aff[offset..offset + dim];
+    let d_s_comb_slice = &mut ws.d_s_comb[offset..offset + dim];
+
+    // svec -> symmetric matrices
+    let z_mat = svec_to_mat(z_slice, n);
+    let ds_aff_mat = svec_to_mat(ds_aff_slice, n);
+    let dz_aff_mat = svec_to_mat(dz_aff_slice, n);
+
+    // W from scaling block
+    let w_mat = DMatrix::from_row_slice(n, n, w_factor);
+
+    // W^{1/2}, W^{-1/2} via eigen
+    let eig_w = SymmetricEigen::new(w_mat);
+    let q_w = eig_w.eigenvectors;
+    let d_w = eig_w.eigenvalues;
+
+    let d_sqrt = d_w.map(|x| x.max(1e-30).sqrt());
+    let d_inv_sqrt = d_w.map(|x| 1.0 / x.max(1e-30).sqrt());
+    let q_w_t = q_w.transpose();
+
+    let w_half = &q_w * DMatrix::from_diagonal(&d_sqrt) * &q_w_t;
+    let w_half_inv = &q_w * DMatrix::from_diagonal(&d_inv_sqrt) * &q_w_t;
+
+    // λ, A, B
+    let lambda = &w_half * &z_mat * &w_half;
+    let a = &w_half_inv * &ds_aff_mat * &w_half_inv;
+    let b = &w_half * &dz_aff_mat * &w_half;
+
+    // η = (AB + BA)/2
+    let eta = (&a * &b + &b * &a) * 0.5;
+
+    // v = λ^2 + η - target_mu I
+    let mut v = &lambda * &lambda + eta;
+    for i in 0..n {
+        v[(i, i)] -= target_mu;
+    }
+
+    // Solve λU + Uλ = 2v using eigenbasis of λ
+    let eig_l = SymmetricEigen::new(lambda);
+    let q_l = eig_l.eigenvectors;
+    let d_l = eig_l.eigenvalues;
+    let q_l_t = q_l.transpose();
+
+    let v_hat = &q_l_t * &v * &q_l;
+    let mut u_hat = DMatrix::zeros(n, n);
+    for i in 0..n {
+        for j in 0..n {
+            let denom = d_l[i] + d_l[j];
+            // denom should be > 0 if lambda is PD; guard anyway
+            u_hat[(i, j)] = if denom > 1e-30 {
+                2.0 * v_hat[(i, j)] / denom
+            } else {
+                0.0
+            };
+        }
+    }
+    let u = &q_l * u_hat * &q_l_t;
+
+    // d_s_comb = Q(W^{1/2}) u
+    let ds_comb_mat = &w_half * u * &w_half;
+
+    // back to svec
+    mat_to_svec(&ds_comb_mat, d_s_comb_slice);
+}
+
+This is the direct PSD analogue of your SOC code path and (crucially) it uses the correct Jordan structure.
+
+⸻
+
+What I’d expect after this change
+	•	The small SDP that currently MaxIters should stop “mysteriously stalling” and start behaving like a normal symmetric-cone IPM.
+	•	Iterations should drop a lot versus any “pure centering” fallback.
+	•	If it still stalls, then we should look next at:
+	1.	how you compute sigma / mu_aff when PSD blocks exist (should still be fine with inner product),
+	2.	whether the PSD step-to-boundary is overly conservative (0.99 factor might be too strict for PSD, though usually ok),
+	3.	KKT regularization strength (PSD blocks can make KKT more ill-conditioned).
+
+But right now the strongest smoking gun is: PSD is not getting a PSD-aware corrector RHS.
+
+⸻
+
+Quick diagnostic you can add to confirm this is the issue
+
+Before/after the patch, log for PSD blocks:
+	•	min_eig(S), min_eig(Z) (interiority)
+	•	|| (S∘Z - μI) ||_F / μ (centrality residual in Jordan sense)
+
+If your current code is using componentwise correction, you’ll often see:
+	•	μ decreasing a bit, but
+	•	||S∘Z - μI|| not really shrinking (or shrinking extremely slowly)
+
+After the patch, that centrality residual should start tracking down much more cleanly.
+
+⸻
+
+If you tell me which “small test problem” you mean (file/name in solver-bench), I can also point you to exactly where to add those logs (and what to print to see if it’s centrality vs feasibility that’s stalling).

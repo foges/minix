@@ -1,0 +1,116 @@
+*** a/solver-core/src/linalg/kkt.rs
+--- b/solver-core/src/linalg/kkt.rs
+@@
+-fn solve_permuted_with_refinement<'a, B: LinearSystemBackend>(
+-    backend: &B,
+-    static_reg: f64,
+-    kkt: &DMatrix<f64>,
+-    ws: &mut SolveWorkspace,
+-    factor: &'a B::Factor,
+-    refine_iters: usize,
+-) -> Result<(LinsysInfo, Option<LinsysInfo>), LinearSystemError> {
++fn solve_permuted_with_refinement<'a, B: LinearSystemBackend>(
++    backend: &B,
++    static_reg: f64,
++    kkt: &DMatrix<f64>,
++    ws: &mut SolveWorkspace,
++    factor: &'a B::Factor,
++    refine_iters: usize,
++    perm: Option<&[usize]>,
++    n_primal: usize,
++) -> Result<(LinsysInfo, Option<LinsysInfo>), LinearSystemError> {
+@@
+-    symm_matvec_upper(kkt, sol_perm, &mut ws.kx_perm);
+-    for i in 0..kkt.nrows() {
+-        ws.kx_perm[i] += static_reg * sol_perm[i];
+-    }
+-    for i in 0..kkt.nrows() {
+-        ws.res[i] = rhs_perm[i] - ws.kx_perm[i];
+-    }
++    // kx_perm = K_reg * sol_perm
++    // where K_reg = [P + eps*I, A^T; A, -(H + eps*I)]
++    // and the factorization uses eps = static_reg.
++    //
++    // NOTE: If we measure the residual against K_reg, the solve converges to the
++    // *regularized* Newton system. This can leave an O(eps*||dz||) feasibility floor.
++    //
++    // Instead, we measure residuals against the *unregularized* K0 = [P, A^T; A, -H]
++    // and use the K_reg factorization as a preconditioner:
++    //     res0 = rhs - K0*x = (rhs - K_reg*x) + (K_reg - K0)*x
++    // with (K_reg - K0) = diag([+eps (primal block), -eps (dual block)]).
++    symm_matvec_upper(kkt, sol_perm, &mut ws.kx_perm);
++    for i in 0..kkt.nrows() {
++        ws.kx_perm[i] += static_reg * sol_perm[i];
++    }
++    for i in 0..kkt.nrows() {
++        ws.res[i] = rhs_perm[i] - ws.kx_perm[i];
++    }
++    if static_reg != 0.0 {
++        for i in 0..kkt.nrows() {
++            let orig = perm.map(|p| p[i]).unwrap_or(i);
++            if orig < n_primal {
++                ws.res[i] += static_reg * sol_perm[i];
++            } else {
++                ws.res[i] -= static_reg * sol_perm[i];
++            }
++        }
++    }
+@@
+-        symm_matvec_upper(kkt, sol_perm, &mut ws.kx_perm);
+-        for i in 0..kkt.nrows() {
+-            ws.kx_perm[i] += static_reg * sol_perm[i];
+-        }
+-        for i in 0..kkt.nrows() {
+-            ws.res[i] = rhs_perm[i] - ws.kx_perm[i];
+-        }
++        symm_matvec_upper(kkt, sol_perm, &mut ws.kx_perm);
++        for i in 0..kkt.nrows() {
++            ws.kx_perm[i] += static_reg * sol_perm[i];
++        }
++        for i in 0..kkt.nrows() {
++            ws.res[i] = rhs_perm[i] - ws.kx_perm[i];
++        }
++        if static_reg != 0.0 {
++            for i in 0..kkt.nrows() {
++                let orig = perm.map(|p| p[i]).unwrap_or(i);
++                if orig < n_primal {
++                    ws.res[i] += static_reg * sol_perm[i];
++                } else {
++                    ws.res[i] -= static_reg * sol_perm[i];
++                }
++            }
++        }
+     }
+***
+*** a/solver-core/src/linalg/kkt.rs
+--- b/solver-core/src/linalg/kkt.rs
+@@
+-        let perm = self.perm.as_deref();
++        let perm = self.perm.as_deref();
+         let static_reg = self.static_reg;
+         let refine_iters = self.refine_iters;
++        let n_primal = self.n;
+@@
+-        let (solve_info1, refine_info1) = solve_permuted_with_refinement(
++        let (solve_info1, refine_info1) = solve_permuted_with_refinement(
+             backend,
+             static_reg,
+             kkt,
+             ws,
+             &factor,
+             refine_iters,
++            perm,
++            n_primal,
+         )?;
+@@
+-        let (solve_info2, refine_info2) = solve_permuted_with_refinement(
++        let (solve_info2, refine_info2) = solve_permuted_with_refinement(
+             backend,
+             static_reg,
+             kkt,
+             ws,
+             &factor,
+             refine_iters,
++            perm,
++            n_primal,
+         )?;
