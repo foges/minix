@@ -21,9 +21,11 @@
 //!   τ ≥ 0, κ ≥ 0, τ κ = 0
 
 use crate::cones::ConeKernel;
+use crate::cones::psd::svec_to_mat;
 use crate::postsolve::PostsolveMap;
 use crate::presolve::ruiz::RuizScaling;
 use crate::problem::{ProblemData, WarmStart};
+use nalgebra::linalg::SymmetricEigen;
 
 /// HSDE state variables.
 #[derive(Debug, Clone)]
@@ -208,27 +210,93 @@ impl HsdeState {
     /// the boundary. This is similar to Clarabel's `shift_to_cone_interior`.
     ///
     /// For NonNeg cones: ensures z[i] >= min_margin and s[i] >= min_margin.
-    /// For SOC cones: ensures the SOC margin is at least min_margin.
+    /// For SOC/PSD/Exp cones: scales the point to ensure margin.
     pub fn shift_to_min_margin(&mut self, cones: &[Box<dyn ConeKernel>], min_margin: f64) {
         let mut offset = 0;
         for cone in cones {
             let dim = cone.dim();
+            let degree = cone.barrier_degree();
 
             // Skip zero cones
-            if cone.barrier_degree() == 0 {
+            if degree == 0 {
                 offset += dim;
                 continue;
             }
 
-            // For each cone, shift components that are below min_margin
-            // For NonNeg cone: simply clamp each component
-            // For SOC: more complex, but for now just handle NonNeg
-            for i in offset..offset + dim {
-                if self.s[i] < min_margin {
-                    self.s[i] = min_margin;
+            // NonNeg cones have barrier_degree == dim
+            // SOC cones have barrier_degree == 2
+            // PSD cones have barrier_degree == n (matrix size)
+            // Exp/Pow cones have barrier_degree == 3 * count
+            let is_nonneg = degree == dim;
+
+            if is_nonneg {
+                // For NonNeg: simply clamp each component
+                for i in offset..offset + dim {
+                    if self.s[i] < min_margin {
+                        self.s[i] = min_margin;
+                    }
+                    if self.z[i] < min_margin {
+                        self.z[i] = min_margin;
+                    }
                 }
-                if self.z[i] < min_margin {
-                    self.z[i] = min_margin;
+            } else {
+                // For SOC/PSD/Exp/Pow: scale to ensure interior with margin
+                // Check if currently interior and has sufficient margin
+                let s_slice = &self.s[offset..offset + dim];
+                let z_slice = &self.z[offset..offset + dim];
+
+                // Detect PSD cone: dim = n*(n+1)/2, degree = n
+                let n_candidate = ((-1.0 + (1.0 + 8.0 * dim as f64).sqrt()) / 2.0).round() as usize;
+                let is_psd = n_candidate > 0 && n_candidate * (n_candidate + 1) / 2 == dim && degree == n_candidate;
+
+                // If not interior, reset to unit initialization with margin
+                if !cone.is_interior_primal(s_slice) {
+                    let mut s_unit = vec![0.0; dim];
+                    let mut z_unit = vec![0.0; dim];
+                    cone.unit_initialization(&mut s_unit, &mut z_unit);
+                    for i in 0..dim {
+                        self.s[offset + i] = s_unit[i] * min_margin;
+                    }
+                } else {
+                    // Scale up if minimum margin is too small
+                    // For PSD: compute minimum eigenvalue
+                    // For SOC/Exp/Pow: use element-wise min
+                    let min_s = if is_psd {
+                        let s_mat = svec_to_mat(s_slice, n_candidate);
+                        let eig_s = SymmetricEigen::new(s_mat);
+                        eig_s.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
+                    } else {
+                        s_slice.iter().cloned().fold(f64::INFINITY, f64::min)
+                    };
+                    if min_s < min_margin && min_s > 0.0 {
+                        let scale = min_margin / min_s;
+                        for i in 0..dim {
+                            self.s[offset + i] *= scale;
+                        }
+                    }
+                }
+
+                if !cone.is_interior_dual(z_slice) {
+                    let mut s_unit = vec![0.0; dim];
+                    let mut z_unit = vec![0.0; dim];
+                    cone.unit_initialization(&mut s_unit, &mut z_unit);
+                    for i in 0..dim {
+                        self.z[offset + i] = z_unit[i] * min_margin;
+                    }
+                } else {
+                    let min_z = if is_psd {
+                        let z_mat = svec_to_mat(z_slice, n_candidate);
+                        let eig_z = SymmetricEigen::new(z_mat);
+                        eig_z.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
+                    } else {
+                        z_slice.iter().cloned().fold(f64::INFINITY, f64::min)
+                    };
+                    if min_z < min_margin && min_z > 0.0 {
+                        let scale = min_margin / min_z;
+                        for i in 0..dim {
+                            self.z[offset + i] *= scale;
+                        }
+                    }
                 }
             }
 
@@ -483,20 +551,19 @@ pub fn compute_residuals(
     residuals.r_x.fill(0.0);
 
     // P x (if P exists)
+    // Only process upper triangle (row <= col) to handle both upper-triangular
+    // and full symmetric matrix storage, avoiding double-counting
     if let Some(ref p) = prob.P {
-        // P is symmetric, so we need to do symmetric matvec
-        // For upper triangle storage: y += P_ij x_j for j >= i
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
-                    if row == col {
-                        // Diagonal
+                    if row <= col {
                         residuals.r_x[row] += val * state.x[col];
-                    } else {
-                        // Off-diagonal (row < col due to upper triangle)
-                        residuals.r_x[row] += val * state.x[col];
-                        residuals.r_x[col] += val * state.x[row]; // Symmetric contribution
+                        if row != col {
+                            residuals.r_x[col] += val * state.x[row];
+                        }
                     }
+                    // Skip lower triangle (row > col) to avoid double-counting
                 }
             }
         }
@@ -542,17 +609,20 @@ pub fn compute_residuals(
     let mut xpx = 0.0;
 
     // x^T P x (if P exists)
+    // Only process upper triangle (row <= col) to handle both upper-triangular
+    // and full symmetric matrix storage, avoiding double-counting
     if let Some(ref p) = prob.P {
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
-                    if row == col {
+                    if row < col {
+                        // Upper triangle off-diagonal (count twice for symmetry)
+                        xpx += 2.0 * state.x[row] * val * state.x[col];
+                    } else if row == col {
                         // Diagonal
                         xpx += state.x[row] * val * state.x[col];
-                    } else {
-                        // Off-diagonal (count twice for symmetry)
-                        xpx += 2.0 * state.x[row] * val * state.x[col];
                     }
+                    // Skip lower triangle (row > col) to avoid double-counting
                 }
             }
         }

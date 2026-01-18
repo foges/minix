@@ -318,16 +318,21 @@ pub fn solve_ipm(
             let x_bar: Vec<f64> = state.x.iter().map(|xi| xi / state.tau).collect();
             let z_bar: Vec<f64> = state.z.iter().map(|zi| zi / state.tau).collect();
 
+            // Compute x^T P x - only process upper triangle (row <= col) to handle both
+            // upper-triangular and full symmetric matrix storage
             let mut xpx = 0.0;
             if let Some(ref p) = scaled_prob.P {
                 for col in 0..n {
                     if let Some(col_view) = p.outer_view(col) {
                         for (row, &val) in col_view.iter() {
-                            if row == col {
-                                xpx += x_bar[row] * val * x_bar[col];
-                            } else {
+                            if row < col {
+                                // Upper triangle off-diagonal
                                 xpx += 2.0 * x_bar[row] * val * x_bar[col];
+                            } else if row == col {
+                                // Diagonal
+                                xpx += x_bar[row] * val * x_bar[col];
                             }
+                            // Skip lower triangle (row > col)
                         }
                     }
                 }
@@ -401,16 +406,21 @@ pub fn solve_ipm(
     let z = postsolve.recover_z(&z_unscaled);
 
     // Compute objective value using ORIGINAL (unscaled) problem data
+    // Only process upper triangle (row <= col) to handle both upper-triangular
+    // and full symmetric matrix storage
     let mut obj_val = 0.0;
     if let Some(ref p) = orig_prob.P {
         let mut px = vec![0.0; orig_n];
         for col in 0..orig_n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
-                    px[row] += val * x[col];
-                    if row != col {
-                        px[col] += val * x[row];
+                    if row <= col {
+                        px[row] += val * x[col];
+                        if row != col {
+                            px[col] += val * x[row];
+                        }
                     }
+                    // Skip lower triangle (row > col)
                 }
             }
         }

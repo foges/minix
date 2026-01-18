@@ -126,17 +126,20 @@ pub fn check_termination(
         r_p[row] += val * x_bar[col];
     }
 
+    // Compute P*x - only process upper triangle (row <= col) to handle both
+    // upper-triangular and full symmetric matrix storage
     let mut p_x = vec![0.0; n];
     if let Some(ref p) = prob.P {
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
-                    if row == col {
+                    if row <= col {
                         p_x[row] += val * x_bar[col];
-                    } else {
-                        p_x[row] += val * x_bar[col];
-                        p_x[col] += val * x_bar[row];
+                        if row != col {
+                            p_x[col] += val * x_bar[row];
+                        }
                     }
+                    // Skip lower triangle (row > col) to avoid double-counting
                 }
             }
         }

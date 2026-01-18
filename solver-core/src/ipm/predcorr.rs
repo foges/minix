@@ -732,18 +732,20 @@ pub fn predictor_corrector_step(
     // This replaces the old heuristic dtau = -(q'dx + b'dz)
 
     // First, compute mul_p_xi = P*ξ (if P exists)
+    // Only process upper triangle (row <= col) to handle both upper-triangular
+    // and full symmetric matrix storage
     let mut mul_p_xi = vec![0.0; n];
     if let Some(ref p) = prob.P {
-        // P is symmetric upper triangle, do symmetric matvec
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
-                    if row == col {
+                    if row <= col {
                         mul_p_xi[row] += val * state.xi[col];
-                    } else {
-                        mul_p_xi[row] += val * state.xi[col];
-                        mul_p_xi[col] += val * state.xi[row];
+                        if row != col {
+                            mul_p_xi[col] += val * state.xi[row];
+                        }
                     }
+                    // Skip lower triangle (row > col)
                 }
             }
         }

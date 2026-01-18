@@ -90,17 +90,22 @@ pub fn compute_unscaled_metrics(
     }
 
     // p_x = P x
+    // P may be stored as upper triangle only or full symmetric matrix.
+    // Only process upper triangle (row <= col) and mirror to avoid double-counting.
     p_x.fill(0.0);
     if let Some(p) = p_upper {
-        // Treat as symmetric: use stored entries and mirror off-diagonal.
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 let xj = x_bar[col];
                 for (row, &val) in col_view.iter() {
-                    p_x[row] += val * xj;
-                    if row != col {
-                        p_x[col] += val * x_bar[row];
+                    if row <= col {
+                        // Upper triangle entry - process and mirror
+                        p_x[row] += val * xj;
+                        if row != col {
+                            p_x[col] += val * x_bar[row];
+                        }
                     }
+                    // Skip lower triangle entries (row > col) to avoid double-counting
                 }
             }
         }
@@ -126,30 +131,16 @@ pub fn compute_unscaled_metrics(
 
     let b_inf = inf_norm(b);
     let q_inf = inf_norm(q);
+    let x_inf = inf_norm(x_bar);
     let s_inf = inf_norm(s_bar);
+    let z_inf = inf_norm(z_bar);
 
-    // Compute ||Ax|| from r_p = Ax + s - b  =>  Ax = r_p - s + b
-    let ax_inf = (0..m).map(|i| (r_p[i] - s_bar[i] + b[i]).abs()).fold(0.0_f64, f64::max);
-
-    // Compute ||A^T z|| for dual scaling
-    let mut atz_inf = 0.0_f64;
-    for col in 0..n {
-        let mut acc = 0.0;
-        if let Some(col_view) = a.outer_view(col) {
-            for (row, &val) in col_view.iter() {
-                acc += val * z_bar[row];
-            }
-        }
-        atz_inf = atz_inf.max(acc.abs());
-    }
-
-    // Industry-standard abs+rel scaling:
-    // primal_scale = max(1, ||b||, ||Ax||, ||s||)
-    // dual_scale = max(1, ||q||, ||A^T z||)
-    // This captures cancellation difficulty via max(||Ax||, ||s||) without
-    // allowing unbounded iterates to hide failures.
-    let primal_scale = 1.0_f64.max(b_inf).max(ax_inf).max(s_inf);
-    let dual_scale = 1.0_f64.max(q_inf).max(atz_inf);
+    // Clarabel-style scaling (industry standard):
+    // primal_scale = max(1, ||b|| + ||x|| + ||s||)
+    // dual_scale = max(1, ||q|| + ||x|| + ||z||)
+    // This matches Clarabel and ensures consistency between solver and benchmark.
+    let primal_scale = 1.0_f64.max(b_inf + x_inf + s_inf);
+    let dual_scale = 1.0_f64.max(q_inf + x_inf + z_inf);
 
     let rel_p = rp_inf / primal_scale;
     let rel_d = rd_inf / dual_scale;
@@ -161,8 +152,9 @@ pub fn compute_unscaled_metrics(
     let obj_p = 0.5 * xpx + qtx;
     let obj_d = -0.5 * xpx - btz;
 
+    // Clarabel-style gap_rel: gap / max(1, min(|obj_p|, |obj_d|))
     let gap = (obj_p - obj_d).abs();
-    let denom = obj_p.abs().max(obj_d.abs()).max(1.0);
+    let denom = obj_p.abs().min(obj_d.abs()).max(1.0);
     let gap_rel = gap / denom;
 
     UnscaledMetrics {
@@ -260,15 +252,18 @@ pub fn diagnose_dual_residual(
     let m = z_bar.len();
 
     // Compute P*x (objective gradient term)
+    // Only process upper triangle (row <= col) to handle both upper-triangular and full symmetric storage
     let mut p_x = vec![0.0; n];
     if let Some(p) = p_upper {
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 let xj = x_bar[col];
                 for (row, &val) in col_view.iter() {
-                    p_x[row] += val * xj;
-                    if row != col {
-                        p_x[col] += val * x_bar[row];
+                    if row <= col {
+                        p_x[row] += val * xj;
+                        if row != col {
+                            p_x[col] += val * x_bar[row];
+                        }
                     }
                 }
             }

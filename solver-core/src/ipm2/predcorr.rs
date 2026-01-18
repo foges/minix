@@ -1066,17 +1066,20 @@ pub fn predictor_corrector_step_in_place(
     }
 
     // Compute mul_p_xi = P * xi (if P exists)
+    // Only process upper triangle (row <= col) to handle both upper-triangular
+    // and full symmetric matrix storage
     ws.mul_p_xi.fill(0.0);
     if let Some(ref p) = prob.P {
         for col in 0..n {
             if let Some(col_view) = p.outer_view(col) {
                 for (row, &val) in col_view.iter() {
-                    if row == col {
+                    if row <= col {
                         ws.mul_p_xi[row] += val * state.xi[col];
-                    } else {
-                        ws.mul_p_xi[row] += val * state.xi[col];
-                        ws.mul_p_xi[col] += val * state.xi[row];
+                        if row != col {
+                            ws.mul_p_xi[col] += val * state.xi[row];
+                        }
                     }
+                    // Skip lower triangle (row > col)
                 }
             }
         }
