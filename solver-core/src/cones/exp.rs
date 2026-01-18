@@ -17,7 +17,11 @@ impl ExpCone {
         Self { count }
     }
 
-    const INTERIOR_TOL: f64 = 1e-12;
+    // Relaxed interior tolerance for step_to_boundary.
+    // For EXP cones, the optimal point is often ON the boundary (tight constraint),
+    // so we need a looser tolerance to allow approaching the optimum.
+    // Clarabel uses a similar relaxed tolerance for nonsymmetric cones.
+    const INTERIOR_TOL: f64 = 1e-8;
     const NEWTON_TOL: f64 = 1e-10;
     const MAX_NEWTON_ITERS: usize = 20;
     const MAX_LINESEARCH_ITERS: usize = 40;
@@ -54,10 +58,10 @@ impl ConeKernel for ExpCone {
         let mut alpha = f64::INFINITY;
         for block in 0..self.count {
             let offset = 3 * block;
-            let a = exp_step_to_boundary_block(
+            // Use barrier-based step criterion for primal - allows approaching boundary
+            let a = exp_step_to_boundary_primal_block(
                 &s[offset..offset + 3],
                 &ds[offset..offset + 3],
-                exp_primal_interior,
             );
             if a.is_finite() {
                 alpha = alpha.min(a.max(0.0));
@@ -200,6 +204,98 @@ fn exp_dual_interior(z: &[f64]) -> bool {
     let log_w = w.ln();
     let log_rhs = (-u).ln() + v / u - 1.0;
     (log_w - log_rhs) > ExpCone::INTERIOR_TOL
+}
+
+/// Step to boundary for primal EXP cone using barrier-based criterion.
+///
+/// Instead of strict interior membership, we allow approaching the boundary
+/// while keeping the barrier function bounded. This is essential for EXP cones
+/// where the optimal primal slack is ON the boundary (complementary slackness).
+fn exp_step_to_boundary_primal_block(s: &[f64], ds: &[f64]) -> f64 {
+    if ds.iter().all(|&v| v == 0.0) {
+        return f64::INFINITY;
+    }
+
+    // Basic feasibility: s[1] > 0, s[2] > 0
+    let (y, z) = (s[1], s[2]);
+    if y <= 0.0 || z <= 0.0 {
+        return 0.0;
+    }
+
+    // Compute current barrier margin psi = y * ln(z/y) - x
+    // For interior: psi > 0. On boundary: psi = 0. Outside: psi < 0.
+    let psi = y * (z / y).ln() - s[0];
+
+    // Allow steps even when psi is slightly negative (numerical tolerance)
+    // This is essential for EXP cones where the optimal is ON the boundary
+    let psi_tol = -1e-6;
+    if !psi.is_finite() || psi < psi_tol {
+        // Current point significantly outside cone - try to find a valid step
+        let mut alpha = 1.0;
+        for _ in 0..20 {
+            let y_trial = y + alpha * ds[1];
+            let z_trial = z + alpha * ds[2];
+            if y_trial > 1e-10 && z_trial > 1e-10 {
+                let psi_trial = y_trial * (z_trial / y_trial).ln() - (s[0] + alpha * ds[0]);
+                if psi_trial.is_finite() && psi_trial > 1e-10 {
+                    return alpha;
+                }
+            }
+            alpha *= 0.7;
+        }
+        return 0.0;
+    }
+
+    // Current barrier value (for barrier-based step control)
+    // Handle psi close to 0 by clamping to avoid -inf
+    let psi_clamped = psi.max(1e-12);
+    let barrier_curr = -psi_clamped.ln() - y.ln() - z.ln();
+
+    // Maximum allowed barrier increase (allows approaching boundary)
+    // Very generous - allows significant barrier increase to enable convergence
+    // near the boundary where the optimal solution lies
+    let barrier_max = barrier_curr + 20.0;
+
+    // Full step test
+    let y1 = y + ds[1];
+    let z1 = z + ds[2];
+    if y1 > 1e-12 && z1 > 1e-12 {
+        let psi1 = y1 * (z1 / y1).ln() - (s[0] + ds[0]);
+        if psi1.is_finite() && psi1 > 1e-15 {
+            let barrier1 = -psi1.ln() - y1.ln() - z1.ln();
+            if barrier1.is_finite() && barrier1 < barrier_max {
+                return f64::INFINITY;
+            }
+        }
+    }
+
+    // Binary search for largest step with bounded barrier
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..ExpCone::MAX_LINESEARCH_ITERS {
+        let mid = 0.5 * (lo + hi);
+        let y_t = y + mid * ds[1];
+        let z_t = z + mid * ds[2];
+
+        let accept = if y_t > 1e-12 && z_t > 1e-12 {
+            let psi_t = y_t * (z_t / y_t).ln() - (s[0] + mid * ds[0]);
+            if psi_t.is_finite() && psi_t > 1e-15 {
+                let barrier_t = -psi_t.ln() - y_t.ln() - z_t.ln();
+                barrier_t.is_finite() && barrier_t < barrier_max
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if accept {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 fn exp_step_to_boundary_block(
@@ -397,7 +493,139 @@ fn exp_primal_third_contract(x: &[f64], p: &[f64], q: &[f64]) -> [f64; 3] {
     result
 }
 
+/// Compute the dual barrier Hessian at z using Clarabel's formula.
+///
+/// For the dual exponential cone K_exp* = {(u,v,w) : u < 0, w > 0, w ≥ -u*exp(v/u - 1)},
+/// the dual barrier is f*(z) = -log(-z[0]) - log(z[2]) - log(ψ)
+/// where ψ = -z[0]*log(-z[2]/z[0]) - z[0] + z[1].
+fn exp_compute_dual_hessian(z: &[f64]) -> [f64; 9] {
+    let l = (-z[2] / z[0]).ln();  // log(-z[2]/z[0])
+    let r = -z[0] * l - z[0] + z[1];  // ψ
+
+    // Clarabel's dual Hessian formula (symmetric, so only upper triangle needed)
+    let h00 = (r * r - z[0] * r + l * l * z[0] * z[0]) / (r * z[0] * z[0] * r);
+    let h01 = -l / (r * r);
+    let h11 = 1.0 / (r * r);
+    let h02 = (z[1] - z[0]) / (r * r * z[2]);
+    let h12 = -z[0] / (r * r * z[2]);
+    let h22 = (r * r - z[0] * r + z[0] * z[0]) / (r * r * z[2] * z[2]);
+
+    // Return row-major 3x3 matrix
+    [
+        h00, h01, h02,
+        h01, h11, h12,
+        h02, h12, h22,
+    ]
+}
+
 /// Compute the third-order correction η for exp cone Mehrotra predictor-corrector.
+///
+/// This implements Clarabel's analytical formula for third-order correction,
+/// which is more numerically stable than finite difference approaches.
+///
+/// Given:
+/// - z: current dual point (in dual cone interior)
+/// - ds_aff: affine primal step
+/// - dz_aff: affine dual step
+///
+/// Returns: η = third-order correction term to subtract from centering direction
+///
+/// The formula computes directional third derivatives of the barrier function.
+pub fn exp_third_order_correction_clarabel(
+    z: &[f64],
+    ds_aff: &[f64],
+    dz_aff: &[f64],
+) -> [f64; 3] {
+    // Check dual cone interior (z[0] < 0, z[2] > 0)
+    if z[0] >= -1e-14 || z[2] <= 1e-14 {
+        return [0.0, 0.0, 0.0];
+    }
+
+    // Compute dual Hessian at z
+    let h_dual = exp_compute_dual_hessian(z);
+
+    // Check for numerical issues in Hessian
+    if !h_dual.iter().all(|&x| x.is_finite()) {
+        return [0.0, 0.0, 0.0];
+    }
+
+    // Compute u = H^{-1} * ds_aff via matrix inverse (3x3, cheap)
+    let h_inv = invert_3x3(&h_dual);
+    let mut u = [0.0; 3];
+    apply_mat3(&h_inv, ds_aff, &mut u);
+
+    // v = dz_aff (the affine dual step)
+    let v = dz_aff;
+
+    // Auxiliary function: ψ = z[0]*log(-z[0]/z[2]) - z[0] + z[1]
+    // Gradient of ψ: gψ = [log(-z[0]/z[2]), 1, -z[0]/z[2]]
+    let log_arg = (-z[2] / z[0]).ln();  // Note: z[0] < 0, z[2] > 0 for dual interior
+    let g_psi = [log_arg, 1.0, -z[0] / z[2]];
+    let psi = z[0] * log_arg - z[0] + z[1];
+
+    // Check for numerical stability
+    if !psi.is_finite() || psi.abs() < 1e-14 {
+        return [0.0, 0.0, 0.0];
+    }
+
+    // Dot products with gradient of ψ
+    let dot_psi_u = u[0] * g_psi[0] + u[1] * g_psi[1] + u[2] * g_psi[2];
+    let dot_psi_v = v[0] * g_psi[0] + v[1] * g_psi[1] + v[2] * g_psi[2];
+
+    // Hψ has structure:
+    // Hψ = [1/z[0],    0,    -1/z[2];
+    //       0,         0,     0;
+    //      -1/z[2],    0,     z[0]/(z[2]*z[2])]
+    //
+    // We need: (dot(u, Hψ*v)) = u^T Hψ v
+    // Hψ*v = [v[0]/z[0] - v[2]/z[2], 0, -v[0]/z[2] + z[0]*v[2]/(z[2]*z[2])]
+    let h_psi_v = [
+        v[0] / z[0] - v[2] / z[2],
+        0.0,
+        -v[0] / z[2] + z[0] * v[2] / (z[2] * z[2]),
+    ];
+    let u_dot_h_psi_v = u[0] * h_psi_v[0] + u[1] * h_psi_v[1] + u[2] * h_psi_v[2];
+
+    let psi_cubed = psi * psi * psi;
+    let psi_squared = psi * psi;
+    let inv_psi = 1.0 / psi;
+    let inv_psi2 = 1.0 / psi_squared;
+
+    // Coefficient for the gradient term
+    let coef = (u_dot_h_psi_v * psi - 2.0 * dot_psi_u * dot_psi_v) / psi_cubed;
+
+    // Initialize η with scaled gradient
+    let mut eta = [coef * g_psi[0], coef * g_psi[1], coef * g_psi[2]];
+
+    // Add the component-wise corrections
+    // Component 0 (z[0] direction):
+    eta[0] += (inv_psi - 2.0 / z[0]) * u[0] * v[0] / (z[0] * z[0])
+            - u[2] * v[2] / (z[2] * z[2]) * inv_psi
+            + dot_psi_u * inv_psi2 * (v[0] / z[0] - v[2] / z[2])
+            + dot_psi_v * inv_psi2 * (u[0] / z[0] - u[2] / z[2]);
+
+    // Component 2 (z[2] direction):
+    eta[2] += 2.0 * (z[0] * inv_psi - 1.0) * u[2] * v[2] / (z[2] * z[2] * z[2])
+            - (u[2] * v[0] + u[0] * v[2]) / (z[2] * z[2]) * inv_psi
+            + dot_psi_u * inv_psi2 * (z[0] * v[2] / (z[2] * z[2]) - v[0] / z[2])
+            + dot_psi_v * inv_psi2 * (z[0] * u[2] / (z[2] * z[2]) - u[0] / z[2]);
+
+    // Scale by 0.5
+    eta[0] *= 0.5;
+    eta[1] *= 0.5;
+    eta[2] *= 0.5;
+
+    // Clamp to prevent extreme values
+    for e in &mut eta {
+        if !e.is_finite() || e.abs() > 1e6 {
+            return [0.0, 0.0, 0.0];
+        }
+    }
+
+    eta
+}
+
+/// Legacy third-order correction (kept for reference, uses primal approach).
 ///
 /// Given:
 /// - z: current dual point
@@ -405,12 +633,6 @@ fn exp_primal_third_contract(x: &[f64], p: &[f64], q: &[f64]) -> [f64; 3] {
 /// - x, h_star: outputs from dual map
 ///
 /// Returns: η = -0.5 * ∇³f^*(z)[dz_aff, u] where u = H_star^{-1} ds_aff
-///
-/// We compute this via the primal barrier using:
-/// - p = -H_star * dz_aff (in primal space)
-/// - q = H_star^{-1} * ds_aff (in primal space)
-/// - η_primal = ∇³f(x)[p, q]
-/// - η = -0.5 * H_star * η_primal
 pub fn exp_third_order_correction(
     _z: &[f64],
     ds_aff: &[f64],
@@ -443,6 +665,39 @@ pub fn exp_third_order_correction(
     eta[2] *= -0.5;
 
     eta
+}
+
+/// Compute the dual barrier gradient for the exponential cone dual (Clarabel's formula).
+///
+/// For the dual exponential cone K_exp* = {(u,v,w) : u < 0, w > 0, w ≥ -u*exp(v/u - 1)},
+/// the dual barrier is f*(z) = -log(-z[0]) - log(z[2]) - log(ψ)
+/// where ψ = -z[0]*log(-z[2]/z[0]) - z[0] + z[1].
+///
+/// This uses Clarabel's exact formula for the gradient.
+pub fn exp_dual_barrier_grad_clarabel(z: &[f64], grad_out: &mut [f64]) {
+    // Clarabel's formula uses different variables:
+    // l = log(-z[2]/z[0])
+    // r = ψ = -z[0]*l - z[0] + z[1]
+    let l = (-z[2] / z[0]).ln();
+    let r = -z[0] * l - z[0] + z[1];
+
+    // Check for numerical stability
+    if !r.is_finite() || r.abs() < 1e-14 {
+        grad_out[0] = 0.0;
+        grad_out[1] = 0.0;
+        grad_out[2] = 0.0;
+        return;
+    }
+
+    let c2 = 1.0 / r;  // 1/ψ
+
+    // Clarabel's gradient formula:
+    // grad[0] = l/ψ - 1/z[0]
+    // grad[1] = -1/ψ
+    // grad[2] = (z[0]/ψ - 1)/z[2]
+    grad_out[0] = c2 * l - 1.0 / z[0];
+    grad_out[1] = -c2;
+    grad_out[2] = (c2 * z[0] - 1.0) / z[2];
 }
 
 /// Compute the dual barrier gradient for the exponential cone dual.

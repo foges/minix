@@ -15,6 +15,6 @@ pub use traits::ConeKernel;
 pub use zero::ZeroCone;
 pub use nonneg::NonNegCone;
 pub use soc::SocCone;
-pub use exp::{ExpCone, exp_dual_barrier_grad_block, exp_dual_map_block, exp_central_ok, exp_third_order_correction};
+pub use exp::{ExpCone, exp_dual_barrier_grad_block, exp_dual_barrier_grad_clarabel, exp_dual_map_block, exp_central_ok, exp_third_order_correction, exp_third_order_correction_clarabel};
 pub use pow::PowCone;
 pub use psd::PsdCone;

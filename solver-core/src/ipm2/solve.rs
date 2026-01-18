@@ -627,6 +627,7 @@ pub fn solve_ipm2(
                 // Clarabel-style symmetric_initialization:
                 // Shift s and z to be strictly in the cone interior.
                 // Handle each cone type appropriately.
+                use std::any::Any;
                 let target_margin = 1.0;
                 let mut offset = 0;
                 for cone in &cones {
@@ -644,8 +645,12 @@ pub fn solve_ipm2(
                     let z_slice = &mut state.z[offset..offset + dim];
 
                     // Check if this is a NonNeg cone (barrier_degree == dim) or a
-                    // symmetric cone (SOC/PSD where barrier_degree < dim)
-                    let is_nonneg = cone.barrier_degree() == dim;
+                    // symmetric cone (SOC/PSD where barrier_degree < dim).
+                    // IMPORTANT: EXP/POW cones also have barrier_degree == dim but are NOT
+                    // NonNeg - they have different interior structure (e.g., z[0] < 0 for dual EXP).
+                    let is_exp_or_pow = (cone.as_ref() as &dyn Any).is::<ExpCone>()
+                        || (cone.as_ref() as &dyn Any).is::<PowCone>();
+                    let is_nonneg = cone.barrier_degree() == dim && !is_exp_or_pow;
 
                     if is_nonneg {
                         // NonNeg: shift all components so minimum >= target
@@ -665,9 +670,10 @@ pub fn solve_ipm2(
                             }
                         }
                     } else {
-                        // SOC/PSD: check if interior, if not reset to unit initialization
+                        // SOC/PSD/EXP/POW: check if interior, if not reset to unit initialization
                         // For SOC (t, x): interior means t > ||x||
                         // For PSD: interior means positive definite
+                        // For EXP/POW: use unit initialization point
                         if !cone.is_interior_primal(s_slice) {
                             let mut s_unit = vec![0.0; dim];
                             let mut z_unit = vec![0.0; dim];
@@ -682,6 +688,41 @@ pub fn solve_ipm2(
                             cone.unit_initialization(&mut s_unit, &mut z_unit);
                             for i in 0..dim {
                                 z_slice[i] = z_unit[i] * target_margin;
+                            }
+                        }
+
+                        // For EXP cones: fix s[i] = b[i] for zero rows in A
+                        // This is necessary because zero rows mean s[i] is constrained.
+                        if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                            use crate::ipm2::predcorr::detect_zero_rows_in_block;
+                            let zero_rows = detect_zero_rows_in_block(&scaled_prob.A, offset);
+                            if diag.is_debug() {
+                                eprintln!("EXP init: offset={} zero_rows={:?} b=[{:.4}, {:.4}, {:.4}] s_before=[{:.4}, {:.4}, {:.4}]",
+                                    offset, zero_rows,
+                                    scaled_prob.b[offset], scaled_prob.b[offset+1], scaled_prob.b[offset+2],
+                                    s_slice[0], s_slice[1], s_slice[2]);
+                            }
+                            for j in 0..3 {
+                                if zero_rows[j] {
+                                    s_slice[j] = scaled_prob.b[offset + j];
+                                }
+                            }
+                            // Re-check interior and push s[2] if needed to make it interior
+                            if !cone.is_interior_primal(s_slice) {
+                                // For EXP cone with s = [x, y, z]: interior needs y > 0, z > y*exp(x/y)
+                                // If y = s[1] > 0 is fixed, push z = s[2] to make it interior
+                                let x_val = s_slice[0];
+                                let y_val = s_slice[1];
+                                if y_val > 0.0 {
+                                    let min_z = y_val * (x_val / y_val).exp() + 0.1; // Add margin
+                                    if s_slice[2] < min_z {
+                                        s_slice[2] = min_z;
+                                    }
+                                }
+                            }
+                            if diag.is_debug() {
+                                eprintln!("EXP init: s_after=[{:.4}, {:.4}, {:.4}]",
+                                    s_slice[0], s_slice[1], s_slice[2]);
                             }
                         }
                     }
@@ -1306,6 +1347,41 @@ pub fn solve_ipm2(
                     // Use force_to_interior to unconditionally reset s,z even if technically interior
                     // This helps when the step direction points out of the cone
                     state.force_to_interior(&cones, 1e-1); // Use larger margin for recovery
+
+                    // Restore zero row constraints for EXP cones: s[i] = b[i] * tau
+                    // force_to_interior doesn't know about problem data, so we fix here.
+                    // For EXP cones, we also need to ensure the point is feasible after restoring.
+                    // K_exp = {(x,y,z) : z >= y*exp(x/y), y > 0}
+                    // If s[1] is constrained to y0, we set x=0 and z = y0*(1 + margin) to be feasible.
+                    {
+                        use crate::ipm2::predcorr::detect_zero_rows_in_block;
+                        use std::any::Any;
+                        let mut offset = 0;
+                        for cone in &cones {
+                            let dim = cone.dim();
+                            if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                                let zero_rows = detect_zero_rows_in_block(&scaled_prob.A, offset);
+                                // Check if s[1] (the y component) is constrained
+                                if zero_rows[1] {
+                                    let y_val = scaled_prob.b[offset + 1] * state.tau;
+                                    // Set to a feasible interior point: (0, y_val, y_val * e)
+                                    // where e = exp(0) = 1, plus some margin
+                                    state.s[offset + 0] = 0.0;  // x = 0
+                                    state.s[offset + 1] = y_val;  // y constrained
+                                    state.s[offset + 2] = y_val * 2.0;  // z = 2*y gives z > y*exp(0) = y
+                                } else {
+                                    // Restore other zero row values
+                                    for j in 0..3 {
+                                        if zero_rows[j] {
+                                            state.s[offset + j] = scaled_prob.b[offset + j] * state.tau;
+                                        }
+                                    }
+                                }
+                            }
+                            offset += dim;
+                        }
+                    }
+
                     mu = compute_mu(&state, barrier_degree);
                 } else if diag.enabled() {
                     eprintln!(
@@ -1328,6 +1404,34 @@ pub fn solve_ipm2(
             }
 
             state.push_to_interior(&cones, 1e-2);
+
+            // Restore zero row constraints for EXP cones after push_to_interior
+            // Same logic as above: if s[1] is constrained, set to feasible interior point
+            {
+                use crate::ipm2::predcorr::detect_zero_rows_in_block;
+                use std::any::Any;
+                let mut offset = 0;
+                for cone in &cones {
+                    let dim = cone.dim();
+                    if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                        let zero_rows = detect_zero_rows_in_block(&scaled_prob.A, offset);
+                        if zero_rows[1] {
+                            let y_val = scaled_prob.b[offset + 1] * state.tau;
+                            state.s[offset + 0] = 0.0;
+                            state.s[offset + 1] = y_val;
+                            state.s[offset + 2] = y_val * 2.0;
+                        } else {
+                            for j in 0..3 {
+                                if zero_rows[j] {
+                                    state.s[offset + j] = scaled_prob.b[offset + j] * state.tau;
+                                }
+                            }
+                        }
+                    }
+                    offset += dim;
+                }
+            }
+
             mu = compute_mu(&state, barrier_degree);
         }
 
@@ -2564,8 +2668,10 @@ fn build_cones(specs: &[ConeSpec]) -> Result<Vec<Box<dyn ConeKernel>>, Box<dyn s
 /// For NonNeg: element-wise minimum
 /// For SOC: minimum eigenvalue t - ||x||
 /// For PSD: minimum eigenvalue
+/// For EXP/POW: skip (their interior structure is different - z[0] < 0 for dual EXP)
 /// Zero cones (barrier_degree=0) are skipped since they don't require interior.
 fn compute_barrier_min(state: &HsdeState, cones: &[Box<dyn ConeKernel>]) -> (f64, f64) {
+    use std::any::Any;
     let mut min_s = f64::INFINITY;
     let mut min_z = f64::INFINITY;
     let mut offset = 0;
@@ -2575,6 +2681,16 @@ fn compute_barrier_min(state: &HsdeState, cones: &[Box<dyn ConeKernel>]) -> (f64
         if degree > 0 {
             let s_slice = &state.s[offset..offset + dim];
             let z_slice = &state.z[offset..offset + dim];
+
+            // Check if EXP/POW cone - these have barrier_degree == dim but are NOT NonNeg.
+            // Their interior structure is different (z[0] < 0 for dual EXP), so skip them
+            // for margin computation.
+            let is_exp_or_pow = (cone.as_ref() as &dyn Any).is::<ExpCone>()
+                || (cone.as_ref() as &dyn Any).is::<PowCone>();
+            if is_exp_or_pow {
+                offset += dim;
+                continue;
+            }
 
             // Check if NonNeg (barrier_degree == dim) vs symmetric cone
             let is_nonneg = degree == dim;
@@ -2954,7 +3070,10 @@ fn log_qforplan_diagnostics(
     let z_bar: Vec<f64> = state.z.iter().map(|zi| zi * inv_tau).collect();
 
     // Compute primal residual r_p = A*x + s - b
-    ws.r_p.copy_from_slice(&s_bar);
+    ws.r_p.fill(0.0);
+    for (i, &val) in s_bar.iter().enumerate() {
+        ws.r_p[i] = val;
+    }
     for i in 0..prob.num_constraints() {
         ws.r_p[i] -= prob.b[i];
     }
@@ -2992,6 +3111,14 @@ fn log_qforplan_diagnostics(
     let atz_result = compute_atz_with_kahan(&prob.A, &z_bar);
 
     // Compute dual residual r_d = P*x + A^T*z + q
+    // Guard against size mismatch (can happen if ws is sized for original problem
+    // but prob is the presolved problem)
+    let n_prob = prob.num_vars();
+    let n_ws = ws.r_d.len();
+    if n_prob != n_ws {
+        eprintln!("QFORPLAN DIAGNOSTICS skipped: size mismatch n_prob={} n_ws={}", n_prob, n_ws);
+        return;
+    }
     ws.r_d.copy_from_slice(&ws.p_x[..prob.num_vars()]);
     for i in 0..prob.num_vars() {
         ws.r_d[i] += atz_result.atz[i] + prob.q[i];

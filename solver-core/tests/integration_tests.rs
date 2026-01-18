@@ -766,26 +766,28 @@ fn test_qp_with_equality_and_inequality() {
 #[test]
 fn test_exp_cone_simple() {
     // Simple exp cone test:
-    // K_exp = {(x, y, z) : z * exp(y/z) >= x, z > 0}
+    // MINIX K_exp = {(x, y, z) : z >= y*exp(x/y), y > 0, z > 0}
     //
-    // min y
-    // s.t. (s1, s2, s3) in K_exp
-    //      s1 = 1, s2 = y, s3 = 1
+    // Problem: min z s.t. (1, 1, z) in K_exp
+    // This means z >= 1*exp(1/1) = e ≈ 2.718
+    // Optimal: z = e ≈ 2.71828
     //
-    // So we need 1 * exp(y/1) >= 1, i.e., exp(y) >= 1, so y >= 0
-    // Optimal: y = 0, obj = 0
-
-    // In standard form: A*x + s = b, s in K
-    // Variables: y
-    // s = b - A*y = [1, 0, 1] - [0, 1, 0]*y = [1, -y, 1]
-    // For s in K_exp: 1 * exp(-y/1) >= 1, so exp(-y) >= 1, -y >= 0, y <= 0
-    // min y s.t. y <= 0 means optimal y = 0
+    // In standard form: A*var + s = b, s in K
+    // Variable: z (1 var)
+    // Slack: s = (s0, s1, s2) in K_exp
+    // Constraint: s = [1, 1, z] (x and y fixed at 1)
+    //
+    // A = [[0], [0], [-1]], b = [1, 1, 0]
+    // s = b - A*z = [1, 1, 0] - [0, 0, -z] = [1, 1, z]
+    // Objective: min z, so q = [1]
 
     let prob = ProblemData {
         P: None,
-        q: vec![1.0],  // min y
-        A: sparse::from_triplets(3, 1, vec![(1, 0, 1.0)]),  // A = [0; 1; 0]
-        b: vec![1.0, 0.0, 1.0],
+        q: vec![1.0],  // min z
+        A: sparse::from_triplets(3, 1, vec![
+            (2, 0, -1.0),  // s[2] = z
+        ]),
+        b: vec![1.0, 1.0, 0.0],
         cones: vec![ConeSpec::Exp { count: 1 }],
         var_bounds: None,
         integrality: None,

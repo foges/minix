@@ -9,7 +9,7 @@
 
 use std::any::Any;
 
-use crate::cones::{ConeKernel, NonNegCone, SocCone, ExpCone, PowCone, PsdCone, exp_dual_map_block, exp_central_ok, exp_third_order_correction};
+use crate::cones::{ConeKernel, NonNegCone, SocCone, ExpCone, PowCone, PsdCone, exp_dual_map_block, exp_central_ok, exp_third_order_correction, exp_third_order_correction_clarabel, exp_dual_barrier_grad_clarabel};
 use crate::cones::psd::{mat_to_svec, svec_to_mat};
 use crate::ipm::hsde::{compute_mu, HsdeResiduals, HsdeState};
 use crate::ipm2::{IpmWorkspace, PerfSection, PerfTimers};
@@ -221,6 +221,69 @@ fn nonneg_step_diagnostics(
         alpha_lim_idx,
         alpha_lim_side,
     })
+}
+
+/// Check which rows of A are zero (fully constrained s[i] = b[i]).
+/// For a Dense3x3 block at `block_offset`, returns a 3-element array indicating
+/// which rows of A are zero.
+pub fn detect_zero_rows_in_block(
+    a: &sprs::CsMat<f64>,
+    block_offset: usize,
+) -> [bool; 3] {
+    let n = a.cols();
+    let m = a.rows();
+    let mut is_zero_row = [true; 3];
+
+    if trace_enabled() {
+        eprintln!("detect_zero_rows_in_block: A is {}x{}, block_offset={}", m, n, block_offset);
+        for col in 0..n {
+            if let Some(col_view) = a.outer_view(col) {
+                for (r, &v) in col_view.iter() {
+                    eprintln!("  A[{},{}] = {}", r, col, v);
+                }
+            }
+        }
+    }
+
+    for j in 0..3 {
+        let row = block_offset + j;
+        if row >= m {
+            continue;
+        }
+        for col in 0..n {
+            if let Some(col_view) = a.outer_view(col) {
+                for (r, _) in col_view.iter() {
+                    if r == row {
+                        is_zero_row[j] = false;
+                        break;
+                    }
+                }
+            }
+            if !is_zero_row[j] {
+                break;
+            }
+        }
+    }
+
+    is_zero_row
+}
+
+/// Modify the H matrix (3x3 Dense) to decouple zero rows of A.
+/// For zero rows, set H[i,j] = 0 for j != i, keeping only the diagonal.
+/// This ensures ds[i] = -d_s_comb[i] - H[i,i]*dz[i] for zero rows,
+/// allowing the KKT system to correctly satisfy ds[i] = rhs_z[i].
+fn decouple_zero_rows_in_h(h: &mut [f64; 9], zero_rows: [bool; 3]) {
+    // H is stored row-major: H[i,j] = h[i*3 + j]
+    for i in 0..3 {
+        if zero_rows[i] {
+            for j in 0..3 {
+                if j != i {
+                    h[i * 3 + j] = 0.0;  // H[i,j] = 0 for j != i
+                    h[j * 3 + i] = 0.0;  // H[j,i] = 0 for j != i (keep symmetric)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1156,6 +1219,27 @@ pub fn predictor_corrector_step_in_place(
                 for i in 0..dim {
                     ds_slice[i] = -state.s[offset + i] - ds_slice[i];
                 }
+
+                // For EXP cones: detect zero rows in A and set ds_aff[i] = b[i] * dtau_aff
+                // This is necessary because in HSDE the constraint is s[i] = b[i] * tau.
+                // When tau changes, s[i] must change proportionally to maintain the constraint.
+                if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                    let zero_rows = detect_zero_rows_in_block(&prob.A, offset);
+                    if diagnostics_enabled() {
+                        eprintln!("predcorr affine: offset={} zero_rows={:?} dtau={:.4e} ds_before=[{:.4}, {:.4}, {:.4}]",
+                            offset, zero_rows, dtau_aff, ds_slice[0], ds_slice[1], ds_slice[2]);
+                    }
+                    for j in 0..3 {
+                        if zero_rows[j] {
+                            // s[i] = b[i] * tau, so ds[i] = b[i] * dtau to maintain constraint
+                            ds_slice[j] = prob.b[offset + j] * dtau_aff;
+                        }
+                    }
+                    if diagnostics_enabled() {
+                        eprintln!("predcorr affine: ds_after=[{:.4}, {:.4}, {:.4}]",
+                            ds_slice[0], ds_slice[1], ds_slice[2]);
+                    }
+                }
             }
         }
 
@@ -1183,12 +1267,24 @@ pub fn predictor_corrector_step_in_place(
         cones,
     );
     let sigma_cap = settings.sigma_max.min(0.999);
-    let sigma = compute_centering_parameter(
+    let mut sigma = compute_centering_parameter(
         alpha_aff,
         mu,
         mu_aff,
         barrier_degree,
     ).min(sigma_cap);
+
+    // For EXP/POW cones: cap sigma to reduce centering.
+    // The optimal for nonsymmetric cones is often ON the boundary, so heavy
+    // centering can push away from the optimal. Use a moderate cap.
+    let has_nonsym_cones = cones.iter().any(|c| {
+        (c.as_ref() as &dyn Any).is::<ExpCone>() ||
+        (c.as_ref() as &dyn Any).is::<PowCone>()
+    });
+    if has_nonsym_cones {
+        // Cap sigma at 0.5 to prevent excessive centering
+        sigma = sigma.min(0.5);
+    }
 
     // Mehrotra correction dampening for first iteration (Clarabel's approach).
     // On iter=0, scale the Mehrotra correction by alpha_aff to accommodate
@@ -1429,6 +1525,13 @@ pub fn predictor_corrector_step_in_place(
                         // Complementarity is: s + μ ∇f^*(z) ≈ 0
                         // So the corrector shift is: d_s = s + σ μ ∇f^*(z)
 
+                        // Detect zero rows for this block (EXP cone)
+                        let zero_rows = if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                            detect_zero_rows_in_block(&prob.A, offset)
+                        } else {
+                            [false, false, false]
+                        };
+
                         // Process each 3D block
                         for block in 0..(dim / 3) {
                             let block_offset = offset + 3 * block;
@@ -1443,12 +1546,10 @@ pub fn predictor_corrector_step_in_place(
                                 state.z[block_offset + 2],
                             ];
 
-                            // Compute ∇f^*(z) via dual map for this exp cone block
-                            // The dual map solves ∇f(x) + z = 0, then ∇f^*(z) = -x
-                            let mut x = [0.0; 3];
-                            let mut h_star = [0.0; 9];
-                            exp_dual_map_block(&z_block, &mut x, &mut h_star);
-                            let grad_fstar = [-x[0], -x[1], -x[2]];
+                            // Compute ∇f^*(z) directly using Clarabel's formula
+                            // This is the gradient of the dual barrier at the dual point z
+                            let mut grad_fstar = [0.0; 3];
+                            exp_dual_barrier_grad_clarabel(&z_block, &mut grad_fstar);
 
                             // Extract affine directions for this block
                             let ds_aff_block = [
@@ -1462,21 +1563,20 @@ pub fn predictor_corrector_step_in_place(
                                 ws.dz_aff[block_offset + 2],
                             ];
 
-                            // Compute third-order correction η
-                            let eta = exp_third_order_correction(
-                                &z_block,
-                                &ds_aff_block,
-                                &dz_aff_block,
-                                &x,
-                                &h_star,
-                            );
+                            // Third-order correction for nonsymmetric cones
+                            // NOTE: Currently disabled - convergence issues still need investigation
+                            let _ = (&ds_aff_block, &dz_aff_block); // suppress warnings
+                            let eta = [0.0, 0.0, 0.0];
+                            // let eta = exp_third_order_correction_clarabel(&z_block, &ds_aff_block, &dz_aff_block);
 
                             // Barrier-based corrector with third-order correction:
-                            // d_s = s + σ μ ∇f^*(z) + η
-                            // Apply Mehrotra dampening to η (scale by alpha_aff on iter 1)
+                            // d_s_comb = s + σμ ∇f^*(z) - η
+                            // Note: eta is not scaled by alpha_aff (it already accounts for the step)
+                            // Use standard formula for all rows; the post-solve ds forcing
+                            // will handle zero rows separately
                             for j in 0..3 {
                                 let i = block_offset + j;
-                                ws.d_s_comb[i] = s_block[j] + sigma * target_mu * grad_fstar[j] + mehrotra_scale * eta[j];
+                                ws.d_s_comb[i] = s_block[j] + target_mu * grad_fstar[j] - eta[j];
                             }
 
                             // Diagnostic logging at trace level (MINIX_VERBOSE=4)
@@ -1486,6 +1586,7 @@ pub fn predictor_corrector_step_in_place(
                                 eprintln!("  z = {:?}", z_block);
                                 eprintln!("  ∇f^*(z) = {:?}", grad_fstar);
                                 eprintln!("  sigma = {:.3e}, mu = {:.3e}", sigma, target_mu);
+                                eprintln!("  zero_rows = {:?}", zero_rows);
                                 eprintln!("  d_s_comb = [{:.3e}, {:.3e}, {:.3e}]",
                                     ws.d_s_comb[block_offset],
                                     ws.d_s_comb[block_offset + 1],
@@ -1580,6 +1681,27 @@ pub fn predictor_corrector_step_in_place(
                         ws.scaling[cone_idx].apply(dz_slice, ds_slice);
                         for i in 0..dim {
                             ds_slice[i] = -ws.d_s_comb[offset + i] - ds_slice[i];
+                        }
+
+                        // For EXP cones: detect zero rows in A and set ds[i] = b[i] * dtau
+                        // This is necessary because in HSDE the constraint is s[i] = b[i] * tau.
+                        // When tau changes, s[i] must change proportionally to maintain the constraint.
+                        if (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                            let zero_rows = detect_zero_rows_in_block(&prob.A, offset);
+                            if diagnostics_enabled() {
+                                eprintln!("predcorr corrector: offset={} zero_rows={:?} dtau={:.4e} ds_before=[{:.4}, {:.4}, {:.4}]",
+                                    offset, zero_rows, dtau, ds_slice[0], ds_slice[1], ds_slice[2]);
+                            }
+                            for j in 0..3 {
+                                if zero_rows[j] {
+                                    // s[i] = b[i] * tau, so ds[i] = b[i] * dtau to maintain constraint
+                                    ds_slice[j] = prob.b[offset + j] * dtau;
+                                }
+                            }
+                            if diagnostics_enabled() {
+                                eprintln!("predcorr corrector: ds_after=[{:.4}, {:.4}, {:.4}]",
+                                    ds_slice[0], ds_slice[1], ds_slice[2]);
+                            }
                         }
                     }
                 }
@@ -1894,9 +2016,20 @@ pub fn predictor_corrector_step_in_place(
                     state.z[i] += alpha * ws.dz[i];
                 }
             } else {
+                // For EXP cones: debug print ds values and verify they're fixed
+                if diagnostics_enabled() && (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                    eprintln!("state update EXP: offset={} alpha={:.4} ds=[{:.4}, {:.4}, {:.4}] s_before=[{:.4}, {:.4}, {:.4}]",
+                        offset, alpha, ws.ds[offset], ws.ds[offset+1], ws.ds[offset+2],
+                        state.s[offset], state.s[offset+1], state.s[offset+2]);
+                }
                 for i in offset..offset + dim {
                     state.s[i] += alpha * ws.ds[i];
                     state.z[i] += alpha * ws.dz[i];
+                }
+                // For EXP cones: debug print after update
+                if diagnostics_enabled() && (cone.as_ref() as &dyn Any).is::<ExpCone>() && dim == 3 {
+                    eprintln!("state update EXP: s_after=[{:.4}, {:.4}, {:.4}]",
+                        state.s[offset], state.s[offset+1], state.s[offset+2]);
                 }
             }
         }
@@ -1970,6 +2103,18 @@ fn compute_step_size(
 
         let alpha_p = cone.step_to_boundary_primal(s_slice, ds_slice);
         let alpha_d = cone.step_to_boundary_dual(z_slice, dz_slice);
+
+        // Debug logging for EXP cones when step is small
+        if diagnostics_enabled() && dim == 3 && (alpha_p < 0.1 || alpha_d < 0.1) {
+            eprintln!(
+                "  EXP step: alpha_p={:.3e} alpha_d={:.3e} s=[{:.3e},{:.3e},{:.3e}] z=[{:.3e},{:.3e},{:.3e}] ds=[{:.3e},{:.3e},{:.3e}] dz=[{:.3e},{:.3e},{:.3e}]",
+                alpha_p, alpha_d,
+                s_slice[0], s_slice[1], s_slice[2],
+                z_slice[0], z_slice[1], z_slice[2],
+                ds_slice[0], ds_slice[1], ds_slice[2],
+                dz_slice[0], dz_slice[1], dz_slice[2],
+            );
+        }
 
         if alpha_p.is_finite() && alpha_p < alpha_p_min {
             alpha_p_min = alpha_p.max(0.0);
